@@ -1,6 +1,15 @@
 using LatticeBoltzmann
 using Test
+using StaticArrays
 
 @testset "LatticeBoltzmann.jl" begin
-    # Write your tests here.
+	w = WEIGHTS[:d2q9]
+
+	@test w[1] == 4//9
+	@test w[6] == 1//36
+
+	v = VELOCITIES[:d2q9]
+
+	@test v[1] == SVector( 0,  0,  0)
+	@test v[2][1] == 1
 end

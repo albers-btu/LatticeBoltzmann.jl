@@ -1,5 +1,9 @@
 module LatticeBoltzmann
 
-# Write your package code here.
+include("weights.jl")
+export WEIGHTS
+
+include("velocities.jl")
+export VELOCITIES
 
 end
