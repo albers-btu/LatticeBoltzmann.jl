@@ -1,19 +1,18 @@
-using LatticeBoltzmann
-using Test
-using StaticArrays
+using LatticeBoltzmann: run
+using Test, StaticArrays
 
 @testset "LatticeBoltzmann.jl" begin
-	w = WEIGHTS[:d2q9]
-
-	@test w[1] == 4//9
-	@test w[6] == 1//36
-
-	v = VELOCITIES[:d2q9]
-
-	@test v[1] == SVector( 0,  0,  0)
-	@test v[2][1] == 1
-
+	include("test_weights.jl")
+	include("test_velocities.jl")
 	include("test_kernel.jl")
-	include("test_domain.jl")
 	include("test_memory.jl")
+	include("test_model.jl")
+
+	model = Model(256, 256, 256, 1.0)
+
+	mlups::UInt = 0
+	for i in 1:1 # 1000
+		run(model, 10)
+		mlups = max(mlups, 0)
+	end
 end
