@@ -14,5 +14,6 @@ using Test, StaticArrays
 	for i in 1:1 # 1000
 		run(model, 10)
 		mlups = max(mlups, 0)
+		@info "$mlups MLUPS"
 	end
 end

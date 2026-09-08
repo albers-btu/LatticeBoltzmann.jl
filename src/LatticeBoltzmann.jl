@@ -7,14 +7,17 @@ include("velocities.jl")
 export VELOCITIES
 
 include("memory.jl")
-export Memory
+export Memory, MemoryContainer
+export attach
 
 include("domain.jl")
 export Domain
+export ρ, u
+export get_N
 
 include("model.jl")
 export Model
+export get_D
 export run
-export get_N, get_D
 
 end

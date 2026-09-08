@@ -1,4 +1,4 @@
-struct Model
+struct Model{Aρ<:AbstractArray{Float32}, Au<:AbstractArray{Float32}}
     Nx::UInt # lattice dimension x
     Ny::UInt # lattice dimension y
     Nz::UInt # lattice dimension z
@@ -7,14 +7,16 @@ struct Model
     Dy::UInt # lattice domain y
     Dz::UInt # lattice domain z
 
-    domains::Vector{Domain}
+    domains::Vector{Domain{Vector{Float32}, Matrix{Float32}}}
+
+    ρ::MemoryContainer{Float32, Aρ}
+    u::MemoryContainer{Float32, Au}
 end
 
 function Model(Nx, Ny, Nz, ν)
     Dx = UInt(1)
     Dy = UInt(1)
     Dz = UInt(1)
-
     D = UInt(Dx*Dy*Dz)
 
     if Nx % Dx != 0 || Ny % Dy != 0 || Nz % Dz != 0
@@ -28,57 +30,52 @@ function Model(Nx, Ny, Nz, ν)
     Hx::UInt = UInt(Dx > 1) # halo offset x
     Hy::UInt = UInt(Dy > 1) # halo offset y
     Hz::UInt = UInt(Dz > 1) # halo offset z
-
-    domains = Vector{Domain}(undef, D)
     
     ν = Float32(ν)
-    τ = 3*ν / 1/2
+    τ = 3*ν + 1/2
 
+    domains = Vector{Domain{Vector{Float32}, Matrix{Float32}}}(undef, D)
     for d in 1:D
-        x = UInt(d % (Dx * Dy)) % Dx
-        y = UInt(d % (Dx * Dy)) ÷ Dx
-        z = UInt(d % (Dx * Dy))
+        d0 = d - 1
+        x = UInt(d0 % (Dx * Dy)) % Dx
+        y = UInt(d0 % (Dx * Dy)) ÷ Dx
+        z = UInt(d0 ÷ (Dx * Dy))
 
-        nx = UInt(Nx ÷ Dx + UInt(2) * Hx)
-        ny = UInt(Ny ÷ Dy + UInt(2) * Hy)
-        nz = UInt(Nz ÷ Dz + UInt(2) * Hz)
+        nx = Nx ÷ Dx + 2 * Hx
+        ny = Ny ÷ Dy + 2 * Hy
+        nz = Nz ÷ Dz + 2 * Hz
 
         Ox = Int(x * Nx ÷ Dx) - Int(Hx)
         Oy = Int(y * Ny ÷ Dy) - Int(Hy)
         Oz = Int(z * Nz ÷ Dz) - Int(Hz)
 
-        fx = 0.0f0
-        fy = 0.0f0
-        fz = 0.0f0
-
-        σ = Float32(0.0f0)
-        α = Float32(1.0f0)
-        β = Float32(1.0f0)
-
         domains[d] = Domain(
             nx, ny, nz,
             Ox, Oy, Oz,
-            ν, 
-            fx, fy, fz,
+            ν,
+            0.0f0, 0.0f0, 0.0f0
         )
     end
+
+    buffers_ρ = [ρ(domains[d]) for d in 1:D]
+    buffers_u = [u(domains[d]) for d in 1:D]
+
+    ρc = attach(buffers_ρ, Nx, Ny, Nz, Dx, Dy, Dz, "rho")
+    uc = attach(buffers_u, Nx, Ny, Nz, Dx, Dy, Dz, "u")
 
     return Model(
         Nx, Ny, Nz,
         Dx, Dy, Dz,
-        domains
+        domains,
+        ρc, uc
     )
 end
 
-# complete model computation size
-function get_N(model::Model)
-    model.Nx * model.Ny * model.Nz
-end
+get_N(model::Model)= Int(model.Nx) * Int(model.Ny) * Int(model.Nz)
+get_D(model::Model) = Int(model.Dx) * Int(model.Dy) * Int(model.Dz)
 
-# size of domains inside model
-function get_D(model::Model)
-    model.Dx * model.Dy * model.Dz
-end
+ρ(model::Model) = model.ρ
+u(model::Model) = model.u
 
 function initialize(model::Model)
     @warn "todo"
