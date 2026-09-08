@@ -12,4 +12,6 @@ using StaticArrays
 
 	@test v[1] == SVector( 0,  0,  0)
 	@test v[2][1] == 1
+
+	include("test_kernel.jl")
 end
