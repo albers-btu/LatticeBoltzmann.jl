@@ -14,4 +14,6 @@ using StaticArrays
 	@test v[2][1] == 1
 
 	include("test_kernel.jl")
+	include("test_domain.jl")
+	include("test_memory.jl")
 end

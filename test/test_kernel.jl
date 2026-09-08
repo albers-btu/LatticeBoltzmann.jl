@@ -3,6 +3,7 @@ using Test
 using BenchmarkTools
 using CUDA
 
+const RUN_BENCHMARKS = get(ENV, "RUN_BENCHMARKS", "false") == "true"
 const n::Int = 1_000_000
 
 @kernel function vector_add!(a, b, c)
@@ -24,12 +25,13 @@ end
     event = vector_add!(backend, n)(a, b, c; ndrange=n)
     wait_if_needed(event)
 
-    trial = @benchmark begin
-        event = vector_add!($backend, $n)($a, $b, $c; ndrange=$n)
-        wait_if_needed(event)
+    if RUN_BENCHMARKS
+        trial = @benchmark begin
+            event = vector_add!($backend, $n)($a, $b, $c; ndrange=$n)
+            wait_if_needed(event)
+        end
+        display(trial)
     end
-
-    display(trial)
 
     @test c == a .+ b
 end
@@ -46,12 +48,14 @@ end
         wait_if_needed(event)
         CUDA.synchronize()
 
-        trial = @benchmark begin
-            event = vector_add!($backend, 256)($a, $b, $c; ndrange=$n)
-            wait_if_needed(event)
-            CUDA.synchronize()
+        if RUN_BENCHMARKS
+            trial = @benchmark begin
+                event = vector_add!($backend, 256)($a, $b, $c; ndrange=$n)
+                wait_if_needed(event)
+                CUDA.synchronize()
+            end
+            display(trial)
         end
-        display(trial)
 
         @test Array(c) == Array(a) .+ Array(b)
     else
