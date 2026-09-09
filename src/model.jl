@@ -41,7 +41,6 @@ function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = def
 
     w = weights(scheme)
     c = velocities(scheme)
-    Q = length(w)
 
     cached_collide = stream_collide_kernel!(backend, workgroup)
     cached_initialize = initialize_kernel!(backend, workgroup)
@@ -153,7 +152,7 @@ function initialize!(model::Model)
             domain.fi.data,
             domain.flags.data,
             model.weights, model.velocities,
-            N;
+            Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
             ndrange = N
         )
     end
@@ -165,21 +164,18 @@ end
 
 function step!(model::Model)
     kernel = model.cached_collide!
-    for (d, domain) in enumerate(model.domains)
+    for domain in model.domains
         N = get_N(domain)
         kernel(
             domain.flags.data,
             domain.fi.data,
-            domain.fo.data,
             model.weights, model.velocities,
             1.0f0 / τ(domain),
-            Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+            Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
+            isodd(domain.t);
             ndrange = N
         )
-        domain.fi, domain.fo = domain.fo, domain.fi
-        model.fi.buffers[d] = domain.fi
         increment_time_step!(domain, 1)
     end
-
     KernelAbstractions.synchronize(model.backend)
 end
