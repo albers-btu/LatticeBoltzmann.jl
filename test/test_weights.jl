@@ -1,7 +1,7 @@
 using Test, LatticeBoltzmann
 
 @testset "DdQq weights" begin
-	w = WEIGHTS[:d2q9]
+	w = WEIGHTS[:D2Q9]
 
 	@test w[1] == 4//9
 	@test w[6] == 1//36

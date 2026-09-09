@@ -48,7 +48,7 @@ function _local_index(c::MemoryContainer, n::Integer)
     Nx, Ny, Nz = Int(c.Nx), Int(c.Ny), Int(c.Nz)
     Dx, Dy, Dz = Int(c.Dx), Int(c.Dy), Int(c.Dz)
     NxNy = Nx * Ny
-    t = n0 % NyNx
+    t = n0 % NxNy
     x = t % Nx
     y = t ÷ Nx
     z = n0 ÷ NxNy

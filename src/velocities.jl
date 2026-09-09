@@ -1,7 +1,7 @@
 using StaticArrays
 
 const VELOCITIES = Dict(
-    :d2q9 => SVector{3, Int}[
+    :D2Q9 => SVector{3, Int}[
         SVector( 0,  0,  0),
         SVector( 1,  0,  0),
         SVector(-1,  0,  0),
@@ -12,7 +12,7 @@ const VELOCITIES = Dict(
         SVector( 1, -1,  0),
         SVector(-1,  1,  0)
     ],
-    :d3q7 => SVector{3, Int}[
+    :D3Q7 => SVector{3, Int}[
         SVector( 0,  0,  0),
         SVector( 1,  0,  0),
         SVector(-1,  0,  0),
@@ -21,7 +21,7 @@ const VELOCITIES = Dict(
         SVector( 0,  0,  1),
         SVector( 0,  0, -1)
     ],
-    :d3q19 => SVector{3, Int}[
+    :D3Q19 => SVector{3, Int}[
         SVector( 0,  0,  0 ),
         SVector( 1,  0,  0 ),
         SVector(-1,  0,  0 ),
@@ -42,7 +42,7 @@ const VELOCITIES = Dict(
         SVector( 0,  1, -1 ),
         SVector( 0, -1,  1 )
     ],
-    :d3q27 => SVector{3, Int}[
+    :D3Q27 => SVector{3, Int}[
         SVector( 0,  0,  0 ),
         SVector( 1,  0,  0 ),
         SVector(-1,  0,  0 ),
@@ -72,3 +72,5 @@ const VELOCITIES = Dict(
         SVector( 1, -1, -1 )
     ]
 )
+
+velocities(scheme::Symbol) = Tuple(VELOCITIES[scheme])

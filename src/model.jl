@@ -1,4 +1,16 @@
-struct Model{Aρ<:AbstractArray{Float32}, Au<:AbstractArray{Float32}}
+using Printf
+
+mutable struct Model{
+    Aρ<:AbstractArray{Float32},
+    Au<:AbstractArray{Float32},
+    Afi<:AbstractArray{Float32},
+    Af<:AbstractArray{UInt8}
+}
+    scheme::Symbol
+
+    backend::KernelAbstractions.Backend
+    workgroup::Int
+
     Nx::UInt # lattice dimension x
     Ny::UInt # lattice dimension y
     Nz::UInt # lattice dimension z
@@ -7,13 +19,22 @@ struct Model{Aρ<:AbstractArray{Float32}, Au<:AbstractArray{Float32}}
     Dy::UInt # lattice domain y
     Dz::UInt # lattice domain z
 
-    domains::Vector{Domain{Vector{Float32}, Matrix{Float32}}}
+    domains::Vector{Domain{Aρ, Au, Afi, Af}}
 
     ρ::MemoryContainer{Float32, Aρ}
     u::MemoryContainer{Float32, Au}
+    fi::MemoryContainer{Float32, Afi}
+    flags::MemoryContainer{UInt8, Af}
+
+    weights::Tuple{Vararg{Float32}}
+    velocities::Tuple{Vararg{SVector{3, Int}}}
+
+    initialized::Bool
 end
 
-function Model(Nx, Ny, Nz, ν)
+function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = default_workgroup(backend))
+    backend isa CUDABackend && !CUDA.functional() && throw(ArgumentError("CUDABackend requested but CUDA is not functional"))
+
     Dx = UInt(1)
     Dy = UInt(1)
     Dz = UInt(1)
@@ -32,10 +53,8 @@ function Model(Nx, Ny, Nz, ν)
     Hz::UInt = UInt(Dz > 1) # halo offset z
     
     ν = Float32(ν)
-    τ = 3*ν + 1/2
 
-    domains = Vector{Domain{Vector{Float32}, Matrix{Float32}}}(undef, D)
-    for d in 1:D
+    domains = map(1:Int(D)) do d
         d0 = d - 1
         x = UInt(d0 % (Dx * Dy)) % Dx
         y = UInt(d0 % (Dx * Dy)) ÷ Dx
@@ -49,41 +68,106 @@ function Model(Nx, Ny, Nz, ν)
         Oy = Int(y * Ny ÷ Dy) - Int(Hy)
         Oz = Int(z * Nz ÷ Dz) - Int(Hz)
 
-        domains[d] = Domain(
+        Domain(
             nx, ny, nz,
             Ox, Oy, Oz,
             ν,
-            0.0f0, 0.0f0, 0.0f0
+            0.0f0, 0.0f0, 0.0f0,
+            scheme,
+            backend
         )
     end
 
     buffers_ρ = [ρ(domains[d]) for d in 1:D]
     buffers_u = [u(domains[d]) for d in 1:D]
+    buffers_fi = [fi(domains[d]) for d in 1:D]
+    buffers_flags = [flags(domains[d]) for d in 1:D]
 
     ρc = attach(buffers_ρ, Nx, Ny, Nz, Dx, Dy, Dz, "rho")
     uc = attach(buffers_u, Nx, Ny, Nz, Dx, Dy, Dz, "u")
+    fic = attach(buffers_fi, Nx, Ny, Nz, Dx, Dy, Dz, "fi")
+    fc = attach(buffers_flags, Nx, Ny, Nz, Dx, Dy, Dz, "flags")
 
     return Model(
+        scheme,
+        backend, workgroup,
         Nx, Ny, Nz,
         Dx, Dy, Dz,
         domains,
-        ρc, uc
+        ρc, uc, fic, fc,
+        weights(scheme), velocities(scheme),
+        false
     )
 end
+
+arraytype(::CPU) = Array
+arraytype(::CUDABackend) = CuArray
+
+default_workgroup(::CPU) = 64
+default_workgroup(::CUDABackend) = 256
 
 get_N(model::Model)= Int(model.Nx) * Int(model.Ny) * Int(model.Nz)
 get_D(model::Model) = Int(model.Dx) * Int(model.Dy) * Int(model.Dz)
 
+flags(model::Model) = model.flags
+
 ρ(model::Model) = model.ρ
 u(model::Model) = model.u
 
-function initialize(model::Model)
-    @warn "todo"
+# sets up the simulation, copies data to device and runs for n steps
+function run!(model::Model, steps::Int)
+    steps > 0 || throw(ArgumentError("steps must be positive"))
+
+    if !model.initialized
+        initialize!(model)
+    end
+
+    for i in 1:steps
+        start = time_ns()
+        step!(model)
+        elapsed_s = (time_ns() - start) / 1e9
+        mlups = get_N(model)*1e-6 / elapsed_s
+        @info @sprintf("%.2f MLUPS", mlups)
+    end
 end
 
-function run(model::Model, steps::Int)
-    steps > 0 || throw(ArgumentError("steps must be positive"))
-    for i in 1:steps
-        @info "step $i"
+function initialize!(model::Model)
+    kernel = initialize_kernel!(model.backend, model.workgroup)
+    for domain in model.domains
+        N = get_N(domain)
+        kernel(
+            domain.ρ.data,
+            domain.u.data,
+            domain.fi.data,
+            domain.flags.data,
+            model.weights, model.velocities;
+            ndrange = N
+        )
     end
+
+    KernelAbstractions.synchronize(model.backend)
+    model.initialized = true
+    @info "finished initializing"
+end
+
+function step!(model::Model)
+    kernel = stream_collide_kernel!(model.backend, model.workgroup)
+    for domain in model.domains
+        N = get_N(domain)
+        kernel(
+            domain.ρ.data,
+            domain.u.data,
+            domain.fi.data, domain.fo.data,
+            domain.flags.data,
+            model.weights, model.velocities,
+            τ(domain),
+            domain.fx, domain.fy, domain.fz,
+            Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+            ndrange = N
+        )
+        copyto!(domain.fi.data, domain.fo.data)
+        increment_time_step!(domain, 1)
+    end
+
+    KernelAbstractions.synchronize(model.backend)
 end
