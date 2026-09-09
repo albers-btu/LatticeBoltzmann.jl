@@ -39,9 +39,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend)
     u = Memory(AT{Float32}(undef, N, 3))
     fill!(u.data, 0.0f0)
 
-    fi = Memory(AT{Float32}(undef, N, Q))
+    fi = Memory(AT{Float32}(undef, N * Q))
     fill!(fi.data, 0.0f0)
-    fo = Memory(AT{Float32}(undef, N, Q))
+    fo = Memory(AT{Float32}(undef, N * Q))
     fill!(fo.data, 0.0f0)
 
     flags = Memory(AT{UInt8}(undef, N))

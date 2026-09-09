@@ -4,7 +4,8 @@ mutable struct Model{
     Aρ<:AbstractArray{Float32},
     Au<:AbstractArray{Float32},
     Afi<:AbstractArray{Float32},
-    Af<:AbstractArray{UInt8}
+    Af<:AbstractArray{UInt8},
+    Q
 }
     scheme::Symbol
 
@@ -26,14 +27,24 @@ mutable struct Model{
     fi::MemoryContainer{Float32, Afi}
     flags::MemoryContainer{UInt8, Af}
 
-    weights::Tuple{Vararg{Float32}}
-    velocities::Tuple{Vararg{SVector{3, Int}}}
+    weights::NTuple{Q, Float32}
+    velocities::NTuple{Q, SVector{3, Int}}
+
+    cached_collide!::Any # cached kernel
+    cached_initialize!::Any # cached kernel
 
     initialized::Bool
 end
 
 function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = default_workgroup(backend))
     backend isa CUDABackend && !CUDA.functional() && throw(ArgumentError("CUDABackend requested but CUDA is not functional"))
+
+    w = weights(scheme)
+    c = velocities(scheme)
+    Q = length(w)
+
+    cached_collide = stream_collide_kernel!(backend, workgroup)
+    cached_initialize = initialize_kernel!(backend, workgroup)
 
     Dx = UInt(1)
     Dy = UInt(1)
@@ -95,7 +106,8 @@ function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = def
         Dx, Dy, Dz,
         domains,
         ρc, uc, fic, fc,
-        weights(scheme), velocities(scheme),
+        w, c,
+        cached_collide, cached_initialize,
         false
     )
 end
@@ -132,7 +144,7 @@ function run!(model::Model, steps::Int)
 end
 
 function initialize!(model::Model)
-    kernel = initialize_kernel!(model.backend, model.workgroup)
+    kernel = model.cached_initialize!
     for domain in model.domains
         N = get_N(domain)
         kernel(
@@ -140,7 +152,8 @@ function initialize!(model::Model)
             domain.u.data,
             domain.fi.data,
             domain.flags.data,
-            model.weights, model.velocities;
+            model.weights, model.velocities,
+            N;
             ndrange = N
         )
     end
@@ -151,21 +164,20 @@ function initialize!(model::Model)
 end
 
 function step!(model::Model)
-    kernel = stream_collide_kernel!(model.backend, model.workgroup)
-    for domain in model.domains
+    kernel = model.cached_collide!
+    for (d, domain) in enumerate(model.domains)
         N = get_N(domain)
         kernel(
-            domain.ρ.data,
-            domain.u.data,
-            domain.fi.data, domain.fo.data,
             domain.flags.data,
+            domain.fi.data,
+            domain.fo.data,
             model.weights, model.velocities,
-            τ(domain),
-            domain.fx, domain.fy, domain.fz,
+            1.0f0 / τ(domain),
             Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
             ndrange = N
         )
-        copyto!(domain.fi.data, domain.fo.data)
+        domain.fi, domain.fo = domain.fo, domain.fi
+        model.fi.buffers[d] = domain.fi
         increment_time_step!(domain, 1)
     end
 
