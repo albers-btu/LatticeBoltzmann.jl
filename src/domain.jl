@@ -1,7 +1,8 @@
 mutable struct Domain{
-    Aρ<:AbstractArray{Float32}, 
-    Au<:AbstractArray{Float32},
-    Afi<:AbstractArray{Float32},
+    DType<:AbstractFloat,
+    Aρ<:AbstractArray{DType}, 
+    Au<:AbstractArray{DType},
+    Afi<:AbstractArray{DType},
     Af<:AbstractArray{UInt8}
 }
     Nx::UInt # lattice dimension x
@@ -12,37 +13,37 @@ mutable struct Domain{
     Oy::Int # offset y
     Oz::Int # offset z
 
-    ν::Float32 # kinematic shear viscosity
+    ν::DType # kinematic shear viscosity
     N::Int
-    ω::Float32
+    ω::DType
 
-    fx::Float32 # global force per volume x
-    fy::Float32 # global force per volume y
-    fz::Float32 # global force per volume z
+    fx::DType # global force per volume x
+    fy::DType # global force per volume y
+    fz::DType # global force per volume z
 
-    ρ::Memory{Float32, Aρ}
-    u::Memory{Float32, Au}
-    fi::Memory{Float32, Afi}
+    ρ::Memory{DType, Aρ}
+    u::Memory{DType, Au}
+    fi::Memory{DType, Afi}
     flags::Memory{UInt8, Af}
 
     t::UInt64
 end
 
-function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend)
+function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{DType}) where {DType}
     Q = length(WEIGHTS[scheme])
     
     N = Int(Nx) * Int(Ny) * Int(Nz)
-    ω = 1.0f0 / (3 * Float32(ν) + 0.5f0)
+    ω = one(DType) / (DType(3) * DType(ν) + DType(1) / DType(2))
     AT = arraytype(backend)
 
-    ρ = Memory(AT{Float32}(undef, N))
-    fill!(ρ.data, 1.0f0)
+    ρ = Memory(AT{DType}(undef, N))
+    fill!(ρ.data, one(DType))
 
-    u = Memory(AT{Float32}(undef, N, 3))
-    fill!(u.data, 0.0f0)
+    u = Memory(AT{DType}(undef, N, 3))
+    fill!(u.data, zero(DType))
 
-    fi = Memory(AT{Float32}(undef, N * Q))
-    fill!(fi.data, 0.0f0)
+    fi = Memory(AT{DType}(undef, N * Q))
+    fill!(fi.data, zero(DType))
 
     flags = Memory(AT{UInt8}(undef, N))
     fill!(flags.data, 0x00)
@@ -50,8 +51,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend)
     Domain(
         UInt(Nx), UInt(Ny), UInt(Nz),
         Int(Ox), Int(Oy), Int(Oz),
-        Float32(ν), N, ω,
-        Float32(fx), Float32(fy), Float32(fz),
+        DType(ν), N, ω,
+        DType(fx), DType(fy), DType(fz),
         ρ, u, fi, flags,
         UInt64(0)
     )
@@ -64,7 +65,7 @@ u(domain::Domain) = domain.u
 fi(domain::Domain) = domain.fi
 flags(domain::Domain) = domain.flags
 
-τ(domain::Domain) = 3 * domain.ν + 0.5f0
+τ(domain::Domain{DType}) where DType = DType(3) * domain.ν + DType(1) / DType(2)
 
 function increment_time_step!(domain::Domain, steps::Int)
     domain.t += steps

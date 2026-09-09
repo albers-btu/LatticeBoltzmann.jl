@@ -1,9 +1,10 @@
 using Printf, CUDA
 
 mutable struct Model{
-    Aρ<:AbstractArray{Float32},
-    Au<:AbstractArray{Float32},
-    Afi<:AbstractArray{Float32},
+    DType<:AbstractFloat,
+    Aρ<:AbstractArray{DType},
+    Au<:AbstractArray{DType},
+    Afi<:AbstractArray{DType},
     Af<:AbstractArray{UInt8},
     Q
 }
@@ -20,14 +21,14 @@ mutable struct Model{
     Dy::UInt # lattice domain y
     Dz::UInt # lattice domain z
 
-    domains::Vector{Domain{Aρ, Au, Afi, Af}}
+    domains::Vector{Domain{DType, Aρ, Au, Afi, Af}}
 
-    ρ::MemoryContainer{Float32, Aρ}
-    u::MemoryContainer{Float32, Au}
-    fi::MemoryContainer{Float32, Afi}
+    ρ::MemoryContainer{DType, Aρ}
+    u::MemoryContainer{DType, Au}
+    fi::MemoryContainer{DType, Afi}
     flags::MemoryContainer{UInt8, Af}
 
-    weights::NTuple{Q, Float32}
+    weights::NTuple{Q, DType}
     velocities::NTuple{Q, SVector{3, Int}}
 
     cached_collide_even!::Any
@@ -37,10 +38,10 @@ mutable struct Model{
     initialized::Bool
 end
 
-function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = default_workgroup(backend))
+function Model(Nx, Ny, Nz, ν; DType::Type{<:AbstractFloat} = Float32, scheme = :D3Q19, backend = CPU(), workgroup = default_workgroup(backend))
     backend isa CUDABackend && !CUDA.functional() && throw(ArgumentError("CUDABackend requested but CUDA is not functional"))
 
-    w = weights(scheme)
+    w = weights(scheme, DType)
     c = velocities(scheme)
 
     cached_collide_even = stream_collide_even_kernel!(backend, workgroup)
@@ -64,7 +65,7 @@ function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = def
     Hy::UInt = UInt(Dy > 1) # halo offset y
     Hz::UInt = UInt(Dz > 1) # halo offset z
     
-    ν = Float32(ν)
+    ν = DType(ν)
 
     domains = map(1:Int(D)) do d
         d0 = d - 1
@@ -86,7 +87,8 @@ function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = def
             ν,
             0.0f0, 0.0f0, 0.0f0,
             scheme,
-            backend
+            backend,
+            DType
         )
     end
 
