@@ -13,6 +13,8 @@ mutable struct Domain{
     Oz::Int # offset z
 
     ν::Float32 # kinematic shear viscosity
+    N::Int
+    ω::Float32
 
     fx::Float32 # global force per volume x
     fy::Float32 # global force per volume y
@@ -21,7 +23,6 @@ mutable struct Domain{
     ρ::Memory{Float32, Aρ}
     u::Memory{Float32, Au}
     fi::Memory{Float32, Afi}
-    fo::Memory{Float32, Afi}
     flags::Memory{UInt8, Af}
 
     t::UInt64
@@ -31,6 +32,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend)
     Q = length(WEIGHTS[scheme])
     
     N = Int(Nx) * Int(Ny) * Int(Nz)
+    ω = 1.0f0 / (3 * Float32(ν) + 0.5f0)
     AT = arraytype(backend)
 
     ρ = Memory(AT{Float32}(undef, N))
@@ -41,8 +43,6 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend)
 
     fi = Memory(AT{Float32}(undef, N * Q))
     fill!(fi.data, 0.0f0)
-    fo = Memory(AT{Float32}(undef, N * Q))
-    fill!(fo.data, 0.0f0)
 
     flags = Memory(AT{UInt8}(undef, N))
     fill!(flags.data, 0x00)
@@ -50,8 +50,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend)
     Domain(
         UInt(Nx), UInt(Ny), UInt(Nz),
         Int(Ox), Int(Oy), Int(Oz),
-        Float32(ν), Float32(fx), Float32(fy), Float32(fz),
-        ρ, u, fi, fo, flags,
+        Float32(ν), N, ω,
+        Float32(fx), Float32(fy), Float32(fz),
+        ρ, u, fi, flags,
         UInt64(0)
     )
 end

@@ -1,4 +1,4 @@
-using Printf
+using Printf, CUDA
 
 mutable struct Model{
     Aρ<:AbstractArray{Float32},
@@ -30,8 +30,9 @@ mutable struct Model{
     weights::NTuple{Q, Float32}
     velocities::NTuple{Q, SVector{3, Int}}
 
-    cached_collide!::Any # cached kernel
-    cached_initialize!::Any # cached kernel
+    cached_collide_even!::Any
+    cached_collide_odd!::Any
+    cached_initialize!::Any
 
     initialized::Bool
 end
@@ -42,7 +43,8 @@ function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = def
     w = weights(scheme)
     c = velocities(scheme)
 
-    cached_collide = stream_collide_kernel!(backend, workgroup)
+    cached_collide_even = stream_collide_even_kernel!(backend, workgroup)
+    cached_collide_odd = stream_collide_odd_kernel!(backend, workgroup)
     cached_initialize = initialize_kernel!(backend, workgroup)
 
     Dx = UInt(1)
@@ -106,7 +108,9 @@ function Model(Nx, Ny, Nz, ν; scheme = :D3Q19, backend = CPU(), workgroup = def
         domains,
         ρc, uc, fic, fc,
         w, c,
-        cached_collide, cached_initialize,
+        cached_collide_even,
+        cached_collide_odd,
+        cached_initialize,
         false
     )
 end
@@ -152,7 +156,7 @@ function initialize!(model::Model)
             domain.fi.data,
             domain.flags.data,
             model.weights, model.velocities,
-            Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+            Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
             ndrange = N
         )
     end
@@ -162,17 +166,19 @@ function initialize!(model::Model)
     @info "finished initializing"
 end
 
+#@inline kernel_flags(flags) = flags isa CuArray ? CUDA.Const(flags) : flags
+
 function step!(model::Model)
-    kernel = model.cached_collide!
     for domain in model.domains
         N = get_N(domain)
+        kernel = isodd(domain.t) ? model.cached_collide_odd! : model.cached_collide_even!
         kernel(
+            #kernel_flags(domain.flags.data),
             domain.flags.data,
             domain.fi.data,
             model.weights, model.velocities,
-            1.0f0 / τ(domain),
-            Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
-            isodd(domain.t);
+            domain.ω,
+            Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
             ndrange = N
         )
         increment_time_step!(domain, 1)

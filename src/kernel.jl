@@ -1,138 +1,235 @@
 using KernelAbstractions
 
-@inline function opp(i::Int)
-    i == 1 ? 1 : iseven(i) ? i + 1 : i - 1
-end
-
 @inline function wrap_coord(x, dx, N)
     ifelse(dx == 0, x,
         ifelse(dx > 0, ifelse(x == N - 1, 0, x + 1),
                        ifelse(x == 0, N - 1, x - 1)))
 end
 
-@inline function load_pair(fi, n, src, i, t_odd::Bool, N)
-    if t_odd
-        fi[f_index(n, i, N)], fi[f_index(src, i + 1, N)]
-    else
-        fi[f_index(n, i + 1, N)], fi[f_index(src, i, N)]
-    end
+@inline function src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+      wrap_coord(x, cx, Nx)
+    + wrap_coord(y, cy, Ny) * Nx
+    + wrap_coord(z, cz, Nz) * Nx * Ny + 1
 end
 
-@inline function store_pair!(fi, n, src, i, f_plus, f_minus, t_odd::Bool, N)
-    if t_odd
+@inline load_pair(fi, n, src, i, ::Val{true}, N) =
+    (fi[f_index(n, i, N)], fi[f_index(src, i + 1, N)])
+
+@inline load_pair(fi, n, src, i, ::Val{false}, N) =
+    (fi[f_index(n, i + 1, N)], fi[f_index(src, i, N)])
+
+@inline function store_pair!(fi, n, src, i, f_plus, f_minus, ::Val{true}, N)
         fi[f_index(n, i, N)]       = f_minus
         fi[f_index(src, i + 1, N)] = f_plus
-    else
-        fi[f_index(n, i + 1, N)]   = f_minus
-        fi[f_index(src, i, N)]     = f_plus
-    end
     return nothing
 end
-
-@inline function neighbor_n(n0, cx, cy, cz, Nx, Ny, Nz)
-    # n0 0-based
-    t  = n0
-    x  = t % Nx
-    y  = (t ÷ Nx) % Ny
-    z  = t ÷ (Nx  * Ny)
-    x2 = wrap_coord(x, cx, Nx)
-    y2 = wrap_coord(y, cy, Ny)
-    z2 = wrap_coord(z, cz, Nz)
-    return x2 + y2 * Nx + z2 * Nx * Ny
+@inline function store_pair!(fi, n, src, i, f_plus, f_minus, ::Val{false}, N)
+        fi[f_index(n, i + 1, N)]   = f_minus
+        fi[f_index(src, i, N)]     = f_plus
+    return nothing
 end
 
 @kernel function initialize_kernel!(
     ρ, u, fi, flags,
     w::NTuple{Q, Float32}, 
     c::NTuple{Q, SVector{3, Int}},
-    Nx::Int, Ny::Int, Nz::Int
+    N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q}
     n = @index(Global)
     @inbounds begin
-        N = Nx * Ny * Nz
         n0 = n - 1
         ρn = ρ[n]
         ux, uy, uz = u[n, 1], u[n, 2], u[n, 3]
 
         if (flags[n] & TYPE_S) == TYPE_S
-            ux = uy = uz = 0.0f0
-            u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz;
-        end
-
-        uu = 1.5f0 * (ux*ux + uy*uy + uz*uz)
-        fi[f_index(n, 1, N)] = w[1] * ρn * (1.0f0 - uu)
-
-        for k in 1:((Q - 1) ÷ 2)
-            i = 2k
-            cp, cm = c[i], c[i + 1]
-            cup = Float32(cp[1])*ux + Float32(cp[2])*uy + Float32(cp[3])*uz
-            cum = Float32(cm[1])*ux + Float32(cm[2])*uy + Float32(cm[3])*uz
-            feqp = w[i]     * ρn * (1.0f0 + 3.0f0*cup + 4.5f0*cup*cup - uu)
-            feqm = w[i + 1] * ρn * (1.0f0 + 3.0f0*cum + 4.5f0*cum*cum - uu)
-            src = neighbor_n(n0, cp[1], cp[2], cp[3], Nx, Ny, Nz) + 1
-            store_pair!(fi, n, src, i, feqp, feqm, true, N) # t_odd = true
-        end
-    end
-end
-
-@kernel function stream_collide_kernel!(
-    flags, fi,
-    w::NTuple{Q, Float32}, 
-    c::NTuple{Q, SVector{3, Int}},
-    ω::Float32,
-    Nx::Int, Ny::Int, Nz::Int,
-    t_odd::Bool
-) where {Q}
-    n = @index(Global)
-    @inbounds begin
-        if (flags[n] & TYPE_S) != TYPE_S
-            N = Nx * Ny * Nz
-            n0 = n - 1
-
-            fn1 = fi[f_index(n, 1, N)]
-            # pairs: (2, 3), (4, 5), ...
-            pairs = ntuple(Val((Q - 1) ÷ 2)) do k
-                i = 2k
-                ci = c[i]
-                src = neighbor_n(n0, ci[1], ci[2], ci[3], Nx, Ny, Nz) + 1
-                load_pair(fi, n, src, i, t_odd, N)
-            end
-
-            ρn = fn1
-            ux = uy = uz = 0.0f0
-
-            for k in 1:length(pairs)
-                i = 2k
-                fp, fm = pairs[k]
-                ρn += fp + fm
-                cp, cm = c[i], c[i + 1]
-                ux += Float32(cp[1]) * fp + Float32(cm[1]) * fm
-                uy += Float32(cp[2]) * fp + Float32(cm[2]) * fm
-                uz += Float32(cp[3]) * fp + Float32(cm[3]) * fm
-            end
-
-            invρ = 1.0f0 / ρn
-            ux *= invρ; uy *= invρ; uz *= invρ
+            u[n, 1] = 0.0f0
+            u[n, 2] = 0.0f0
+            u[n, 3] = 0.0f0;
+        else
             uu = 1.5f0 * (ux*ux + uy*uy + uz*uz)
+            fi[f_index(n, 1, N)] = w[1] * ρn * (1.0f0 - uu)
 
-            # SRT: f* = f - ω(f - feq)
-            feq1 = w[1] * ρn * (1.0f0 - uu)
-            fi[f_index(n, 1, N)] = (1.0f0 - ω) * fn1 + ω * feq1
+            x = n0 % Nx
+            y = (n0 ÷ Nx) % Ny
+            z = n0 ÷ (Nx * Ny)
 
-            for k in 1:length(pairs)
+            for k in 1:((Q - 1) ÷ 2)
                 i = 2k
-                fp, fm = pairs[k]
                 cp, cm = c[i], c[i + 1]
                 cup = Float32(cp[1])*ux + Float32(cp[2])*uy + Float32(cp[3])*uz
                 cum = Float32(cm[1])*ux + Float32(cm[2])*uy + Float32(cm[3])*uz
                 feqp = w[i]     * ρn * (1.0f0 + 3.0f0*cup + 4.5f0*cup*cup - uu)
                 feqm = w[i + 1] * ρn * (1.0f0 + 3.0f0*cum + 4.5f0*cum*cum - uu)
-                src = neighbor_n(n0, cp[1], cp[2], cp[3], Nx, Ny, Nz) + 1
-                store_pair!(fi, n, src, i,
-                    (1.0f0 - ω) * fp + ω * feqp,
-                    (1.0f0 - ω) * fm + ω * feqm,
-                    t_odd, N)
+                src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+                store_pair!(fi, n, src, i, feqp, feqm, Val(true), N)
             end
         end
     end
+end
+
+# generic fallback
+@inline function stream_collide_body!(
+    t_odd::Val{odd},
+    flags, fi,
+    w::NTuple{Q, Float32}, 
+    c::NTuple{Q, SVector{3, Int}},
+    ω::Float32,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+) where {odd, Q}
+    if (flags[n] & TYPE_S) != TYPE_S
+        n0 = n - 1
+
+        x = n0 % Nx
+        y = (n0 ÷ Nx) % Ny
+        z = n0 ÷ (Nx * Ny)
+
+        fn1 = fi[f_index(n, 1, N)]
+        NP  = (Q - 1) ÷ 2
+
+        # pairs: (2, 3), (4, 5), ...
+        pairs = ntuple(Val(NP)) do k
+            i = 2k
+            cp = c[i]
+            src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+            load_pair(fi, n, src, i, t_odd, N)
+        end
+
+        ρn = fn1
+        ux = uy = uz = 0.0f0
+
+        for k in 1:NP
+            i = 2k
+            fp, fm = pairs[k]
+            ρn += fp + fm
+            cp, cm = c[i], c[i + 1]
+            ux += Float32(cp[1]) * fp + Float32(cm[1]) * fm
+            uy += Float32(cp[2]) * fp + Float32(cm[2]) * fm
+            uz += Float32(cp[3]) * fp + Float32(cm[3]) * fm
+        end
+
+        invρ = 1.0f0 / ρn
+        ux *= invρ; uy *= invρ; uz *= invρ
+        uu = 1.5f0 * (ux*ux + uy*uy + uz*uz)
+
+        # SRT: f* = f - ω(f - feq)
+        fi[f_index(n, 1, N)] = (1.0f0 - ω) * fn1 + ω * (w[1] * ρn * (1.0f0 - uu))
+
+        for k in 1:NP
+            i = 2k
+            fp, fm = pairs[k]
+            cp, cm = c[i], c[i + 1]
+            cup = Float32(cp[1])*ux + Float32(cp[2])*uy + Float32(cp[3])*uz
+            cum = Float32(cm[1])*ux + Float32(cm[2])*uy + Float32(cm[3])*uz
+            feqp = w[i]     * ρn * (1.0f0 + 3.0f0*cup + 4.5f0*cup*cup - uu)
+            feqm = w[i + 1] * ρn * (1.0f0 + 3.0f0*cum + 4.5f0*cum*cum - uu)
+            src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+            store_pair!(fi, n, src, i,
+                (1.0f0 - ω) * fp + ω * feqp,
+                (1.0f0 - ω) * fm + ω * feqm,
+                t_odd, N)
+        end
+    end
+    return nothing
+end
+
+@inline function stream_collide_body!(
+    t_odd::Val{odd},
+    flags, fi,
+    w::NTuple{19,Float32},
+    c::NTuple{19,SVector{3,Int}},
+    ω::Float32, N::Int, Nx::Int, Ny::Int, Nz::Int, n,
+) where {odd}
+    if (flags[n] & TYPE_S) == TYPE_S
+        return nothing
+    end
+
+    n0 = n - 1
+    x  = n0 % Nx
+    y  = (n0 ÷ Nx) % Ny
+    z  = n0 ÷ (Nx * Ny)
+
+    fn1 = fi[f_index(n, 1, N)]
+
+    src2  = src_index(x, y, z, c[2][1],  c[2][2],  c[2][3],  Nx, Ny, Nz)
+    src4  = src_index(x, y, z, c[4][1],  c[4][2],  c[4][3],  Nx, Ny, Nz)
+    src6  = src_index(x, y, z, c[6][1],  c[6][2],  c[6][3],  Nx, Ny, Nz)
+    src8  = src_index(x, y, z, c[8][1],  c[8][2],  c[8][3],  Nx, Ny, Nz)
+    src10 = src_index(x, y, z, c[10][1], c[10][2], c[10][3], Nx, Ny, Nz)
+    src12 = src_index(x, y, z, c[12][1], c[12][2], c[12][3], Nx, Ny, Nz)
+    src14 = src_index(x, y, z, c[14][1], c[14][2], c[14][3], Nx, Ny, Nz)
+    src16 = src_index(x, y, z, c[16][1], c[16][2], c[16][3], Nx, Ny, Nz)
+    src18 = src_index(x, y, z, c[18][1], c[18][2], c[18][3], Nx, Ny, Nz)
+
+    fp2,  fm3  = load_pair(fi, n, src2,  2,  t_odd, N)
+    fp4,  fm5  = load_pair(fi, n, src4,  4,  t_odd, N)
+    fp6,  fm7  = load_pair(fi, n, src6,  6,  t_odd, N)
+    fp8,  fm9  = load_pair(fi, n, src8,  8,  t_odd, N)
+    fp10, fm11 = load_pair(fi, n, src10, 10, t_odd, N)
+    fp12, fm13 = load_pair(fi, n, src12, 12, t_odd, N)
+    fp14, fm15 = load_pair(fi, n, src14, 14, t_odd, N)
+    fp16, fm17 = load_pair(fi, n, src16, 16, t_odd, N)
+    fp18, fm19 = load_pair(fi, n, src18, 18, t_odd, N)
+
+    ρn = fn1 + fp2 + fm3 + fp4 + fm5 + fp6 + fm7 + fp8 + fm9 +
+         fp10 + fm11 + fp12 + fm13 + fp14 + fm15 + fp16 + fm17 + fp18 + fm19
+    ux = Float32(c[2][1])*fp2 + Float32(c[3][1])*fm3 + Float32(c[4][1])*fp4 + Float32(c[5][1])*fm5 +
+         Float32(c[6][1])*fp6 + Float32(c[7][1])*fm7 + Float32(c[8][1])*fp8 + Float32(c[9][1])*fm9 +
+         Float32(c[10][1])*fp10 + Float32(c[11][1])*fm11 + Float32(c[12][1])*fp12 + Float32(c[13][1])*fm13 +
+         Float32(c[14][1])*fp14 + Float32(c[15][1])*fm15 + Float32(c[16][1])*fp16 + Float32(c[17][1])*fm17 +
+         Float32(c[18][1])*fp18 + Float32(c[19][1])*fm19
+    uy = Float32(c[2][2])*fp2 + Float32(c[3][2])*fm3 + Float32(c[4][2])*fp4 + Float32(c[5][2])*fm5 +
+         Float32(c[6][2])*fp6 + Float32(c[7][2])*fm7 + Float32(c[8][2])*fp8 + Float32(c[9][2])*fm9 +
+         Float32(c[10][2])*fp10 + Float32(c[11][2])*fm11 + Float32(c[12][2])*fp12 + Float32(c[13][2])*fm13 +
+         Float32(c[14][2])*fp14 + Float32(c[15][2])*fm15 + Float32(c[16][2])*fp16 + Float32(c[17][2])*fm17 +
+         Float32(c[18][2])*fp18 + Float32(c[19][2])*fm19
+    uz = Float32(c[2][3])*fp2 + Float32(c[3][3])*fm3 + Float32(c[4][3])*fp4 + Float32(c[5][3])*fm5 +
+         Float32(c[6][3])*fp6 + Float32(c[7][3])*fm7 + Float32(c[8][3])*fp8 + Float32(c[9][3])*fm9 +
+         Float32(c[10][3])*fp10 + Float32(c[11][3])*fm11 + Float32(c[12][3])*fp12 + Float32(c[13][3])*fm13 +
+         Float32(c[14][3])*fp14 + Float32(c[15][3])*fm15 + Float32(c[16][3])*fp16 + Float32(c[17][3])*fm17 +
+         Float32(c[18][3])*fp18 + Float32(c[19][3])*fm19
+
+    invρ = 1.0f0 / ρn
+    ux *= invρ; uy *= invρ; uz *= invρ
+    uu = 1.5f0 * (ux*ux + uy*uy + uz*uz)
+
+    fi[f_index(n, 1, N)] = (1.0f0 - ω) * fn1 + ω * (w[1] * ρn * (1.0f0 - uu))
+
+    store_pair!(fi, n, src2,  2,  srt(ω, fp2,  w[2],  ρn, ux, uy, uz, uu, c[2]),  srt(ω, fm3,  w[3],  ρn, ux, uy, uz, uu, c[3]),  t_odd, N)
+    store_pair!(fi, n, src4,  4,  srt(ω, fp4,  w[4],  ρn, ux, uy, uz, uu, c[4]),  srt(ω, fm5,  w[5],  ρn, ux, uy, uz, uu, c[5]),  t_odd, N)
+    store_pair!(fi, n, src6,  6,  srt(ω, fp6,  w[6],  ρn, ux, uy, uz, uu, c[6]),  srt(ω, fm7,  w[7],  ρn, ux, uy, uz, uu, c[7]),  t_odd, N)
+    store_pair!(fi, n, src8,  8,  srt(ω, fp8,  w[8],  ρn, ux, uy, uz, uu, c[8]),  srt(ω, fm9,  w[9],  ρn, ux, uy, uz, uu, c[9]),  t_odd, N)
+    store_pair!(fi, n, src10, 10, srt(ω, fp10, w[10], ρn, ux, uy, uz, uu, c[10]), srt(ω, fm11, w[11], ρn, ux, uy, uz, uu, c[11]), t_odd, N)
+    store_pair!(fi, n, src12, 12, srt(ω, fp12, w[12], ρn, ux, uy, uz, uu, c[12]), srt(ω, fm13, w[13], ρn, ux, uy, uz, uu, c[13]), t_odd, N)
+    store_pair!(fi, n, src14, 14, srt(ω, fp14, w[14], ρn, ux, uy, uz, uu, c[14]), srt(ω, fm15, w[15], ρn, ux, uy, uz, uu, c[15]), t_odd, N)
+    store_pair!(fi, n, src16, 16, srt(ω, fp16, w[16], ρn, ux, uy, uz, uu, c[16]), srt(ω, fm17, w[17], ρn, ux, uy, uz, uu, c[17]), t_odd, N)
+    store_pair!(fi, n, src18, 18, srt(ω, fp18, w[18], ρn, ux, uy, uz, uu, c[18]), srt(ω, fm19, w[19], ρn, ux, uy, uz, uu, c[19]), t_odd, N)
+    return nothing
+end
+
+@inline function srt(ω, f, wi, ρn, ux, uy, uz, uu, ci)
+    cu = Float32(ci[1])*ux + Float32(ci[2])*uy + Float32(ci[3])*uz
+    feq = wi * ρn * (1.0f0 + 3.0f0*cu + 4.5f0*cu*cu - uu)
+    return (1.0f0 - ω) * f + ω * feq
+end
+
+@kernel function stream_collide_even_kernel!(
+    flags, fi,
+    w::NTuple{Q, Float32}, 
+    c::NTuple{Q, SVector{3, Int}},
+    ω::Float32,
+    N::Int, Nx::Int, Ny::Int, Nz::Int,
+) where {Q}
+    n = @index(Global)
+    @inbounds stream_collide_body!(Val(false), flags, fi, w, c, ω, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function stream_collide_odd_kernel!(
+    flags, fi,
+    w::NTuple{Q, Float32}, 
+    c::NTuple{Q, SVector{3, Int}},
+    ω::Float32,
+    N::Int, Nx::Int, Ny::Int, Nz::Int,
+) where {Q}
+    n = @index(Global)
+    @inbounds stream_collide_body!(Val(true), flags, fi, w, c, ω, N, Nx, Ny, Nz, Int(n))
 end

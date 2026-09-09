@@ -21,7 +21,7 @@ using Test, StaticArrays, CUDA
 	end
 	copyto!(model.domains[1].flags.data, host)
 
-	for i in 1:1 # 1000
+	for i in 1:100 # 1000
 		run!(model, 10)
 	end
 end

@@ -22,7 +22,7 @@ export get_N
 export increment_time_step!
 
 include("kernel.jl")
-export initialize_kernel!, stream_collide_kernel!
+export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!
 
 include("model.jl")
 export Model
