@@ -1,10 +1,11 @@
 using Printf, CUDA
 
 mutable struct Model{
-    DType<:AbstractFloat,
-    Aρ<:AbstractArray{DType},
-    Au<:AbstractArray{DType},
-    Afi<:AbstractArray{DType},
+    CType<:AbstractFloat,
+    SType<:AbstractFloat,
+    Aρ<:AbstractArray{CType},
+    Au<:AbstractArray{CType},
+    Afi<:AbstractArray{SType},
     Af<:AbstractArray{UInt8},
     Q
 }
@@ -21,14 +22,14 @@ mutable struct Model{
     Dy::UInt # lattice domain y
     Dz::UInt # lattice domain z
 
-    domains::Vector{Domain{DType, Aρ, Au, Afi, Af}}
+    domains::Vector{<:Domain{CType, SType}}
 
-    ρ::MemoryContainer{DType, Aρ}
-    u::MemoryContainer{DType, Au}
-    fi::MemoryContainer{DType, Afi}
+    ρ::MemoryContainer{CType, Aρ}
+    u::MemoryContainer{CType, Au}
+    fi::MemoryContainer{SType, Afi}
     flags::MemoryContainer{UInt8, Af}
 
-    weights::NTuple{Q, DType}
+    weights::NTuple{Q, CType}
     velocities::NTuple{Q, SVector{3, Int}}
 
     cached_collide_even!::Any
@@ -38,10 +39,17 @@ mutable struct Model{
     initialized::Bool
 end
 
-function Model(Nx, Ny, Nz, ν; DType::Type{<:AbstractFloat} = Float32, scheme = :D3Q19, backend = CPU(), workgroup = default_workgroup(backend))
+function Model(
+    Nx, Ny, Nz, ν; 
+    CType::Type{<:AbstractFloat} = Float32,
+    SType::Type{<:AbstractFloat} = CType,
+    scheme = :D3Q19, 
+    backend = CPU(), 
+    workgroup = default_workgroup(backend)
+)
     backend isa CUDABackend && !CUDA.functional() && throw(ArgumentError("CUDABackend requested but CUDA is not functional"))
 
-    w = weights(scheme, DType)
+    w = weights(scheme, CType)
     c = velocities(scheme)
 
     cached_collide_even = stream_collide_even_kernel!(backend, workgroup)
@@ -65,7 +73,7 @@ function Model(Nx, Ny, Nz, ν; DType::Type{<:AbstractFloat} = Float32, scheme = 
     Hy::UInt = UInt(Dy > 1) # halo offset y
     Hz::UInt = UInt(Dz > 1) # halo offset z
     
-    ν = DType(ν)
+    ν = CType(ν)
 
     domains = map(1:Int(D)) do d
         d0 = d - 1
@@ -88,7 +96,8 @@ function Model(Nx, Ny, Nz, ν; DType::Type{<:AbstractFloat} = Float32, scheme = 
             0.0f0, 0.0f0, 0.0f0,
             scheme,
             backend,
-            DType
+            CType,
+            SType
         )
     end
 

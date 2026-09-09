@@ -21,4 +21,4 @@ const WEIGHTS = Dict(
     ]
 )
 
-weights(scheme::Symbol, ::Type{DType}=Float32) where {DType} = Tuple(DType.(WEIGHTS[scheme]))
+weights(scheme::Symbol, ::Type{CType}=Float32) where {CType} = Tuple(CType.(WEIGHTS[scheme]))
