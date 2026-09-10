@@ -404,12 +404,13 @@ function step!(model::Model)
         @static if SURFACE
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.mass.data,
-                   model.weights, model.velocities, domain.ω,
-                   domain.fx, domain.fy, domain.fz,
+                   model.weights, model.velocities,
+                   domain.ω, domain.fx, domain.fy, domain.fz,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
-                   model.weights, model.velocities, domain.ω,
+                   model.weights, model.velocities,
+                   domain.ω, domain.fx, domain.fy, domain.fz,
                    Nd, Nx, Ny, Nz; ndrange = N)
         end
 

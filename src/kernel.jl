@@ -90,6 +90,50 @@ end
     return one(CType) / (CType(0.1875) / three_nu + CType(0.5))
 end
 
+@inline function guo_fi(
+    wi::CType, ux::CType, uy::CType, uz::CType,
+    fx::CType, fy::CType, fz::CType, ci, ::Type{CType}
+) where {CType}
+    cu = CType(ci[1])*ux + CType(ci[2])*uy + CType(ci[3])*uz
+    cF = CType(ci[1])*fx + CType(ci[2])*fy + CType(ci[3])*fz
+    uF = -CType(1)/CType(3) * (ux*fx + uy*fy + uz*fz)
+    return CType(9) * wi * (cF * (cu + CType(1)/CType(3)) + uF)
+end
+
+@inline function scale_force_rest(ωp::CType, Fi0::CType) where {CType}
+    return (one(CType) - CType(0.5)*ωp) * Fi0
+end
+
+@inline function scale_force_pair(ωp::CType, ωm::CType, Fip::CType, Fim::CType) where {CType}
+    @static if TRT
+        cp = CType(0.5) - CType(0.25)*ωp
+        cm = CType(0.5) - CType(0.25)*ωm
+        Fsum = Fip + Fim
+        Fdif = Fip - Fim
+        return (cp*Fsum + cm*Fdif, cp*Fsum - cm*Fdif)
+    else
+        s = one(CType) - CType(0.5)*ωp
+        return (s*Fip, s*Fim)
+    end
+end
+
+@inline function guo_rest(
+    ωp::CType, w0::CType, ux::CType, uy::CType, uz::CType,
+    fx::CType, fy::CType, fz::CType, c0, ::Type{CType}
+) where {CType}
+    return scale_force_rest(ωp, guo_fi(w0, ux, uy, uz, fx, fy, fz, c0, CType))
+end
+
+@inline function guo_pair(
+    ωp::CType, ωm::CType, wp::CType, wm::CType,
+    ux::CType, uy::CType, uz::CType, fx::CType, fy::CType, fz::CType,
+    cp, cm, ::Type{CType}
+) where {CType}
+    Fip = guo_fi(wp, ux, uy, uz, fx, fy, fz, cp, CType)
+    Fim = guo_fi(wm, ux, uy, uz, fx, fy, fz, cm, CType)
+    return scale_force_pair(ωp, ωm, Fip, Fim)
+end
+
 @static if !SURFACE
 
 @kernel function initialize_kernel!(
@@ -281,7 +325,7 @@ end # SURFACE
     flags, fi,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
-    ω::CType,
+    ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     if (flags[n] & TYPE_S) != TYPE_S
@@ -315,18 +359,38 @@ end # SURFACE
             uz += CType(cp[3]) * fp + CType(cm[3]) * fm
         end
 
-        invρ = one(CType) / ρn
-        ux *= invρ; uy *= invρ; uz *= invρ
+        cs = CType(1) / sqrt(CType(3))
+        fxn = fx; fyn = fy; fzn = fz
+        if ρn <= zero(CType)
+            ρn = one(CType)
+            ux = zero(CType); uy = zero(CType); uz = zero(CType)
+            fxn = zero(CType); fyn = zero(CType); fzn = zero(CType)
+        else
+            invρ = one(CType) / ρn
+            ux *= invρ; uy *= invρ; uz *= invρ
+            @static if VOLUME_FORCE
+                ux += fxn * invρ * CType(0.5)
+                uy += fyn * invρ * CType(0.5)
+                uz += fzn * invρ * CType(0.5)
+            end
+            ux = clamp(ux, -cs, cs)
+            uy = clamp(uy, -cs, cs)
+            uz = clamp(uz, -cs, cs)
+        end
+
         uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
-
-        # SRT: f* = f - ω(f - feq)
-        fi[f_index(n, 1, N)] = eltype(fi)((one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)))
-
         @static if TRT
             ωm = omega_minus(ω)
         else
             ωm = ω
         end
+
+        Fi0 = zero(CType)
+        @static if VOLUME_FORCE
+            Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
+        end
+        fi[f_index(n, 1, N)] = eltype(fi)(
+            (one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)) + Fi0)
 
         for k in 1:NP
             i = 2k
@@ -337,6 +401,11 @@ end # SURFACE
             feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
             feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
             fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
+            @static if VOLUME_FORCE
+                Fip, Fim = guo_pair(ω, ωm, w[i], w[i + 1], ux, uy, uz, fxn, fyn, fzn, cp, cm, CType)
+                fp_s += Fip
+                fm_s += Fim
+            end
             src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
             store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
         end
@@ -349,7 +418,8 @@ end
     flags, fi,
     w::NTuple{19, CType},
     c::NTuple{19, SVector{3,Int}},
-    ω::CType, N::Int, Nx::Int, Ny::Int, Nz::Int, n,
+    ω::CType, fx::CType, fy::CType, fz::CType,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
     if (flags[n] & TYPE_S) == TYPE_S
         return nothing
@@ -400,8 +470,24 @@ end
          CType(c[14][3])*fp14 + CType(c[15][3])*fm15 + CType(c[16][3])*fp16 + CType(c[17][3])*fm17 +
          CType(c[18][3])*fp18 + CType(c[19][3])*fm19
 
-    invρ = one(CType) / ρn
-    ux *= invρ; uy *= invρ; uz *= invρ
+    cs = CType(1) / sqrt(CType(3))
+    fxn = fx; fyn = fy; fzn = fz
+    if ρn <= zero(CType)
+        ρn = one(CType)
+        ux = zero(CType); uy = zero(CType); uz = zero(CType)
+        fxn = zero(CType); fyn = zero(CType); fzn = zero(CType)
+    else
+        invρ = one(CType) / ρn
+        ux *= invρ; uy *= invρ; uz *= invρ
+        @static if VOLUME_FORCE
+            ux += fxn * invρ * CType(0.5)
+            uy += fyn * invρ * CType(0.5)
+            uz += fzn * invρ * CType(0.5)
+        end
+        ux = clamp(ux, -cs, cs)
+        uy = clamp(uy, -cs, cs)
+        uz = clamp(uz, -cs, cs)
+    end
     uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
 
     @static if TRT
@@ -410,51 +496,102 @@ end
         ωm = ω
     end
 
-    fi[f_index(n, 1, N)] = eltype(fi)((one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)))
+    Fi0 = zero(CType)
+    @static if VOLUME_FORCE
+        Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
+    end
+    fi[f_index(n, 1, N)] = eltype(fi)(
+        (one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)) + Fi0)
+
 
     let feqp = feq(w[2], ρn, ux, uy, uz, uu, c[2], CType)
         feqm = feq(w[3], ρn, ux, uy, uz, uu, c[3], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp2, fm3, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[2], w[3], ux, uy, uz, fxn, fyn, fzn, c[2], c[3], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src2, 2, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[4], ρn, ux, uy, uz, uu, c[4], CType)
         feqm = feq(w[5], ρn, ux, uy, uz, uu, c[5], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp4, fm5, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[4], w[5], ux, uy, uz, fxn, fyn, fzn, c[4], c[5], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src4, 4, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[6], ρn, ux, uy, uz, uu, c[6], CType)
         feqm = feq(w[7], ρn, ux, uy, uz, uu, c[7], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp6, fm7, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[6], w[7], ux, uy, uz, fxn, fyn, fzn, c[6], c[7], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src6, 6, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[8], ρn, ux, uy, uz, uu, c[8], CType)
         feqm = feq(w[9], ρn, ux, uy, uz, uu, c[9], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp8, fm9, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[8], w[9], ux, uy, uz, fxn, fyn, fzn, c[8], c[9], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src8, 8, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[10], ρn, ux, uy, uz, uu, c[10], CType)
         feqm = feq(w[11], ρn, ux, uy, uz, uu, c[11], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp10, fm11, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[10], w[11], ux, uy, uz, fxn, fyn, fzn, c[10], c[11], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src10, 10, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[12], ρn, ux, uy, uz, uu, c[12], CType)
         feqm = feq(w[13], ρn, ux, uy, uz, uu, c[13], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp12, fm13, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[12], w[13], ux, uy, uz, fxn, fyn, fzn, c[12], c[13], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src12, 12, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[14], ρn, ux, uy, uz, uu, c[14], CType)
         feqm = feq(w[15], ρn, ux, uy, uz, uu, c[15], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp14, fm15, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[14], w[15], ux, uy, uz, fxn, fyn, fzn, c[14], c[15], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src14, 14, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[16], ρn, ux, uy, uz, uu, c[16], CType)
         feqm = feq(w[17], ρn, ux, uy, uz, uu, c[17], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp16, fm17, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[16], w[17], ux, uy, uz, fxn, fyn, fzn, c[16], c[17], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src16, 16, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[18], ρn, ux, uy, uz, uu, c[18], CType)
         feqm = feq(w[19], ρn, ux, uy, uz, uu, c[19], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp18, fm19, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[18], w[19], ux, uy, uz, fxn, fyn, fzn, c[18], c[19], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         store_pair!(fi, n, src18, 18, fp_s, fm_s, t_odd, N)
     end
 
@@ -465,22 +602,22 @@ end
     @Const(flags), fi,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
-    ω::CType,
+    ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, w, c, ω, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
     @Const(flags), fi,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
-    ω::CType,
+    ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, w, c, ω, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -524,16 +661,18 @@ end
     end
 
     cs = CType(1) / sqrt(CType(3))
+    fxn = fx; fyn = fy; fzn = fz
     if ρn <= zero(CType)
         ρn = one(CType)
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
+        fxn = zero(CType); fyn = zero(CType); fzn = zero(CType)
     else
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if VOLUME_FORCE
-            ux += fx * invρ * CType(0.5)
-            uy += fy * invρ * CType(0.5)
-            uz += fz * invρ * CType(0.5)
+            ux += fxn * invρ * CType(0.5)
+            uy += fyn * invρ * CType(0.5)
+            uz += fzn * invρ * CType(0.5)
         end
         ux = clamp(ux, -cs, cs)
         uy = clamp(uy, -cs, cs)
@@ -568,13 +707,23 @@ end
         ωm = ω
     end
 
-    fi[f_index(n, 1, N)] = eltype(fi)(srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]))
+    Fi0 = zero(CType)
+    @static if VOLUME_FORCE
+        Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
+    end
+    fi[f_index(n, 1, N)] = eltype(fi)(srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]) + Fi0)
+
     for k in 1:NP
         i = 2k
         fp, fm = pairs[k]
         feqp = feq(w[i],     ρn, ux, uy, uz, uu, c[i],     CType)
         feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
+        @static if VOLUME_FORCE
+            Fip, Fim = guo_pair(ω, ωm, w[i], w[i + 1], ux, uy, uz, fxn, fyn, fzn, c[i], c[i + 1], CType)
+            fp_s += Fip
+            fm_s += Fim
+        end
         src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
         store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
     end

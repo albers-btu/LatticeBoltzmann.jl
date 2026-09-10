@@ -5,7 +5,7 @@ using Unitful
 
 @assert SURFACE && VOLUME_FORCE && UPDATE_FIELDS
 
-Nx, Ny, Nz = 48, 48, 48
+Nx, Ny, Nz = 64, 64, 64
 si_L = 0.1u"m"                  # tank size
 si_H = (2 * Nz ÷ 3) / Nz * si_L # dam height ~ 2/3 box height
 si_g = 9.81u"m/s^2"
@@ -30,7 +30,6 @@ model = Model(Nx, Ny, Nz, units;
               ν = ν,                 # kinematic viscosity
               σ = σ,                 # surface tension
               gz = -si_g,            # acceleration due to earth gravity field
-              SType=Float16,
               backend=CUDABackend())
 
 
@@ -49,7 +48,7 @@ d = model.domains[1]
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output")
 
-nsteps = 2000
+nsteps = 10000
 every  = 20
 for i in 1:(nsteps ÷ every)
     run!(model, every)
