@@ -7,14 +7,13 @@ using KernelAbstractions
 end
 
 @inline function src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
-      wrap_coord(x, cx, Nx)
-    + wrap_coord(y, cy, Ny) * Nx
-    + wrap_coord(z, cz, Nz) * Nx * Ny + 1
+    wrap_coord(x, cx, Nx) + 
+    wrap_coord(y, cy, Ny) * Nx + 
+    wrap_coord(z, cz, Nz) * Nx * Ny + 1
 end
 
 @inline load_pair(fi, n, src, i, ::Val{true}, N, ::Type{CType}) where {CType} =
     (CType(fi[f_index(n, i, N)]), CType(fi[f_index(src, i + 1, N)]))
-
 @inline load_pair(fi, n, src, i, ::Val{false}, N, ::Type{CType}) where {CType} =
     (CType(fi[f_index(n, i + 1, N)]), CType(fi[f_index(src, i, N)]))
 
@@ -28,6 +27,46 @@ end
     fi[f_index(src, i, N)]     = eltype(fi)(f_plus)
     return nothing
 end
+
+@inline load_outgoing_pair(fi, n, src, i, ::Val{true}, N, ::Type{CType}) where {CType} =
+    (CType(fi[f_index(src, i, N)]), CType(fi[f_index(n, i + 1, N)]))
+@inline load_outgoing_pair(fi, n, src, i, ::Val{false}, N, ::Type{CType}) where {CType} =
+    (CType(fi[f_index(src, i + 1, N)]), CType(fi[f_index(n, i, N)]))
+
+@inline function store_reconstructed_pair!(fi, n, src, i, f_plus, f_minus, gas_plus, gas_minus, ::Val{true}, N)
+    # odd: incoming slots are (n,i) and (src, i+1)
+    gas_minus && (fi[f_index(n, i, N)]       = eltype(fi)(f_minus))
+    gas_plus  && (fi[f_index(src, i + 1, N)] = eltype(fi)(f_plus))
+    return nothing
+end
+@inline function store_reconstructed_pair!(fi, n, src, i, f_plus, f_minus, gas_plus, gas_minus, ::Val{false}, N)
+    gas_minus && (fi[f_index(n, i + 1, N)] = eltype(fi)(f_minus))
+    gas_plus  && (fi[f_index(src, i, N)]   = eltype(fi)(f_plus))
+    return nothing
+end
+
+@inline function feq(wi, ρn, ux, uy, uz, uu, ci, ::Type{CType}) where {CType}
+    cu = CType(ci[1])*ux + CType(ci[2])*uy + CType(ci[3])*uz
+    return wi * ρn * (one(CType) + CType(3)*cu + CType(4.5)*cu*cu - uu)
+end
+
+@inline function calculate_phi(ρn::CType, massn::CType, flagsn::UInt8) where {CType}
+    if (flagsn & TYPE_F) != 0x00
+        return one(CType)
+    elseif (flagsn & TYPE_I) != 0x00
+        return ρn > 0 ? clamp(massn / ρn, zero(CType), one(CType)) : CType(0.5)
+    else
+        return zero(CType)
+    end
+end
+
+@inline function srt(ω::CType, f::CType, wi::CType, ρn::CType, ux::CType, uy::CType, uz::CType, uu::CType, ci) where {CType}
+    # cu = CType(ci[1])*ux + CType(ci[2])*uy + CType(ci[3])*uz
+    # feq = wi * ρn * (one(CType) + CType(3.0)*cu + CType(4.5)*cu*cu - uu)
+    return (one(CType) - ω) * f + ω * feq(wi, ρn, ux, uy, uz, uu, ci, CType)
+end
+
+@static if !SURFACE
 
 @kernel function initialize_kernel!(
     ρ, u, fi, flags,
@@ -66,6 +105,151 @@ end
         end
     end
 end
+
+end
+
+@static if SURFACE
+
+@inline function average_neighbors_fluid(
+    ρ, u, flags, x, y, z, c::NTuple{Q, SVector{3, Int}},
+    Nx, Ny, Nz, ::Type{CType}
+) where {Q, CType}
+    ρt = zero(CType); uxt = zero(CType); uyt = zero(CType); uzt = zero(CType)
+    cnt = zero(CType)
+
+    for i in 2:Q
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        if (flags[src] & TYPE_SU) == TYPE_F
+            cnt += one(CType)
+            ρt += ρ[src]
+            uxt += u[src, 1]; uyt += u[src, 2]; uzt += u[src, 3]
+        end
+    end
+    if cnt > 0
+        return ρt/cnt, uxt/cnt, uyt/cnt, uzt/cnt
+    else
+        return one(CType), zero(CType), zero(CType), zero(CType)
+    end
+end
+
+@inline function average_neighbors_non_gas(
+    ρ, u, flags, x, y, z, c::NTuple{Q, SVector{3,Int}}, 
+    Nx, Ny, Nz, ::Type{CType}
+) where {Q, CType}
+    ρt = zero(CType); uxt = zero(CType); uyt = zero(CType); uzt = zero(CType)
+    cnt = zero(CType)
+
+    for i in 2:Q
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        su = flags[src] & (TYPE_SU | TYPE_S)
+        if su == TYPE_F || su == TYPE_I || su == TYPE_IF
+            cnt += one(CType)
+            ρt += ρ[src]
+            uxt += u[src, 1]; uyt += u[src, 2]; uzt += u[src, 3]
+        end
+    end
+    if cnt > 0
+        return ρt/cnt, uxt/cnt, uyt/cnt, uzt/cnt
+    else
+        return one(CType), zero(CType), zero(CType), zero(CType)
+    end
+end
+
+@inline function store_feq!(
+    fi, n, x, y, z, ρn,
+    ux, uy, uz, w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}}, 
+    N, Nx, Ny, Nz, t_odd::Val{odd}
+) where {odd, Q, CType}
+    uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
+    fi[f_index(n, 1, N)] = eltype(fi)(feq(w[1], ρn, ux, uy, uz, uu, c[1], CType))
+
+    NP = (Q - 1) ÷ 2
+    for k in 1:NP
+        i = 2k
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        store_pair!(fi, n, src, i,
+            feq(w[i], ρn, ux, uy, uz, uu, c[i], CType),
+            feq(w[i+1], ρn, ux, uy, uz, uu, c[i+1], CType),
+            t_odd, N)
+    end
+    return nothing
+end
+
+@inline function initialize_body!(
+    ρ, u, fi, flags, mass, massex, ϕ,
+    w::NTuple{Q, CType},
+    c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+) where{Q, CType}
+    n0 = n - 1
+    x = n0 % Nx
+    y = (n0 ÷ Nx) % Ny
+    z = n0 ÷ (Nx * Ny)
+
+    flagsn = flags[n]
+    ρn = ρ[n]
+    ux, uy, uz = u[n, 1], u[n, 2], u[n, 3]
+    ϕn = ϕ[n]
+
+    flagsj = ntuple(Val(Q - 1)) do k
+        i = k + 1
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        flags[src]
+    end
+
+    if (flagsn & (TYPE_S | TYPE_E | TYPE_T | TYPE_F | TYPE_I)) == 0x00
+        flagsn = (flagsn & ~TYPE_SU) | TYPE_G
+    end
+
+    if (flagsn & TYPE_SU) == TYPE_G
+        to_interface = false
+        for k in 1:(Q - 1)
+            to_interface |= ((flagsj[k] & TYPE_SU) == TYPE_F)
+        end
+        if to_interface
+            flagsn = (flagsn & ~TYPE_SU) | TYPE_I
+            ϕn = CType(0.5)
+            ρn, ux, uy, uz = average_neighbors_fluid(ρ, u, flags, x, y, z, c, Nx, Ny, Nz, CType)
+            ρ[n] = ρn
+            u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz
+        end
+    end
+
+    if (flagsn & TYPE_S) == TYPE_S
+        u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
+    elseif (flagsn & TYPE_SU) == TYPE_G
+        u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
+        ϕn = zero(CType)
+    else
+        if (flagsn & TYPE_SU) == TYPE_I && (ϕn < 0 || ϕn > 1)
+            ϕn = CType(0.5)
+        elseif (flagsn & TYPE_SU) == TYPE_F
+            ϕn = one(CType)
+        end
+        store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(true))
+    end
+
+    ϕ[n] = ϕn
+    mass[n] = ϕn * ρ[n]
+    massex[n] = zero(CType)
+    flags[n] = flagsn
+    return nothing
+end
+
+@kernel function initialize_kernel!(
+    ρ, u, fi, flags,
+    mass, massex, ϕ,
+    w::NTuple{Q, CType},
+    c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds initialize_body!(ρ, u, fi, flags, mass, massex, ϕ, w, c, N, Nx, Ny, Nz, Int(n))
+end
+
+end # SURFACE
+
+@static if !SURFACE
 
 # generic fallback
 @inline function stream_collide_body!(
@@ -206,12 +390,6 @@ end
     return nothing
 end
 
-@inline function srt(ω::CType, f::CType, wi::CType, ρn::CType, ux::CType, uy::CType, uz::CType, uu::CType, ci) where {CType}
-    cu = CType(ci[1])*ux + CType(ci[2])*uy + CType(ci[3])*uz
-    feq = wi * ρn * (one(CType) + CType(3.0)*cu + CType(4.5)*cu*cu - uu)
-    return (one(CType) - ω) * f + ω * feq
-end
-
 @kernel function stream_collide_even_kernel!(
     @Const(flags), fi,
     w::NTuple{Q, CType}, 
@@ -234,14 +412,142 @@ end
     @inbounds stream_collide_body!(Val(true), flags, fi, w, c, ω, N, Nx, Ny, Nz, Int(n))
 end
 
+end
+
+@static if SURFACE
+
+@inline function stream_collide_surface_body!(
+    t_odd::Val{odd},
+    flags, fi, ρ, u, mass,
+    w::NTuple{Q, CType},
+    c::NTuple{Q, SVector{3, Int}},
+    ω::CType, fx::CType, fy::CType, fz::CType,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+) where {odd, Q, CType}
+    flagsn = flags[n]
+    if (flagsn & TYPE_BO) == TYPE_S || (flagsn & TYPE_SU) == TYPE_G
+        return nothing
+    end
+
+    n0 = n - 1
+    x = n0 % Nx; y = (n0 ÷ Nx) % Ny; z = n0 ÷ (Nx * Ny)
+    NP = (Q - 1) ÷ 2
+
+    fn1 = CType(fi[f_index(n, 1, N)])
+    pairs = ntuple(Val(NP)) do k
+        i = 2k
+        cp = c[i]
+        src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+        load_pair(fi, n, src, i, t_odd, N, CType)
+    end
+
+    ρn = fn1
+    ux = zero(CType); uy = zero(CType); uz = zero(CType)
+    for k in 1:NP
+        i = 2k
+        fp, fm = pairs[k]
+        ρn += fp + fm
+        ux += CType(c[i][1])*fp + CType(c[i+1][1])*fm
+        uy += CType(c[i][2])*fp + CType(c[i+1][2])*fm
+        uz += CType(c[i][3])*fp + CType(c[i+1][3])*fm
+    end
+    # invρ = one(CType) / ρn
+    # ux *= invρ; uy *= invρ; uz *= invρ
+
+    # @static if VOLUME_FORCE
+    #     ux += fx * invρ * CType(0.5)
+    #     uy += fy * invρ * CType(0.5)
+    #     uz += fz * invρ * CType(0.5)
+    # end
+    cs = CType(1) / sqrt(CType(3))
+    if ρn <= zero(CType)
+        ρn = one(CType)
+        ux = zero(CType); uy = zero(CType); uz = zero(CType)
+    else
+        invρ = one(CType) / ρn
+        ux *= invρ; uy *= invρ; uz *= invρ
+        @static if VOLUME_FORCE
+            ux += fx * invρ * CType(0.5)
+            uy += fy * invρ * CType(0.5)
+            uz += fz * invρ * CType(0.5)
+        end
+        ux = clamp(ux, -cs, cs)
+        uy = clamp(uy, -cs, cs)
+        uz = clamp(uz, -cs, cs)
+    end
+
+    @static if UPDATE_FIELDS
+        ρ[n] = ρn
+        u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz
+    end
+
+    if (flagsn & TYPE_SU) == TYPE_I
+        noF = true; noG = true
+        for i in 2:Q
+            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+            suj = flags[src] & TYPE_SU
+            noF &= suj != TYPE_F
+            noG &= suj != TYPE_G
+        end
+        massn = mass[n]
+        if massn > ρn || noG
+            flags[n] = (flagsn & ~TYPE_SU) | TYPE_IF
+        elseif massn < 0 || noF
+            flags[n] = (flagsn & ~TYPE_SU) | TYPE_IG
+        end
+    end
+
+    uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
+    fi[f_index(n, 1, N)] = eltype(fi)(srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]))
+    for k in 1:NP
+        i = 2k
+        fp, fm = pairs[k]
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        store_pair!(fi, n, src, i,
+            srt(ω, fp, w[i],     ρn, ux, uy, uz, uu, c[i]),
+            srt(ω, fm, w[i + 1], ρn, ux, uy, uz, uu, c[i + 1]),
+            t_odd, N)
+    end
+    return nothing
+end
+
+@kernel function stream_collide_even_kernel!(
+    flags, fi, ρ, u, mass,
+    w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
+    ω::CType, fx::CType, fy::CType, fz::CType,
+    N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function stream_collide_odd_kernel!(
+    flags, fi, ρ, u, mass,
+    w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
+    ω::CType, fx::CType, fy::CType, fz::CType,
+    N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+end
+
+end
+
 @inline function moments_body!(
     t_odd::Val{odd},
     ρ, u, flags, fi,
-    w::NTuple{Q, CType}, 
+    w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
-    if (flags[n] & TYPE_S) == TYPE_S
+    flagsn = flags[n]
+    su = flagsn & TYPE_SU
+
+    skip = (flagsn & TYPE_S) == TYPE_S
+    @static if SURFACE
+        skip |= (su == TYPE_G) | (su == TYPE_IG)
+    end
+    if skip
         ρ[n] = one(CType)
         u[n, 1] = zero(CType)
         u[n, 2] = zero(CType)
@@ -249,13 +555,17 @@ end
         return nothing
     end
 
+    @static if UPDATE_FIELDS
+        return nothing
+    end
+
     n0 = n - 1
-    x  = n0 % Nx
-    y  = (n0 ÷ Nx) % Ny
-    z  = n0 ÷ (Nx * Ny)
+    x = n0 % Nx
+    y = (n0 ÷ Nx) % Ny
+    z = n0 ÷ (Nx * Ny)
 
     fn1 = CType(fi[f_index(n, 1, N)])
-    NP  = (Q - 1) ÷ 2
+    NP = (Q - 1) ÷ 2
 
     pairs = ntuple(Val(NP)) do k
         i = 2k
@@ -271,10 +581,9 @@ end
         i = 2k
         fp, fm = pairs[k]
         ρn += fp + fm
-        cp, cm = c[i], c[i + 1]
-        ux += CType(cp[1]) * fp + CType(cm[1]) * fm
-        uy += CType(cp[2]) * fp + CType(cm[2]) * fm
-        uz += CType(cp[3]) * fp + CType(cm[3]) * fm
+        ux += CType(c[i][1])*fp + CType(c[i+1][1])*fm
+        uy += CType(c[i][2])*fp + CType(c[i+1][2])*fm
+        uz += CType(c[i][3])*fp + CType(c[i+1][3])*fm
     end
 
     invρ = one(CType) / ρn
@@ -299,4 +608,137 @@ end
 ) where {Q, CType}
     n = @index(Global)
     @inbounds moments_body!(Val(true), ρ, u, flags, fi, w, c, N, Nx, Ny, Nz, Int(n))
+end
+
+@static if SURFACE
+
+@kernel function surface_1_kernel!(
+    flags, c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {Q}
+    n = @index(Global)
+    @inbounds begin
+        sus = flags[n] & (TYPE_SU | TYPE_S)
+        if sus == TYPE_IF
+            n0 = n - 1
+            x = n0 % Nx; y = (n0 ÷ Nx) % Ny; z = n0 ÷ (Nx * Ny)
+            for i in 2:Q
+                j = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                fj = flags[j]
+                suj = fj & (TYPE_SU | TYPE_S)
+                rest = fj & ~TYPE_SU
+                if suj == TYPE_IG
+                    flags[j] = rest | TYPE_I
+                elseif suj == TYPE_G
+                    flags[j] = rest | TYPE_GI
+                end
+            end
+        end
+    end
+end
+
+@inline function surface_2_body!(
+    t_odd::Val{odd},
+    fi, ρ, u, flags,
+    w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+) where {odd, Q, CType}
+    sus = flags[n] & (TYPE_SU | TYPE_S)
+    n0 = n - 1
+    x = n0 % Nx; y = (n0 ÷ Nx) % Ny; z = n0 ÷ (Nx * Ny)
+
+    if sus == TYPE_GI
+        ρn, ux, uy, uz = average_neighbors_non_gas(ρ, u, flags, x, y, z, c, Nx, Ny, Nz, CType)
+        store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, t_odd)
+        return nothing
+    elseif sus == TYPE_IG
+        for i in 2:Q
+            j = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+            fj = flags[j]
+            suj = fj & (TYPE_SU | TYPE_S)
+            rest = fj & ~TYPE_SU
+            if suj == TYPE_F || suj == TYPE_IF
+                flags[j] = rest | TYPE_I
+            end
+        end
+    end
+    return nothing
+end
+
+@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+    n = @index(Global)
+    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, w, c, N, Nx, Ny, Nz, Int(n))
+end
+@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+    n = @index(Global)
+    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, w, c, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function surface_3_kernel!(
+    ρ, flags, mass, massex, ϕ,
+    c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {Q}
+    n = @index(Global)
+    @inbounds begin
+        flagsn = flags[n]
+        sus = flagsn & (TYPE_SU | TYPE_S)
+        if (sus & TYPE_S) == 0x00
+            CType = eltype(ρ)
+
+            ρn = ρ[n]
+            massn = mass[n]
+            massexn = zero(CType)
+            ϕn = zero(CType)
+
+            if sus == TYPE_F
+                massexn = massn - ρn
+                massn = ρn
+                ϕn = one(CType)
+            elseif sus == TYPE_I
+                massexn = massn > ρn ? massn - ρn : massn < 0 ? massn : zero(CType)
+                massn = clamp(massn, zero(CType), ρn)
+                ϕn = calculate_phi(ρn, massn, TYPE_I)
+            elseif sus == TYPE_G
+                massexn = massn
+                massn = zero(CType)
+                ϕn = zero(CType)
+            elseif sus == TYPE_IF
+                flags[n] = (flagsn & ~TYPE_SU) | TYPE_F
+                massexn = massn - ρn
+                massn = ρn
+                ϕn = one(CType)
+            elseif sus == TYPE_IG
+                flags[n] = (flagsn & ~TYPE_SU) | TYPE_G
+                massexn = massn
+                massn = zero(CType)
+                ϕn = zero(CType)
+            elseif sus == TYPE_GI
+                flags[n] = (flagsn & ~TYPE_SU) | TYPE_I
+                massexn = massn > ρn ? massn - ρn : massn < 0 ? massn : zero(CType)
+                massn = clamp(massn, zero(CType), ρn)
+                ϕn = calculate_phi(ρn, massn, TYPE_I)
+            end
+
+            n0 = n - 1
+            x = n0 % Nx; y = (n0 ÷ Nx) % Ny; z = n0 ÷ (Nx * Ny)
+            counter = 0
+            for i in 2:Q
+                j = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                suj = flags[j] & (TYPE_SU | TYPE_S)
+                counter += Int(suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI)
+            end
+            if counter == 0
+                massn += massexn
+                massexn = zero(CType)
+            else
+                massexn /= CType(counter)
+            end
+            mass[n] = massn
+            massex[n] = massexn
+            ϕ[n] = ϕn
+        end
+    end
+end
+
 end

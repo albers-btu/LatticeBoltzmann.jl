@@ -9,6 +9,7 @@ using Test, StaticArrays, CUDA
 	include("test_model.jl")
 
 	model = Model(256, 256, 256, 1.0; CType=Float32, SType=Float16, backend=CUDABackend())
+	#model = Model(64, 64, 64, 1.0)
 
 	# set boundaries for box with all walls solid
 	Nx, Ny, Nz = Int(model.Nx), Int(model.Ny), Int(model.Nz)
@@ -23,6 +24,5 @@ using Test, StaticArrays, CUDA
 
 	for i in 1:1 # 1000
 		run!(model, 10)
-		#export!(model)
 	end
 end

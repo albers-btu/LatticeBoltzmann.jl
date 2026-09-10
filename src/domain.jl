@@ -27,10 +27,17 @@ mutable struct Domain{
     fi::Memory{SType, Afi}
     flags::Memory{UInt8, Af}
 
+    @static if SURFACE
+        ϕ::Memory{CType, Aρ}
+        mass::Memory{CType, Aρ}
+        massex::Memory{CType, Aρ}
+        σ::CType
+    end
+
     t::UInt64
 end
 
-function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{CType}, ::Type{SType}) where {CType, SType}
+function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{CType}, ::Type{SType}; σ::CType = zero(CType)) where {CType, SType}
     Q = length(WEIGHTS[scheme])
     
     N = Int(Nx) * Int(Ny) * Int(Nz)
@@ -49,14 +56,39 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     flags = Memory(AT{UInt8}(undef, N))
     fill!(flags.data, 0x00)
 
-    Domain(
-        UInt(Nx), UInt(Ny), UInt(Nz),
-        Int(Ox), Int(Oy), Int(Oz),
-        CType(ν), N, ω,
-        CType(fx), CType(fy), CType(fz),
-        ρ, u, fi, flags,
-        UInt64(0)
-    )
+    @static if SURFACE
+        ϕ = Memory(AT{CType}(undef, N))
+        fill!(ϕ.data, zero(CType))
+
+        mass = Memory(AT{CType}(undef, N))
+        fill!(mass.data, zero(CType))
+
+        massex = Memory(AT{CType}(undef, N))
+        fill!(massex.data, zero(CType))
+    end
+
+    @static if SURFACE
+        Domain(
+            UInt(Nx), UInt(Ny), UInt(Nz),
+            Int(Ox), Int(Oy), Int(Oz),
+            CType(ν), N, ω,
+            CType(fx), CType(fy), CType(fz),
+            ρ, u, fi, flags,
+            # --- SURFACE ---
+            ϕ, mass, massex, σ,
+            # --- SURFACE ---
+            UInt64(0)
+        )
+    else
+        Domain(
+            UInt(Nx), UInt(Ny), UInt(Nz),
+            Int(Ox), Int(Oy), Int(Oz),
+            CType(ν), N, ω,
+            CType(fx), CType(fy), CType(fz),
+            ρ, u, fi, flags,
+            UInt64(0)
+        )
+    end
 end
 
 get_N(domain::Domain) = Int(domain.Nx) * Int(domain.Ny) * Int(domain.Nz)
@@ -65,6 +97,12 @@ get_N(domain::Domain) = Int(domain.Nx) * Int(domain.Ny) * Int(domain.Nz)
 u(domain::Domain) = domain.u
 fi(domain::Domain) = domain.fi
 flags(domain::Domain) = domain.flags
+
+@static if SURFACE
+    ϕ(domain::Domain) = domain.ϕ
+    mass(domain::Domain) = domain.mass
+    massex(domain::Domain) = domain.massex
+end
 
 τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + CType(1) / CType(2)
 
