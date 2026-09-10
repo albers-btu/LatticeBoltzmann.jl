@@ -22,6 +22,8 @@ mutable struct Domain{
     fy::CType # global force per volume y
     fz::CType # global force per volume z
 
+    σ::CType
+
     ρ::Memory{CType, Aρ}
     u::Memory{CType, Au}
     fi::Memory{SType, Afi}
@@ -31,7 +33,6 @@ mutable struct Domain{
         ϕ::Memory{CType, Aρ}
         mass::Memory{CType, Aρ}
         massex::Memory{CType, Aρ}
-        σ::CType
     end
 
     t::UInt64
@@ -73,9 +74,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
             Int(Ox), Int(Oy), Int(Oz),
             CType(ν), N, ω,
             CType(fx), CType(fy), CType(fz),
+            CType(σ),
             ρ, u, fi, flags,
             # --- SURFACE ---
-            ϕ, mass, massex, σ,
+            ϕ, mass, massex,
             # --- SURFACE ---
             UInt64(0)
         )
@@ -85,6 +87,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
             Int(Ox), Int(Oy), Int(Oz),
             CType(ν), N, ω,
             CType(fx), CType(fy), CType(fz),
+            CType(σ),
             ρ, u, fi, flags,
             UInt64(0)
         )

@@ -8,7 +8,7 @@ using Test, StaticArrays, CUDA
 	include("test_memory.jl")
 	include("test_model.jl")
 
-	model = Model(256, 256, 256, 1.0; CType=Float32, SType=Float16, backend=CUDABackend())
+	model = Model(256, 256, 256, 1.0; backend=CUDABackend())
 	#model = Model(64, 64, 64, 1.0)
 
 	# set boundaries for box with all walls solid

@@ -49,6 +49,30 @@ mutable struct Model{
     cached_moments_odd!::Any
 
     initialized::Bool
+    units::Units{CType}
+end
+
+function Model(
+    Nx, Ny, Nz, units::Units{CType};
+    ν = 1.0e-6,
+    gx = 0.0f0, gy = 0.0f0, gz = -9.81f0,
+    σ = 0.0f0,
+    SType::Type{<:AbstractFloat} = CType,
+    scheme = :D3Q19,
+    backend = CPU(),
+    workgroup = default_workgroup(backend)
+) where {CType}
+    ν  = CType(lbm_ν(units, ν))
+    fx = CType(lbm_g(units, gx)) # ρ_lbm = 1 → force/volume = g
+    fy = CType(lbm_g(units, gy))
+    fz = CType(lbm_g(units, gz))
+    σ  = CType(lbm_σ(units, σ))
+
+    # @info units
+
+    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, CType, SType, scheme, backend, workgroup)
+    model.units = units
+    return model
 end
 
 function Model(
@@ -99,6 +123,7 @@ function Model(
     Hz::UInt = UInt(Dz > 1) # halo offset z
     
     ν = CType(ν)
+    warn_lattice_stability(ν, CType(fx), CType(fy), CType(fz), Nx, Ny, Nz; SType)
 
     domains = map(1:Int(D)) do d
         d0 = d - 1
@@ -122,7 +147,8 @@ function Model(
             scheme,
             backend,
             CType,
-            SType
+            SType;
+            σ=CType(σ),
         )
     end
 
@@ -164,7 +190,8 @@ function Model(
             cached_initialize,
             cached_moments_even,
             cached_moments_odd,
-            false
+            false,
+            Units{CType}()
         )
     else
         Model(
@@ -180,7 +207,8 @@ function Model(
             cached_initialize,
             cached_moments_even,
             cached_moments_odd,
-            false
+            false,
+            Units{CType}()
         )
     end
 end
@@ -200,7 +228,49 @@ flags(model::Model) = model.flags
 u(model::Model) = model.u
 
 @static if SURFACE
-    σ(model::Model) = model.σ
+    σ(model::Model) = model.domains[1].σ
+end
+
+function warn_lattice_stability(
+    ν, fx, fy, fz, Nx, Ny, Nz;
+    SType::Type = Float32,
+    u = nothing,
+    H = nothing,
+)
+    C = typeof(float(ν))
+    νc = C(ν)
+    cs = C(1) / sqrt(C(3))
+    τ = C(3) * νc + C(1) / C(2)
+    ω = one(C) / τ
+    fmag = hypot(C(fx), C(fy), C(fz))
+    L = C(max(Int(Nx), Int(Ny), Int(Nz)))
+    Hcells = H === nothing ? L : C(H)
+    u_g = (fmag > 0 && Hcells > 0) ? sqrt(fmag * Hcells) : zero(C)
+    u_char = u === nothing ? u_g : C(u)
+    Ma = u_char / cs
+
+    if !(νc > 0)
+        @warn "lattice ν ≤ 0 is invalid" ν=νc
+    end
+    if !(τ > C(0.5)) || ω >= C(2)
+        @warn "SRT unstable: τ ≤ 1/2 (ω ≥ 2)" ν=νc τ ω
+    elseif ω > C(1.99)
+        @warn "lattice ν is tiny: ω=$(round(Float64(ω); digits=5)) is extremely close to 2. Increase ν or refine the grid." ν=νc τ ω
+    elseif ω > C(1.95)
+        @warn "lattice ω=$(round(Float64(ω); digits=4)) is close to 2; SRT is stiff" ν=νc τ ω
+    end
+    if SType === Float16 && ω > C(1.8)
+        @warn "SType=Float16 with ω=$(round(Float64(ω); digits=4)) is a common SURFACE NaN source; use Float32 until the case is stable" ω
+    end
+    if Ma > C(0.3)
+        @warn "characteristic Mach=$(round(Float64(Ma); digits=3)) (u=$u_char, cs=$cs) is likely unstable; lower lbm_u or |g|"
+    elseif Ma > C(0.15)
+        @warn "characteristic Mach=$(round(Float64(Ma); digits=3)) is high for D3Q19 (target ≲ 0.1)" u=u_char
+    end
+    if fmag > C(1e-3)
+        @warn "lattice |f|=$fmag is large; expect compressibility / SURFACE blow-up"
+    end
+    return nothing
 end
 
 function export!(model::Model; dir::AbstractString="output")
@@ -217,23 +287,40 @@ function export!(model::Model; dir::AbstractString="output")
     u_host     = Array(domain.u.data)
     flags_host = Array(domain.flags.data)
 
-    ρ3     = reshape(Float32.(ρ_host), Nx, Ny, Nz)
-    ux     = reshape(Float32.(view(u_host, :, 1)), Nx, Ny, Nz)
-    uy     = reshape(Float32.(view(u_host, :, 2)), Nx, Ny, Nz)
-    uz     = reshape(Float32.(view(u_host, :, 3)), Nx, Ny, Nz)
+    umax = maximum(@views hypot.(u_host[:, 1], u_host[:, 2], u_host[:, 3]))
+    if any(!isfinite, ρ_host) || any(!isfinite, u_host)
+        @warn "non-finite ρ/u at t=$t - simulation has likely diverged"
+    elseif umax > 0.4f0
+        @warn "max |u|=$umax at t=$t exceeds ≈0.4 (cs=$(1/sqrt(3))); unstable"
+    elseif umax > 0.15f0
+        @warn "max |u|=$umax at t=$t is high (Ma=$(umax * sqrt(3f0)))"
+    end
+
+    U = model.units
+    dx = Float32(U.m)
+    t_si = si_t(U, t)
+
+    xs = range(0f0, step=dx, length=Nx)
+    ys = range(0f0, step=dx, length=Ny)
+    zs = range(0f0, step=dx, length=Nz)
+
+    ρ3     = reshape(Float32.(si_ρ.(Ref(U), ρ_host)), Nx, Ny, Nz)
+    ux     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 1))), Nx, Ny, Nz)
+    uy     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 2))), Nx, Ny, Nz)
+    uz     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 3))), Nx, Ny, Nz)
     flags3 = reshape(flags_host, Nx, Ny, Nz)
 
     pvd_path = joinpath(dir, "lbm")
     pvd = paraview_collection(pvd_path; append = isfile(pvd_path * ".pvd"))
 
-    vtk_grid(joinpath(dir, @sprintf("lbm_%08d", t)), 0:Nx-1, 0:Ny-1, 0:Nz-1) do vtk
+    vtk_grid(joinpath(dir, @sprintf("lbm_%08d", t)), xs, ys, zs) do vtk
         vtk["rho"] = ρ3 
         vtk["u"] = (ux, uy, uz)
         vtk["flags"] = flags3
         @static if SURFACE
             vtk["phi"] = reshape(Float32.(Array(domain.ϕ.data)), Nx, Ny, Nz)
         end
-        pvd[t] = vtk
+        pvd[t_si] = vtk
     end
 
     vtk_save(pvd)

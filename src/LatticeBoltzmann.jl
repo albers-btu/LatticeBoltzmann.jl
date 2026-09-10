@@ -8,8 +8,12 @@ include("velocities.jl")
 export VELOCITIES
 export velocities
 
-include("defines.jl")
+include("extensions.jl")
 export SURFACE, VOLUME_FORCE, UPDATE_FIELDS
+
+include("units.jl")
+export Units
+export si_x, si_t, si_u, si_ρ, si_p, lbm_ν, lbm_g, lbm_σ, lbm_u
 
 include("flags.jl")
 export TYPE_S, TYPE_E, TYPE_T, TYPE_F, TYPE_I, TYPE_G, TYPE_MS
