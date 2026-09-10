@@ -312,6 +312,7 @@ function export!(model::Model; dir::AbstractString="output")
     zs = range(0f0, step=dx, length=Nz)
 
     ρ3     = reshape(Float32.(si_ρ.(Ref(U), ρ_host)), Nx, Ny, Nz)
+    p3     = reshape(Float32.(si_p.(Ref(U), ρ_host)), Nx, Ny, Nz)
     ux     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 1))), Nx, Ny, Nz)
     uy     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 2))), Nx, Ny, Nz)
     uz     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 3))), Nx, Ny, Nz)
@@ -321,7 +322,8 @@ function export!(model::Model; dir::AbstractString="output")
     pvd = paraview_collection(pvd_path; append = isfile(pvd_path * ".pvd"))
 
     vtk_grid(joinpath(dir, @sprintf("lbm_%08d", t)), xs, ys, zs) do vtk
-        vtk["rho"] = ρ3 
+        vtk["rho"] = ρ3
+        vtk["p"] = p3
         vtk["u"] = (ux, uy, uz)
         vtk["flags"] = flags3
         @static if SURFACE

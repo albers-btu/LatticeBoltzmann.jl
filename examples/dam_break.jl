@@ -48,7 +48,7 @@ d = model.domains[1]
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output")
 
-nsteps = 10000
+nsteps = 2000
 every  = 20
 for i in 1:(nsteps ÷ every)
     run!(model, every)
