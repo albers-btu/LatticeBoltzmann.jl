@@ -1,4 +1,4 @@
-using Printf, CUDA
+using Printf, CUDA, WriteVTK
 
 mutable struct Model{
     CType<:AbstractFloat,
@@ -35,8 +35,12 @@ mutable struct Model{
     cached_collide_even!::Any
     cached_collide_odd!::Any
     cached_initialize!::Any
+    cached_moments_even!::Any
+    cached_moments_odd!::Any
 
     initialized::Bool
+
+    pvd::Any
 end
 
 function Model(
@@ -55,6 +59,8 @@ function Model(
     cached_collide_even = stream_collide_even_kernel!(backend, workgroup)
     cached_collide_odd = stream_collide_odd_kernel!(backend, workgroup)
     cached_initialize = initialize_kernel!(backend, workgroup)
+    cached_moments_even = moments_even_kernel!(backend, workgroup)
+    cached_moments_odd = moments_odd_kernel!(backend, workgroup)
 
     Dx = UInt(1)
     Dy = UInt(1)
@@ -122,7 +128,10 @@ function Model(
         cached_collide_even,
         cached_collide_odd,
         cached_initialize,
-        false
+        cached_moments_even,
+        cached_moments_odd,
+        false,
+        nothing
     )
 end
 
@@ -140,15 +149,49 @@ flags(model::Model) = model.flags
 ρ(model::Model) = model.ρ
 u(model::Model) = model.u
 
-# sets up the simulation, copies data to device and runs for n steps
-function run!(model::Model, steps::Int)
-    steps > 0 || throw(ArgumentError("steps must be positive"))
+function export!(model::Model; dir::AbstractString="output")
+    model.initialized || initialize!(model)
+    moments!(model)
+
+    mkpath(dir)
+
+    domain = model.domains[1] # not general yet
+    t = Int(domain.t)
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+
+    ρ_host     = Array(domain.ρ.data)
+    u_host     = Array(domain.u.data)
+    flags_host = Array(domain.flags.data)
+
+    ρ3     = reshape(Float32.(ρ_host), Nx, Ny, Nz)
+    ux     = reshape(Float32.(view(u_host, :, 1)), Nx, Ny, Nz)
+    uy     = reshape(Float32.(view(u_host, :, 2)), Nx, Ny, Nz)
+    uz     = reshape(Float32.(view(u_host, :, 3)), Nx, Ny, Nz)
+    flags3 = reshape(flags_host, Nx, Ny, Nz)
+
+    if model.pvd === nothing
+        model.pvd = paraview_collection(joinpath(dir, "lbm"))
+    end
+
+    vtk_grid(joinpath(dir, @sprintf("lbm_%08d", t)), 0:Nx-1, 0:Ny-1, 0:Nz-1) do vtk
+        vtk["rho"] = ρ3 
+        vtk["u"] = (ux, uy, uz)
+        vtk["flags"] = flags3
+        model.pvd[t] = vtk
+    end
+
+    vtk_save(model.pvd)
+    return nothing
+end
+
+function run!(model::Model, nsteps::Int)
+    nsteps > 0 || throw(ArgumentError("nsteps must be positive"))
 
     if !model.initialized
         initialize!(model)
     end
 
-    for i in 1:steps
+    for _ in 1:nsteps
         start = time_ns()
         step!(model)
         elapsed_s = (time_ns() - start) / 1e9
@@ -177,14 +220,11 @@ function initialize!(model::Model)
     @info "finished initializing"
 end
 
-#@inline kernel_flags(flags) = flags isa CuArray ? CUDA.Const(flags) : flags
-
 function step!(model::Model)
     for domain in model.domains
         N = get_N(domain)
         kernel = isodd(domain.t) ? model.cached_collide_odd! : model.cached_collide_even!
         kernel(
-            #kernel_flags(domain.flags.data),
             domain.flags.data,
             domain.fi.data,
             model.weights, model.velocities,
@@ -193,6 +233,23 @@ function step!(model::Model)
             ndrange = N
         )
         increment_time_step!(domain, 1)
+    end
+    KernelAbstractions.synchronize(model.backend)
+end
+
+function moments!(model::Model)
+    for domain in model.domains
+        N = get_N(domain)
+        kernel = isodd(domain.t) ? model.cached_moments_odd! : model.cached_moments_even!
+        kernel(
+            domain.ρ.data,
+            domain.u.data,
+            domain.flags.data,
+            domain.fi.data,
+            model.weights, model.velocities,
+            Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+            ndrange = N
+        )
     end
     KernelAbstractions.synchronize(model.backend)
 end

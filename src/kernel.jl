@@ -44,7 +44,7 @@ end
         if (flags[n] & TYPE_S) == TYPE_S
             u[n, 1] = zero(CType)
             u[n, 2] = zero(CType)
-            u[n, 3] = zero(CType);
+            u[n, 3] = zero(CType)
         else
             uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
             fi[f_index(n, 1, N)] = eltype(fi)(w[1] * ρn * (one(CType) - uu))
@@ -213,7 +213,7 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    flags, fi,
+    @Const(flags), fi,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType,
@@ -224,7 +224,7 @@ end
 end
 
 @kernel function stream_collide_odd_kernel!(
-    flags, fi,
+    @Const(flags), fi,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType,
@@ -232,4 +232,71 @@ end
 ) where {Q, CType}
     n = @index(Global)
     @inbounds stream_collide_body!(Val(true), flags, fi, w, c, ω, N, Nx, Ny, Nz, Int(n))
+end
+
+@inline function moments_body!(
+    t_odd::Val{odd},
+    ρ, u, flags, fi,
+    w::NTuple{Q, CType}, 
+    c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+) where {odd, Q, CType}
+    if (flags[n] & TYPE_S) == TYPE_S
+        ρ[n] = one(CType)
+        u[n, 1] = zero(CType)
+        u[n, 2] = zero(CType)
+        u[n, 3] = zero(CType)
+        return nothing
+    end
+
+    n0 = n - 1
+    x  = n0 % Nx
+    y  = (n0 ÷ Nx) % Ny
+    z  = n0 ÷ (Nx * Ny)
+
+    fn1 = CType(fi[f_index(n, 1, N)])
+    NP  = (Q - 1) ÷ 2
+
+    pairs = ntuple(Val(NP)) do k
+        i = 2k
+        cp = c[i]
+        src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+        load_pair(fi, n, src, i, t_odd, N, CType)
+    end
+
+    ρn = fn1
+    ux = uy = uz = zero(CType)
+
+    for k in 1:NP
+        i = 2k
+        fp, fm = pairs[k]
+        ρn += fp + fm
+        cp, cm = c[i], c[i + 1]
+        ux += CType(cp[1]) * fp + CType(cm[1]) * fm
+        uy += CType(cp[2]) * fp + CType(cm[2]) * fm
+        uz += CType(cp[3]) * fp + CType(cm[3]) * fm
+    end
+
+    invρ = one(CType) / ρn
+    ρ[n] = ρn
+    u[n, 1] = ux * invρ
+    u[n, 2] = uy * invρ
+    u[n, 3] = uz * invρ
+    return nothing
+end
+
+@kernel function moments_even_kernel!(
+    ρ, u, @Const(flags), fi, w::NTuple{Q, CType},
+    c, N, Nx, Ny, Nz
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds moments_body!(Val(false), ρ, u, flags, fi, w, c, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function moments_odd_kernel!(
+    ρ, u, @Const(flags), fi, w::NTuple{Q, CType},
+    c, N, Nx, Ny, Nz
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds moments_body!(Val(true), ρ, u, flags, fi, w, c, N, Nx, Ny, Nz, Int(n))
 end

@@ -27,6 +27,6 @@ export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kerne
 include("model.jl")
 export Model
 export get_D
-export run!
+export run!, export!
 
 end
