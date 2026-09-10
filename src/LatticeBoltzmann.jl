@@ -32,6 +32,9 @@ export increment_time_step!
 include("kernel.jl")
 export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!
 
+include("plic.jl")
+export plic_cube, calculate_curvature, calculate_normal_py
+
 include("model.jl")
 export Model
 export get_D

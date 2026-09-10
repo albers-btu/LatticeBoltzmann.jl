@@ -509,8 +509,7 @@ end
     ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
 
     ϕin = calculate_phi(ρn, massn, flagsn)
-    # σ=0 -> ρ_gas = 1; curvature later
-    ρ_gas = one(CType)
+    ρ_gas = gas_density_plic(σ, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
     @static if VOLUME_FORCE
         uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
         uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)

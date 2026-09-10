@@ -15,16 +15,14 @@ Ma = 0.05 # D3Q19 Ma is usual safe below 0.05
 cs = 1 / sqrt(3)
 lbm_u = Ma * cs
 
-units = Units(si_L, si_u, 1000u"kg/m^3"; x=Nx, u=lbm_u, ρ=1, T=Float32)
+# Glycerol at 20 °C against air. Water (ν=1e-6 m²/s, σ=0.072 N/m) is Re~5e4
+# at this tank size and is not resolvable on 64³; glycerol gives lattice τ≈0.58.
+si_ρ = 1260u"kg/m^3"       # density
+ν    = 1.12e-3u"m^2/s"     # kinematic viscosity, μ/ρ ≈ 1.41 Pa·s / 1260 kg/m³
+σ    = 0.0634u"N/m"        # surface tension, glycerol–air
 
-# stable SRT band 0.53 … 1
-# stable TRT band 0.505 … 1
-τ = 0.51f0
-ν_lbm = (τ - 0.5f0) / 3
-ν = LatticeBoltzmann.si_ν(units, ν_lbm) * u"m^2/s" # 1.2e-3u"m^2/s" # honey at 7.0e-3
-@info "Kinematic viscosity $ν"
-# ν = 1.0e-6u"m^2/s" # water
-σ = 0u"N/m"
+units = Units(si_L, si_u, si_ρ; x=Nx, u=lbm_u, ρ=1, T=Float32)
+@info "glycerol 20°C" ν σ si_ρ τ=(3 * lbm_ν(units, ν) + 0.5)
 
 model = Model(Nx, Ny, Nz, units;
               ν = ν,                 # kinematic viscosity
@@ -48,10 +46,11 @@ d = model.domains[1]
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output")
 
-nsteps = 2000
+nsteps = 10000
 every  = 20
 for i in 1:(nsteps ÷ every)
     run!(model, every)
     export!(model; dir="output")
-    @info "dump" t=Int(d.t)
+    t = Int(d.t)
+    @info "dump" t t_si=si_t(model.units, t)*u"s"
 end

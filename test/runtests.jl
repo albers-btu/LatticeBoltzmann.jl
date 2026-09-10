@@ -7,6 +7,7 @@ using Test, StaticArrays, CUDA
 	include("test_kernel.jl")
 	include("test_memory.jl")
 	include("test_model.jl")
+	include("test_plic.jl")
 
 	model = Model(256, 256, 256, 1.0; backend=CUDABackend())
 	#model = Model(64, 64, 64, 1.0)
