@@ -1,3 +1,5 @@
+const TRT = true # false -> keep SRT
+
 const SURFACE      = true
 const VOLUME_FORCE = true
 

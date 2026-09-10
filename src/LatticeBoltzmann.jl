@@ -9,7 +9,7 @@ export VELOCITIES
 export velocities
 
 include("extensions.jl")
-export SURFACE, VOLUME_FORCE, UPDATE_FIELDS
+export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS
 
 include("units.jl")
 export Units

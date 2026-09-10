@@ -66,6 +66,30 @@ end
     return (one(CType) - ω) * f + ω * feq(wi, ρn, ux, uy, uz, uu, ci, CType)
 end
 
+@inline function collide_pair(
+    ωp::CType, ωm::CType, fp::CType, fm::CType, feqp::CType, feqm::CType
+) where {CType}
+    @static if TRT
+        half = CType(0.5)
+        fsum = fp + fm
+        fdif = fp - fm
+        esum = feqp + feqm
+        edif = feqp - feqm
+        return (
+            fp + half * ωp * (esum - fsum) + half * ωm * (edif - fdif),
+            fm + half * ωp * (esum - fsum) - half * ωm * (edif - fdif),
+        )
+    else
+        return ((one(CType) - ωp) * fp + ωp * feqp,
+                (one(CType) - ωp) * fm + ωp * feqm)
+    end
+end
+
+@inline function omega_minus(ω::CType) where {CType}
+    three_nu = one(CType) / ω - CType(0.5) # 3ν = τ⁺ − 1/2
+    return one(CType) / (CType(0.1875) / three_nu + CType(0.5))
+end
+
 @static if !SURFACE
 
 @kernel function initialize_kernel!(
@@ -298,6 +322,12 @@ end # SURFACE
         # SRT: f* = f - ω(f - feq)
         fi[f_index(n, 1, N)] = eltype(fi)((one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)))
 
+        @static if TRT
+            ωm = omega_minus(ω)
+        else
+            ωm = ω
+        end
+
         for k in 1:NP
             i = 2k
             fp, fm = pairs[k]
@@ -306,11 +336,9 @@ end # SURFACE
             cum = CType(cm[1])*ux + CType(cm[2])*uy + CType(cm[3])*uz
             feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
             feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
+            fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
             src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-            store_pair!(fi, n, src, i,
-                (one(CType) - ω) * fp + ω * feqp,
-                (one(CType) - ω) * fm + ω * feqm,
-                t_odd, N)
+            store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
         end
     end
     return nothing
@@ -376,17 +404,60 @@ end
     ux *= invρ; uy *= invρ; uz *= invρ
     uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
 
+    @static if TRT
+        ωm = omega_minus(ω)
+    else
+        ωm = ω
+    end
+
     fi[f_index(n, 1, N)] = eltype(fi)((one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)))
 
-    store_pair!(fi, n, src2,  2,  srt(ω, fp2,  w[2],  ρn, ux, uy, uz, uu, c[2]),  srt(ω, fm3,  w[3],  ρn, ux, uy, uz, uu, c[3]),  t_odd, N)
-    store_pair!(fi, n, src4,  4,  srt(ω, fp4,  w[4],  ρn, ux, uy, uz, uu, c[4]),  srt(ω, fm5,  w[5],  ρn, ux, uy, uz, uu, c[5]),  t_odd, N)
-    store_pair!(fi, n, src6,  6,  srt(ω, fp6,  w[6],  ρn, ux, uy, uz, uu, c[6]),  srt(ω, fm7,  w[7],  ρn, ux, uy, uz, uu, c[7]),  t_odd, N)
-    store_pair!(fi, n, src8,  8,  srt(ω, fp8,  w[8],  ρn, ux, uy, uz, uu, c[8]),  srt(ω, fm9,  w[9],  ρn, ux, uy, uz, uu, c[9]),  t_odd, N)
-    store_pair!(fi, n, src10, 10, srt(ω, fp10, w[10], ρn, ux, uy, uz, uu, c[10]), srt(ω, fm11, w[11], ρn, ux, uy, uz, uu, c[11]), t_odd, N)
-    store_pair!(fi, n, src12, 12, srt(ω, fp12, w[12], ρn, ux, uy, uz, uu, c[12]), srt(ω, fm13, w[13], ρn, ux, uy, uz, uu, c[13]), t_odd, N)
-    store_pair!(fi, n, src14, 14, srt(ω, fp14, w[14], ρn, ux, uy, uz, uu, c[14]), srt(ω, fm15, w[15], ρn, ux, uy, uz, uu, c[15]), t_odd, N)
-    store_pair!(fi, n, src16, 16, srt(ω, fp16, w[16], ρn, ux, uy, uz, uu, c[16]), srt(ω, fm17, w[17], ρn, ux, uy, uz, uu, c[17]), t_odd, N)
-    store_pair!(fi, n, src18, 18, srt(ω, fp18, w[18], ρn, ux, uy, uz, uu, c[18]), srt(ω, fm19, w[19], ρn, ux, uy, uz, uu, c[19]), t_odd, N)
+    let feqp = feq(w[2], ρn, ux, uy, uz, uu, c[2], CType)
+        feqm = feq(w[3], ρn, ux, uy, uz, uu, c[3], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp2, fm3, feqp, feqm)
+        store_pair!(fi, n, src2, 2, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[4], ρn, ux, uy, uz, uu, c[4], CType)
+        feqm = feq(w[5], ρn, ux, uy, uz, uu, c[5], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp4, fm5, feqp, feqm)
+        store_pair!(fi, n, src4, 4, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[6], ρn, ux, uy, uz, uu, c[6], CType)
+        feqm = feq(w[7], ρn, ux, uy, uz, uu, c[7], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp6, fm7, feqp, feqm)
+        store_pair!(fi, n, src6, 6, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[8], ρn, ux, uy, uz, uu, c[8], CType)
+        feqm = feq(w[9], ρn, ux, uy, uz, uu, c[9], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp8, fm9, feqp, feqm)
+        store_pair!(fi, n, src8, 8, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[10], ρn, ux, uy, uz, uu, c[10], CType)
+        feqm = feq(w[11], ρn, ux, uy, uz, uu, c[11], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp10, fm11, feqp, feqm)
+        store_pair!(fi, n, src10, 10, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[12], ρn, ux, uy, uz, uu, c[12], CType)
+        feqm = feq(w[13], ρn, ux, uy, uz, uu, c[13], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp12, fm13, feqp, feqm)
+        store_pair!(fi, n, src12, 12, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[14], ρn, ux, uy, uz, uu, c[14], CType)
+        feqm = feq(w[15], ρn, ux, uy, uz, uu, c[15], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp14, fm15, feqp, feqm)
+        store_pair!(fi, n, src14, 14, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[16], ρn, ux, uy, uz, uu, c[16], CType)
+        feqm = feq(w[17], ρn, ux, uy, uz, uu, c[17], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp16, fm17, feqp, feqm)
+        store_pair!(fi, n, src16, 16, fp_s, fm_s, t_odd, N)
+    end
+    let feqp = feq(w[18], ρn, ux, uy, uz, uu, c[18], CType)
+        feqm = feq(w[19], ρn, ux, uy, uz, uu, c[19], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp18, fm19, feqp, feqm)
+        store_pair!(fi, n, src18, 18, fp_s, fm_s, t_odd, N)
+    end
+
     return nothing
 end
 
@@ -451,14 +522,7 @@ end
         uy += CType(c[i][2])*fp + CType(c[i+1][2])*fm
         uz += CType(c[i][3])*fp + CType(c[i+1][3])*fm
     end
-    # invρ = one(CType) / ρn
-    # ux *= invρ; uy *= invρ; uz *= invρ
 
-    # @static if VOLUME_FORCE
-    #     ux += fx * invρ * CType(0.5)
-    #     uy += fy * invρ * CType(0.5)
-    #     uz += fz * invρ * CType(0.5)
-    # end
     cs = CType(1) / sqrt(CType(3))
     if ρn <= zero(CType)
         ρn = one(CType)
@@ -498,15 +562,21 @@ end
     end
 
     uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
+    @static if TRT
+        ωm = omega_minus(ω)
+    else
+        ωm = ω
+    end
+
     fi[f_index(n, 1, N)] = eltype(fi)(srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]))
     for k in 1:NP
         i = 2k
         fp, fm = pairs[k]
+        feqp = feq(w[i],     ρn, ux, uy, uz, uu, c[i],     CType)
+        feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
+        fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
         src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-        store_pair!(fi, n, src, i,
-            srt(ω, fp, w[i],     ρn, ux, uy, uz, uu, c[i]),
-            srt(ω, fm, w[i + 1], ρn, ux, uy, uz, uu, c[i + 1]),
-            t_odd, N)
+        store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
     end
     return nothing
 end

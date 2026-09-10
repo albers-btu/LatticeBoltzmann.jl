@@ -253,11 +253,18 @@ function warn_lattice_stability(
         @warn "lattice ν ≤ 0 is invalid" ν=νc
     end
     if !(τ > C(0.5)) || ω >= C(2)
-        @warn "SRT unstable: τ ≤ 1/2 (ω ≥ 2)" ν=νc τ ω
-    elseif ω > C(1.99)
-        @warn "lattice ν is tiny: ω=$(round(Float64(ω); digits=5)) is extremely close to 2. Increase ν or refine the grid." ν=νc τ ω
-    elseif ω > C(1.95)
-        @warn "lattice ω=$(round(Float64(ω); digits=4)) is close to 2; SRT is stiff" ν=νc τ ω
+        @warn "unstable: τ ≤ 1/2 (ω⁺ ≥ 2)" ν=νc τ ω
+    elseif TRT
+        ωm = one(C) / (C(0.1875) / (one(C)/ω - C(0.5)) + C(0.5))
+        if ω > C(1.99)
+            @info "TRT: ω⁺=$(round(Float64(ω); digits=5)) close to 2, ω⁻=$(round(Float64(ωm); digits=4)) (Λ=3/16)"
+        end
+    else
+        if ω > C(1.99)
+            @warn "lattice ν is tiny: ω=$(round(Float64(ω); digits=5)) is extremely close to 2. Increase ν or refine the grid." ν=νc τ ω
+        elseif ω > C(1.95)
+            @warn "lattice ω=$(round(Float64(ω); digits=4)) is close to 2; SRT is stiff" ν=νc τ ω
+        end
     end
     if SType === Float16 && ω > C(1.8)
         @warn "SType=Float16 with ω=$(round(Float64(ω); digits=4)) is a common SURFACE NaN source; use Float32 until the case is stable" ω

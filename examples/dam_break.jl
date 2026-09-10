@@ -17,10 +17,12 @@ lbm_u = Ma * cs
 
 units = Units(si_L, si_u, 1000u"kg/m^3"; x=Nx, u=lbm_u, ρ=1, T=Float32)
 
-τ = 0.56f0 # stable SRT band 0.53 … 1
+# stable SRT band 0.53 … 1
+# stable TRT band 0.505 … 1
+τ = 0.51f0
 ν_lbm = (τ - 0.5f0) / 3
 ν = LatticeBoltzmann.si_ν(units, ν_lbm) * u"m^2/s" # 1.2e-3u"m^2/s" # honey at 7.0e-3
-@info ν
+@info "Kinematic viscosity $ν"
 # ν = 1.0e-6u"m^2/s" # water
 σ = 0u"N/m"
 
