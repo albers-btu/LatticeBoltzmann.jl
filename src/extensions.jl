@@ -1,8 +1,9 @@
-const TRT                    = true # false -> keep SRT
+const TRT                    = false # false -> keep SRT
 
 const SURFACE                = false
 const VOLUME_FORCE           = false
-const EQUILIBRIUM_BOUNDARIES = true
+const EQUILIBRIUM_BOUNDARIES = false
+const MOVING_BOUNDARIES      = false
 
 const UPDATE_FIELDS          = SURFACE
 

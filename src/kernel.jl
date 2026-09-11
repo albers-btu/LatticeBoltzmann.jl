@@ -183,6 +183,24 @@ end
     return nothing
 end
 
+@inline function moving_wall_pair(
+    fp::CType, fm::CType, flags, u, src_p, src_m,
+    wi::CType, cp, cm, flagsn::UInt8, ::Type{CType}
+) where {CType}
+    @static if MOVING_BOUNDARIES
+        if (flagsn & TYPE_BO) == TYPE_MS
+            w6 = CType(-6) * wi
+            if (flags[src_m] & TYPE_BO) == TYPE_S
+                fp += w6 * (CType(cm[1])*u[src_m, 1] + CType(cm[2])*u[src_m, 2] + CType(cm[3])*u[src_m, 3])
+            end
+            if (flags[src_p] & TYPE_BO) == TYPE_S
+                fm += w6 * (CType(cp[1])*u[src_p, 1] + CType(cp[2])*u[src_p, 2] + CType(cp[3])*u[src_p, 3])
+            end
+        end
+    end
+    return fp, fm
+end
+
 @static if !SURFACE
 
 @kernel function initialize_kernel!(
@@ -194,20 +212,33 @@ end
     n = @index(Global)
     @inbounds begin
         n0 = n - 1
+        x = n0 % Nx
+        y = (n0 ÷ Nx) % Ny
+        z = n0 ÷ (Nx * Ny)
         ρn = ρ[n]
         ux, uy, uz = u[n, 1], u[n, 2], u[n, 3]
+        flagsn = flags[n]
 
-        if (flags[n] & TYPE_S) == TYPE_S
-            u[n, 1] = zero(CType)
-            u[n, 2] = zero(CType)
-            u[n, 3] = zero(CType)
+        if (flagsn & TYPE_BO) == TYPE_S
+            @static if MOVING_BOUNDARIES
+                only_s = true
+                for i in 2:Q
+                    src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                    only_s &= (flags[src] & TYPE_BO) == TYPE_S
+                end
+                if only_s
+                    u[n, 1] = zero(CType)
+                    u[n, 2] = zero(CType)
+                    u[n, 3] = zero(CType)
+                end
+            else
+                u[n, 1] = zero(CType)
+                u[n, 2] = zero(CType)
+                u[n, 3] = zero(CType)
+            end
         else
             uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
             fi[f_index(n, 1, N)] = eltype(fi)(w[1] * ρn * (one(CType) - uu))
-
-            x = n0 % Nx
-            y = (n0 ÷ Nx) % Ny
-            z = n0 ÷ (Nx * Ny)
 
             for k in 1:((Q - 1) ÷ 2)
                 i = 2k
@@ -312,8 +343,18 @@ end
         end
     end
 
-    if (flagsn & TYPE_S) == TYPE_S
-        u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
+    if (flagsn & TYPE_BO) == TYPE_S
+        @static if MOVING_BOUNDARIES
+            only_s = true
+            for k in 1:(Q - 1)
+                only_s &= (flagsj[k] & TYPE_BO) == TYPE_S
+            end
+            if only_s
+                u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
+            end
+        else
+            u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
+        end
     elseif (flagsn & TYPE_SU) == TYPE_G
         u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
         ϕn = zero(CType)
@@ -358,7 +399,7 @@ end # SURFACE
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
-    if (flagsn & TYPE_S) == TYPE_S
+    if (flagsn & TYPE_BO) == TYPE_S
         return nothing
     end
     n0 = n - 1
@@ -377,9 +418,11 @@ end # SURFACE
         # pairs: (2, 3), (4, 5), ...
         pairs = ntuple(Val(NP)) do k
             i = 2k
-            cp = c[i]
-            src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-            load_pair(fi, n, src, i, t_odd, N, CType)
+            cp, cm = c[i], c[i + 1]
+            srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+            srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
+            fp, fm = load_pair(fi, n, srcp, i, t_odd, N, CType)
+            moving_wall_pair(fp, fm, flags, u, srcp, srcm, w[i], cp, cm, flagsn, CType)
         end
 
         ρn = fn1
@@ -457,7 +500,7 @@ end
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
     flagsn = flags[n]
-    if (flagsn & TYPE_S) == TYPE_S
+    if (flagsn & TYPE_BO) == TYPE_S
         return nothing
     end
 
@@ -494,6 +537,27 @@ end
     fp14, fm15 = load_pair(fi, n, src14, 14, t_odd, N, CType)
     fp16, fm17 = load_pair(fi, n, src16, 16, t_odd, N, CType)
     fp18, fm19 = load_pair(fi, n, src18, 18, t_odd, N, CType)
+
+    @static if MOVING_BOUNDARIES
+        src3  = src_index(x, y, z, c[3][1],  c[3][2],  c[3][3],  Nx, Ny, Nz)
+        src5  = src_index(x, y, z, c[5][1],  c[5][2],  c[5][3],  Nx, Ny, Nz)
+        src7  = src_index(x, y, z, c[7][1],  c[7][2],  c[7][3],  Nx, Ny, Nz)
+        src9  = src_index(x, y, z, c[9][1],  c[9][2],  c[9][3],  Nx, Ny, Nz)
+        src11 = src_index(x, y, z, c[11][1], c[11][2], c[11][3], Nx, Ny, Nz)
+        src13 = src_index(x, y, z, c[13][1], c[13][2], c[13][3], Nx, Ny, Nz)
+        src15 = src_index(x, y, z, c[15][1], c[15][2], c[15][3], Nx, Ny, Nz)
+        src17 = src_index(x, y, z, c[17][1], c[17][2], c[17][3], Nx, Ny, Nz)
+        src19 = src_index(x, y, z, c[19][1], c[19][2], c[19][3], Nx, Ny, Nz)
+        fp2,  fm3  = moving_wall_pair(fp2,  fm3,  flags, u, src2,  src3,  w[2],  c[2],  c[3],  flagsn, CType)
+        fp4,  fm5  = moving_wall_pair(fp4,  fm5,  flags, u, src4,  src5,  w[4],  c[4],  c[5],  flagsn, CType)
+        fp6,  fm7  = moving_wall_pair(fp6,  fm7,  flags, u, src6,  src7,  w[6],  c[6],  c[7],  flagsn, CType)
+        fp8,  fm9  = moving_wall_pair(fp8,  fm9,  flags, u, src8,  src9,  w[8],  c[8],  c[9],  flagsn, CType)
+        fp10, fm11 = moving_wall_pair(fp10, fm11, flags, u, src10, src11, w[10], c[10], c[11], flagsn, CType)
+        fp12, fm13 = moving_wall_pair(fp12, fm13, flags, u, src12, src13, w[12], c[12], c[13], flagsn, CType)
+        fp14, fm15 = moving_wall_pair(fp14, fm15, flags, u, src14, src15, w[14], c[14], c[15], flagsn, CType)
+        fp16, fm17 = moving_wall_pair(fp16, fm17, flags, u, src16, src17, w[16], c[16], c[17], flagsn, CType)
+        fp18, fm19 = moving_wall_pair(fp18, fm19, flags, u, src18, src19, w[18], c[18], c[19], flagsn, CType)
+    end
 
     ρn = fn1 + fp2 + fm3 + fp4 + fm5 + fp6 + fm7 + fp8 + fm9 +
          fp10 + fm11 + fp12 + fm13 + fp14 + fm15 + fp16 + fm17 + fp18 + fm19
@@ -694,9 +758,11 @@ end
     fn1 = CType(fi[f_index(n, 1, N)])
     pairs = ntuple(Val(NP)) do k
         i = 2k
-        cp = c[i]
-        src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-        load_pair(fi, n, src, i, t_odd, N, CType)
+        cp, cm = c[i], c[i + 1]
+        srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+        srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
+        fp, fm = load_pair(fi, n, srcp, i, t_odd, N, CType)
+        moving_wall_pair(fp, fm, flags, u, srcp, srcm, w[i], cp, cm, flagsn, CType)
     end
 
     ρn = fn1
@@ -812,7 +878,7 @@ end
     flagsn = flags[n]
     su = flagsn & TYPE_SU
 
-    skip = (flagsn & TYPE_S) == TYPE_S
+    skip = (flagsn & TYPE_BO) == TYPE_S
     @static if SURFACE
         skip |= (su == TYPE_G) | (su == TYPE_IG)
     end
@@ -822,10 +888,19 @@ end
         end
     end
     if skip
-        ρ[n] = one(CType)
-        u[n, 1] = zero(CType)
-        u[n, 2] = zero(CType)
-        u[n, 3] = zero(CType)
+        if (flagsn & TYPE_BO) == TYPE_S
+            @static if !MOVING_BOUNDARIES
+                ρ[n] = one(CType)
+                u[n, 1] = zero(CType)
+                u[n, 2] = zero(CType)
+                u[n, 3] = zero(CType)
+            end
+        else
+            ρ[n] = one(CType)
+            u[n, 1] = zero(CType)
+            u[n, 2] = zero(CType)
+            u[n, 3] = zero(CType)
+        end
         return nothing
     end
 
@@ -882,6 +957,35 @@ end
 ) where {Q, CType}
     n = @index(Global)
     @inbounds moments_body!(Val(true), ρ, u, flags, fi, w, c, N, Nx, Ny, Nz, Int(n))
+end
+
+@static if MOVING_BOUNDARIES
+@kernel function update_moving_boundaries_kernel!(
+    u, flags, c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {Q}
+    n = @index(Global)
+    @inbounds begin
+        flagsn = flags[n]
+        bo = flagsn & TYPE_BO
+        if bo != TYPE_S && bo != TYPE_E
+            n0 = n - 1
+            x = n0 % Nx
+            y = (n0 ÷ Nx) % Ny
+            z = n0 ÷ (Nx * Ny)
+            moving = false
+            for i in 2:Q
+                src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                if (flags[src] & TYPE_BO) == TYPE_S
+                    moving |= (u[src, 1] != zero(eltype(u))) |
+                              (u[src, 2] != zero(eltype(u))) |
+                              (u[src, 3] != zero(eltype(u)))
+                end
+            end
+            flags[n] = moving ? (flagsn | TYPE_MS) : (flagsn & ~TYPE_MS)
+        end
+    end
+end
 end
 
 @static if SURFACE

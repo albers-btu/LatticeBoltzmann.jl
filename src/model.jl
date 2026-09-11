@@ -47,6 +47,7 @@ mutable struct Model{
     cached_initialize!::Any
     cached_moments_even!::Any
     cached_moments_odd!::Any
+    cached_moving!::Any
 
     initialized::Bool
     units::Units{CType}
@@ -95,6 +96,11 @@ function Model(
     cached_initialize = initialize_kernel!(backend, workgroup)
     cached_moments_even = moments_even_kernel!(backend, workgroup)
     cached_moments_odd = moments_odd_kernel!(backend, workgroup)
+    @static if MOVING_BOUNDARIES
+        cached_moving = update_moving_boundaries_kernel!(backend, workgroup)
+    else
+        cached_moving = nothing
+    end
 
     @static if SURFACE
         cached_surface_0_even = surface_0_even_kernel!(backend, workgroup)
@@ -190,6 +196,7 @@ function Model(
             cached_initialize,
             cached_moments_even,
             cached_moments_odd,
+            cached_moving,
             false,
             Units{CType}()
         )
@@ -207,6 +214,7 @@ function Model(
             cached_initialize,
             cached_moments_even,
             cached_moments_odd,
+            cached_moving,
             false,
             Units{CType}()
         )
@@ -379,6 +387,12 @@ function initialize!(model::Model)
                 ndrange = N
             )
         end
+        @static if MOVING_BOUNDARIES
+            model.cached_moving!(
+                domain.u.data, domain.flags.data, model.velocities,
+                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+                ndrange = N)
+        end
     end
 
     KernelAbstractions.synchronize(model.backend)
@@ -400,6 +414,12 @@ function step!(model::Model)
                model.weights, model.velocities,
                domain.fx, domain.fy, domain.fz, domain.σ,
                Nd, Nx, Ny, Nz; ndrange = N)
+        end
+
+        @static if MOVING_BOUNDARIES
+            model.cached_moving!(
+                domain.u.data, domain.flags.data, model.velocities,
+                Nd, Nx, Ny, Nz; ndrange = N)
         end
 
         kernel = t_odd ? model.cached_collide_odd! : model.cached_collide_even!
