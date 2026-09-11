@@ -9,7 +9,7 @@ export VELOCITIES
 export velocities
 
 include("extensions.jl")
-export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES
+export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD
 
 include("units.jl")
 export Units
@@ -25,7 +25,7 @@ export attach
 
 include("domain.jl")
 export Domain
-export ρ, u, τ
+export ρ, u, F, τ
 export get_N
 export increment_time_step!
 
@@ -39,5 +39,6 @@ include("model.jl")
 export Model
 export get_D
 export run!, export!
+export update_force_field!, reset_force_field!
 
 end

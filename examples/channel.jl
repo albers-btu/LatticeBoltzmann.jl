@@ -29,6 +29,7 @@ Re = ustrip(u"m/s", si_u) * ustrip(u"m", si_H) / ustrip(u"m^2/s", ν)
 
 model = Model(Nx, Ny, Nz, units;
               ν = ν,
+              gx = 0, gy = 0, gz = 0,
               backend = CUDABackend())
 
 u_in = Float32(lbm_u(units, si_u))  # lattice inlet speed (= lbm_inlet)

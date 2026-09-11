@@ -142,7 +142,7 @@ end
     if ρn <= zero(CType)
         return one(CType), zero(CType), zero(CType), zero(CType)
     end
-    @static if VOLUME_FORCE
+    @static if APPLY_FORCE
         invρ = one(CType) / ρn
         ux = clamp(ux + fx * invρ * CType(0.5), -cs, cs)
         uy = clamp(uy + fy * invρ * CType(0.5), -cs, cs)
@@ -248,7 +248,7 @@ end
                 feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
                 feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
                 src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-                store_pair!(fi, n, src, i, feqp, feqm, Val(true), N)
+                store_pair!(fi, n, src, i, feqp, feqm, Val(false), N)
             end
         end
     end
@@ -364,7 +364,7 @@ end
         elseif (flagsn & TYPE_SU) == TYPE_F
             ϕn = one(CType)
         end
-        store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(true))
+        store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(false))
     end
 
     ϕ[n] = ϕn
@@ -392,7 +392,7 @@ end # SURFACE
 # generic fallback
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u,
+    flags, fi, ρ, u, F,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -408,7 +408,11 @@ end # SURFACE
     z = n0 ÷ (Nx * Ny)
     @static if EQUILIBRIUM_BOUNDARIES
         if (flagsn & TYPE_BO) == TYPE_E
-            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fx, fy, fz, N, Nx, Ny, Nz, n, x, y, z, CType)
+            fxn, fyn, fzn = fx, fy, fz
+            @static if FORCE_FIELD
+                fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
+            end
+            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fxn, fyn, fzn, N, Nx, Ny, Nz, n, x, y, z, CType)
             return nothing
         end
     end
@@ -440,6 +444,9 @@ end # SURFACE
 
         cs = CType(1) / sqrt(CType(3))
         fxn = fx; fyn = fy; fzn = fz
+        @static if FORCE_FIELD
+            fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
+        end
         if ρn <= zero(CType)
             ρn = one(CType)
             ux = zero(CType); uy = zero(CType); uz = zero(CType)
@@ -447,7 +454,7 @@ end # SURFACE
         else
             invρ = one(CType) / ρn
             ux *= invρ; uy *= invρ; uz *= invρ
-            @static if VOLUME_FORCE
+            @static if APPLY_FORCE
                 ux += fxn * invρ * CType(0.5)
                 uy += fyn * invρ * CType(0.5)
                 uz += fzn * invρ * CType(0.5)
@@ -465,7 +472,7 @@ end # SURFACE
         end
 
         Fi0 = zero(CType)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
         end
         fi[f_index(n, 1, N)] = eltype(fi)(
@@ -480,7 +487,7 @@ end # SURFACE
             feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
             feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
             fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
-            @static if VOLUME_FORCE
+            @static if APPLY_FORCE
                 Fip, Fim = guo_pair(ω, ωm, w[i], w[i + 1], ux, uy, uz, fxn, fyn, fzn, cp, cm, CType)
                 fp_s += Fip
                 fm_s += Fim
@@ -493,7 +500,7 @@ end
 
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u,
+    flags, fi, ρ, u, F,
     w::NTuple{19, CType},
     c::NTuple{19, SVector{3,Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -511,7 +518,11 @@ end
 
     @static if EQUILIBRIUM_BOUNDARIES
         if (flagsn & TYPE_BO) == TYPE_E
-            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fx, fy, fz, N, Nx, Ny, Nz, n, x, y, z, CType)
+            fxn, fyn, fzn = fx, fy, fz
+            @static if FORCE_FIELD
+                fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
+            end
+            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fxn, fyn, fzn, N, Nx, Ny, Nz, n, x, y, z, CType)
             return nothing
         end
     end
@@ -579,6 +590,9 @@ end
 
     cs = CType(1) / sqrt(CType(3))
     fxn = fx; fyn = fy; fzn = fz
+    @static if FORCE_FIELD
+        fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
+    end
     if ρn <= zero(CType)
         ρn = one(CType)
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
@@ -586,7 +600,7 @@ end
     else
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
             uy += fyn * invρ * CType(0.5)
             uz += fzn * invρ * CType(0.5)
@@ -604,7 +618,7 @@ end
     end
 
     Fi0 = zero(CType)
-    @static if VOLUME_FORCE
+    @static if APPLY_FORCE
         Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
     end
     fi[f_index(n, 1, N)] = eltype(fi)(
@@ -614,7 +628,7 @@ end
     let feqp = feq(w[2], ρn, ux, uy, uz, uu, c[2], CType)
         feqm = feq(w[3], ρn, ux, uy, uz, uu, c[3], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp2, fm3, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[2], w[3], ux, uy, uz, fxn, fyn, fzn, c[2], c[3], CType)
             fp_s += Fip
             fm_s += Fim
@@ -624,7 +638,7 @@ end
     let feqp = feq(w[4], ρn, ux, uy, uz, uu, c[4], CType)
         feqm = feq(w[5], ρn, ux, uy, uz, uu, c[5], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp4, fm5, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[4], w[5], ux, uy, uz, fxn, fyn, fzn, c[4], c[5], CType)
             fp_s += Fip
             fm_s += Fim
@@ -634,7 +648,7 @@ end
     let feqp = feq(w[6], ρn, ux, uy, uz, uu, c[6], CType)
         feqm = feq(w[7], ρn, ux, uy, uz, uu, c[7], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp6, fm7, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[6], w[7], ux, uy, uz, fxn, fyn, fzn, c[6], c[7], CType)
             fp_s += Fip
             fm_s += Fim
@@ -644,7 +658,7 @@ end
     let feqp = feq(w[8], ρn, ux, uy, uz, uu, c[8], CType)
         feqm = feq(w[9], ρn, ux, uy, uz, uu, c[9], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp8, fm9, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[8], w[9], ux, uy, uz, fxn, fyn, fzn, c[8], c[9], CType)
             fp_s += Fip
             fm_s += Fim
@@ -654,7 +668,7 @@ end
     let feqp = feq(w[10], ρn, ux, uy, uz, uu, c[10], CType)
         feqm = feq(w[11], ρn, ux, uy, uz, uu, c[11], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp10, fm11, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[10], w[11], ux, uy, uz, fxn, fyn, fzn, c[10], c[11], CType)
             fp_s += Fip
             fm_s += Fim
@@ -664,7 +678,7 @@ end
     let feqp = feq(w[12], ρn, ux, uy, uz, uu, c[12], CType)
         feqm = feq(w[13], ρn, ux, uy, uz, uu, c[13], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp12, fm13, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[12], w[13], ux, uy, uz, fxn, fyn, fzn, c[12], c[13], CType)
             fp_s += Fip
             fm_s += Fim
@@ -674,7 +688,7 @@ end
     let feqp = feq(w[14], ρn, ux, uy, uz, uu, c[14], CType)
         feqm = feq(w[15], ρn, ux, uy, uz, uu, c[15], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp14, fm15, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[14], w[15], ux, uy, uz, fxn, fyn, fzn, c[14], c[15], CType)
             fp_s += Fip
             fm_s += Fim
@@ -684,7 +698,7 @@ end
     let feqp = feq(w[16], ρn, ux, uy, uz, uu, c[16], CType)
         feqm = feq(w[17], ρn, ux, uy, uz, uu, c[17], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp16, fm17, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[16], w[17], ux, uy, uz, fxn, fyn, fzn, c[16], c[17], CType)
             fp_s += Fip
             fm_s += Fim
@@ -694,7 +708,7 @@ end
     let feqp = feq(w[18], ρn, ux, uy, uz, uu, c[18], CType)
         feqm = feq(w[19], ρn, ux, uy, uz, uu, c[19], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp18, fm19, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[18], w[19], ux, uy, uz, fxn, fyn, fzn, c[18], c[19], CType)
             fp_s += Fip
             fm_s += Fim
@@ -706,25 +720,25 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    @Const(flags), fi, ρ, u,
+    @Const(flags), fi, ρ, u, F,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    @Const(flags), fi, ρ, u,
+    @Const(flags), fi, ρ, u, F,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -733,7 +747,7 @@ end
 
 @inline function stream_collide_surface_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, mass,
+    flags, fi, ρ, u, F, mass,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -750,7 +764,11 @@ end
 
     @static if EQUILIBRIUM_BOUNDARIES
         if (flagsn & TYPE_BO) == TYPE_E
-            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fx, fy, fz, N, Nx, Ny, Nz, n, x, y, z, CType)
+            fxn, fyn, fzn = fx, fy, fz
+            @static if FORCE_FIELD
+                fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
+            end
+            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fxn, fyn, fzn, N, Nx, Ny, Nz, n, x, y, z, CType)
             return nothing
         end
     end
@@ -778,6 +796,9 @@ end
 
     cs = CType(1) / sqrt(CType(3))
     fxn = fx; fyn = fy; fzn = fz
+    @static if FORCE_FIELD
+        fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
+    end
     if ρn <= zero(CType)
         ρn = one(CType)
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
@@ -785,7 +806,7 @@ end
     else
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
             uy += fyn * invρ * CType(0.5)
             uz += fzn * invρ * CType(0.5)
@@ -824,7 +845,7 @@ end
     end
 
     Fi0 = zero(CType)
-    @static if VOLUME_FORCE
+    @static if APPLY_FORCE
         Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
     end
     fi[f_index(n, 1, N)] = eltype(fi)(srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]) + Fi0)
@@ -835,7 +856,7 @@ end
         feqp = feq(w[i],     ρn, ux, uy, uz, uu, c[i],     CType)
         feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
         fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
-        @static if VOLUME_FORCE
+        @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[i], w[i + 1], ux, uy, uz, fxn, fyn, fzn, c[i], c[i + 1], CType)
             fp_s += Fip
             fm_s += Fim
@@ -847,23 +868,23 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    flags, fi, ρ, u, mass,
+    flags, fi, ρ, u, F, mass,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    flags, fi, ρ, u, mass,
+    flags, fi, ρ, u, F, mass,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -984,6 +1005,59 @@ end
             end
             flags[n] = moving ? (flagsn | TYPE_MS) : (flagsn & ~TYPE_MS)
         end
+    end
+end
+end
+
+@static if FORCE_FIELD
+@inline function update_force_field_body!(
+    t_odd::Val{odd}, flags, fi, F::AbstractArray{CType},
+    c::NTuple{Q, SVector{3, Int}},
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+) where {odd, Q, CType}
+    if (flags[n] & TYPE_BO) != TYPE_S
+        return nothing
+    end
+    n0 = n - 1
+    x = n0 % Nx; y = (n0 ÷ Nx) % Ny; z = n0 ÷ (Nx * Ny)
+    NP = (Q - 1) ÷ 2
+    fn1 = CType(fi[f_index(n, 1, N)])
+    mx = zero(CType); my = zero(CType); mz = zero(CType)
+    for k in 1:NP
+        i = 2k
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        fp, fm = load_pair(fi, n, src, i, t_odd, N, CType)
+        mx += CType(c[i][1])*fp + CType(c[i+1][1])*fm
+        my += CType(c[i][2])*fp + CType(c[i+1][2])*fm
+        mz += CType(c[i][3])*fp + CType(c[i+1][3])*fm
+    end
+    two = CType(2)
+    F[n, 1] = two * mx
+    F[n, 2] = two * my
+    F[n, 3] = two * mz
+    return nothing
+end
+
+@kernel function update_force_field_even_kernel!(
+    @Const(flags), fi, F, c, N, Nx, Ny, Nz
+)
+    n = @index(Global)
+    @inbounds update_force_field_body!(Val(false), flags, fi, F, c, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function update_force_field_odd_kernel!(
+    @Const(flags), fi, F, c, N, Nx, Ny, Nz
+)
+    n = @index(Global)
+    @inbounds update_force_field_body!(Val(true), flags, fi, F, c, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function reset_force_field_kernel!(F)
+    n = @index(Global)
+    @inbounds begin
+        F[n, 1] = zero(eltype(F))
+        F[n, 2] = zero(eltype(F))
+        F[n, 3] = zero(eltype(F))
     end
 end
 end

@@ -2,6 +2,7 @@
 #   z = Nz      -> TYPE_S lid with prescribed u = (u_lid, 0, 0)
 #   other faces -> stationary TYPE_S
 #   MOVING_BOUNDARIES = true
+
 using LatticeBoltzmann
 using Printf
 using CUDA
@@ -23,7 +24,7 @@ lbm_lid = Ma * cs
 units = Units(si_L, si_u, si_ρ; x=Nx, u=lbm_lid, ρ=1, T=Float32)
 @info "lid-driven cavity" Re ν si_u si_L τ=(3 * lbm_ν(units, ν) + 0.5)
 
-model = Model(Nx, Ny, Nz, units; ν = ν, backend = CUDABackend())
+model = Model(Nx, Ny, Nz, units; ν = ν, gx = 0, gy = 0, gz = 0, backend = CUDABackend())
 
 u_lid = Float32(lbm_u(units, si_u))
 host = zeros(UInt8, Nx * Ny * Nz)

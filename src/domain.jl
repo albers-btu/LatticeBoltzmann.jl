@@ -26,6 +26,7 @@ mutable struct Domain{
 
     ρ::Memory{CType, Aρ}
     u::Memory{CType, Au}
+    F::Memory{CType, Au}
     fi::Memory{SType, Afi}
     flags::Memory{UInt8, Af}
 
@@ -51,6 +52,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     u = Memory(AT{CType}(undef, N, 3))
     fill!(u.data, zero(CType))
 
+    F = Memory(AT{CType}(undef, N, 3))
+    fill!(F.data, zero(CType))
+
     fi = Memory(AT{SType}(undef, N * Q))
     fill!(fi.data, zero(SType))
 
@@ -75,7 +79,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
             CType(ν), N, ω,
             CType(fx), CType(fy), CType(fz),
             CType(σ),
-            ρ, u, fi, flags,
+            ρ, u, F, fi, flags,
             # --- SURFACE ---
             ϕ, mass, massex,
             # --- SURFACE ---
@@ -88,7 +92,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
             CType(ν), N, ω,
             CType(fx), CType(fy), CType(fz),
             CType(σ),
-            ρ, u, fi, flags,
+            ρ, u, F, fi, flags,
             UInt64(0)
         )
     end
@@ -98,6 +102,7 @@ get_N(domain::Domain) = Int(domain.Nx) * Int(domain.Ny) * Int(domain.Nz)
 
 ρ(domain::Domain) = domain.ρ
 u(domain::Domain) = domain.u
+F(domain::Domain) = domain.F
 fi(domain::Domain) = domain.fi
 flags(domain::Domain) = domain.flags
 

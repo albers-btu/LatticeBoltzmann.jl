@@ -26,6 +26,7 @@ mutable struct Model{
 
     ρ::MemoryContainer{CType, Aρ}
     u::MemoryContainer{CType, Au}
+    F::MemoryContainer{CType, Au}
     fi::MemoryContainer{SType, Afi}
     flags::MemoryContainer{UInt8, Af}
 
@@ -48,6 +49,9 @@ mutable struct Model{
     cached_moments_even!::Any
     cached_moments_odd!::Any
     cached_moving!::Any
+    cached_update_force_even!::Any
+    cached_update_force_odd!::Any
+    cached_reset_force!::Any
 
     initialized::Bool
     units::Units{CType}
@@ -56,7 +60,7 @@ end
 function Model(
     Nx, Ny, Nz, units::Units{CType};
     ν = 1.0e-6,
-    gx = 0.0f0, gy = 0.0f0, gz = -9.81f0,
+    gx = 0.0f0, gy = 0.0f0, gz = 0.0f0,
     σ = 0.0f0,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
@@ -64,7 +68,7 @@ function Model(
     workgroup = default_workgroup(backend)
 ) where {CType}
     ν  = CType(lbm_ν(units, ν))
-    fx = CType(lbm_g(units, gx)) # ρ_lbm = 1 → force/volume = g
+    fx = CType(lbm_g(units, gx))
     fy = CType(lbm_g(units, gy))
     fz = CType(lbm_g(units, gz))
     σ  = CType(lbm_σ(units, σ))
@@ -100,6 +104,15 @@ function Model(
         cached_moving = update_moving_boundaries_kernel!(backend, workgroup)
     else
         cached_moving = nothing
+    end
+    @static if FORCE_FIELD
+        cached_update_force = update_force_field_even_kernel!(backend, workgroup)
+        cached_update_force_odd = update_force_field_odd_kernel!(backend, workgroup)
+        cached_reset_force = reset_force_field_kernel!(backend, workgroup)
+    else
+        cached_update_force = nothing
+        cached_update_force_odd = nothing
+        cached_reset_force = nothing
     end
 
     @static if SURFACE
@@ -160,11 +173,13 @@ function Model(
 
     buffers_ρ = [ρ(domains[d]) for d in 1:D]
     buffers_u = [u(domains[d]) for d in 1:D]
+    buffers_F = [F(domains[d]) for d in 1:D]
     buffers_fi = [fi(domains[d]) for d in 1:D]
     buffers_flags = [flags(domains[d]) for d in 1:D]
 
     ρc = attach(buffers_ρ, Nx, Ny, Nz, Dx, Dy, Dz, "rho")
     uc = attach(buffers_u, Nx, Ny, Nz, Dx, Dy, Dz, "u")
+    Fc = attach(buffers_F, Nx, Ny, Nz, Dx, Dy, Dz, "F")
     fic = attach(buffers_fi, Nx, Ny, Nz, Dx, Dy, Dz, "fi")
     fc = attach(buffers_flags, Nx, Ny, Nz, Dx, Dy, Dz, "flags")
 
@@ -180,7 +195,7 @@ function Model(
             Nx, Ny, Nz,
             Dx, Dy, Dz,
             domains,
-            ρc, uc, fic, fc,
+            ρc, uc, Fc, fic, fc,
             # --- SURFACE --- 
             ϕc,        
             cached_surface_0_even,
@@ -197,6 +212,9 @@ function Model(
             cached_moments_even,
             cached_moments_odd,
             cached_moving,
+            cached_update_force,
+            cached_update_force_odd,
+            cached_reset_force,
             false,
             Units{CType}()
         )
@@ -207,7 +225,7 @@ function Model(
             Nx, Ny, Nz,
             Dx, Dy, Dz,
             domains,
-            ρc, uc, fic, fc,
+            ρc, uc, Fc, fic, fc,
             w, c,
             cached_collide_even,
             cached_collide_odd,
@@ -215,6 +233,9 @@ function Model(
             cached_moments_even,
             cached_moments_odd,
             cached_moving,
+            cached_update_force,
+            cached_update_force_odd,
+            cached_reset_force,
             false,
             Units{CType}()
         )
@@ -425,13 +446,13 @@ function step!(model::Model)
         kernel = t_odd ? model.cached_collide_odd! : model.cached_collide_even!
         @static if SURFACE
             kernel(domain.flags.data, domain.fi.data,
-                   domain.ρ.data, domain.u.data, domain.mass.data,
+                   domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
-                   domain.ρ.data, domain.u.data,
+                   domain.ρ.data, domain.u.data, domain.F.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    Nd, Nx, Ny, Nz; ndrange = N)
@@ -454,10 +475,12 @@ function step!(model::Model)
     KernelAbstractions.synchronize(model.backend)
 end
 
+@inline last_collide_odd(domain::Domain) = Int(domain.t) == 0 ? false : isodd(Int(domain.t) - 1)
+
 function moments!(model::Model)
     for domain in model.domains
         N = get_N(domain)
-        kernel = isodd(domain.t) ? model.cached_moments_odd! : model.cached_moments_even!
+        kernel = last_collide_odd(domain) ? model.cached_moments_odd! : model.cached_moments_even!
         kernel(
             domain.ρ.data,
             domain.u.data,
@@ -469,6 +492,32 @@ function moments!(model::Model)
         )
     end
     KernelAbstractions.synchronize(model.backend)
+end
+
+function reset_force_field!(model::Model)
+    for domain in model.domains
+        fill!(domain.F.data, zero(eltype(domain.F.data)))
+    end
+    KernelAbstractions.synchronize(model.backend)
+    return nothing
+end
+
+function update_force_field!(model::Model)
+    @static if !FORCE_FIELD
+        return nothing
+    end
+    for domain in model.domains
+        N = get_N(domain)
+        kernel = last_collide_odd(domain) ? model.cached_update_force_odd! : model.cached_update_force_even!
+        kernel(
+            domain.flags.data, domain.fi.data, domain.F.data,
+            model.velocities,
+            Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+            ndrange = N
+        )
+    end
+    KernelAbstractions.synchronize(model.backend)
+    return nothing
 end
 
 @static if SURFACE
