@@ -43,6 +43,8 @@ mutable struct Domain{
         ω_T::CType
         T::Memory{CType, Aρ}
         gi::Memory{SType, Afi}
+        Q::Memory{CType, Aρ}
+        h::Memory{CType, Aρ}  # Robin h; 0 -> pure Neumann
     end
 
     t::UInt64
@@ -54,8 +56,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     β::CType = zero(CType),
     T_avg::CType = one(CType),
 ) where {CType, SType}
-    Q = length(WEIGHTS[scheme])
-    
+    nvel = length(WEIGHTS[scheme])
+
     N = Int(Nx) * Int(Ny) * Int(Nz)
     ω = one(CType) / (CType(3) * CType(ν) + CType(1) / CType(2))
     AT = arraytype(backend)
@@ -69,7 +71,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     F = Memory(AT{CType}(undef, N, 3))
     fill!(F.data, zero(CType))
 
-    fi = Memory(AT{SType}(undef, N * Q))
+    fi = Memory(AT{SType}(undef, N * nvel))
     fill!(fi.data, zero(SType))
 
     flags = Memory(AT{UInt8}(undef, N))
@@ -93,6 +95,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         fill!(Tmem.data, T_avg)
         gi = Memory(AT{SType}(undef, N * 7))
         fill!(gi.data, zero(SType))
+        Qmem = Memory(AT{CType}(undef, N))
+        fill!(Qmem.data, zero(CType))
+        hmem = Memory(AT{CType}(undef, N))
+        fill!(hmem.data, zero(CType))
     end
 
     @static if SURFACE
@@ -105,7 +111,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex,
-                αT, β, T_avg, ω_T, Tmem, gi,
+                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem,
                 UInt64(0)
             )
         else
@@ -129,7 +135,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ),
                 ρ, u, F, fi, flags,
-                αT, β, T_avg, ω_T, Tmem, gi,
+                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem,
                 UInt64(0)
             )
         else
@@ -163,6 +169,11 @@ end
 @static if TEMPERATURE
     T(domain::Domain) = domain.T
     gi(domain::Domain) = domain.gi
+    Q(domain::Domain) = domain.Q
+    htc(domain::Domain) = domain.h
+    # D3Q7 Peng c_sT² = 1/4. Model `α` sets ω_T = 1/(2α+1/2); Fourier k = α/2.
+    thermal_k(domain::Domain{CType}) where CType =
+        CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))
 end
 
 τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + CType(1) / CType(2)

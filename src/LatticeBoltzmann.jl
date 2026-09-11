@@ -13,10 +13,10 @@ export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING
 
 include("units.jl")
 export Units
-export si_x, si_t, si_u, si_ρ, si_p, si_T, lbm_ν, lbm_g, lbm_σ, lbm_u
+export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, lbm_ν, lbm_g, lbm_σ, lbm_u, lbm_T, lbm_Q, lbm_q
 
 include("flags.jl")
-export TYPE_S, TYPE_E, TYPE_T, TYPE_F, TYPE_I, TYPE_G, TYPE_MS
+export TYPE_S, TYPE_E, TYPE_T, TYPE_F, TYPE_I, TYPE_G, TYPE_H, TYPE_MS
 export TYPE_BO, TYPE_IF, TYPE_IG, TYPE_GI, TYPE_SU
 
 include("memory.jl")
@@ -26,7 +26,7 @@ export attach
 include("domain.jl")
 export Domain
 export ρ, u, F, τ
-export T
+export T, Q, htc, thermal_k
 export get_N
 export increment_time_step!
 

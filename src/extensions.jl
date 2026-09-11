@@ -5,7 +5,7 @@ const VOLUME_FORCE           = true
 const EQUILIBRIUM_BOUNDARIES = false
 const MOVING_BOUNDARIES      = false
 const FORCE_FIELD            = false
-const TEMPERATURE            = true # D3Q7 thermal; TYPE_T Dirichlet; Boussinesq on fx,fy,fz
+const TEMPERATURE            = true # D3Q7 thermal; TYPE_T Dirichlet; TYPE_H flux/Robin; Q volumetric; Boussinesq on fx,fy,fz
 
 const UPDATE_FIELDS          = SURFACE
 const APPLY_FORCE            = VOLUME_FORCE || FORCE_FIELD || TEMPERATURE

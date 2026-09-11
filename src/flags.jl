@@ -1,9 +1,10 @@
 const TYPE_S  = 0x01 # solid (bounce-back)
 const TYPE_E  = 0x02 # equilibrium / inflow-outflow
-const TYPE_T  = 0x04 # temperature wall
+const TYPE_T  = 0x04 # temperature Dirichlet wall
 const TYPE_F  = 0x08 # fluid (free-surface)
 const TYPE_I  = 0x10 # interface
 const TYPE_G  = 0x20 # gas
+const TYPE_H  = 0x40 # heat-flux wall: Neumann q=Q[n], Robin q=Q[n]+h[n](T-T∞) with T∞=T[n]
 const TYPE_MS = 0x03 # next to moving solid
 
 const TYPE_BO = 0x03 # S|E

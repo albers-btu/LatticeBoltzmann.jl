@@ -92,7 +92,7 @@ for i in 1:nchunks
     dt = (time_ns() - t0) * 1e-9
     mlups = Ncell * every / dt / 1e6
     global mlups_ema = isfinite(mlups_ema) ? αema * mlups + (1 - αema) * mlups_ema : mlups
-    export!(model; dir="output_rb")
+    export!(model; dir="output_rayleigh_benard")
     next!(prog; showvalues = [
         (:t, Int(d.t)),
         (:t_si, si_t(model.units, Int(d.t))),

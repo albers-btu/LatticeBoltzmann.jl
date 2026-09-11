@@ -32,6 +32,8 @@ mutable struct Model{
 
     @static if TEMPERATURE
         T::MemoryContainer{CType, Aρ}
+        Q::MemoryContainer{CType, Aρ}
+        h::MemoryContainer{CType, Aρ}
     end
 
     @static if SURFACE
@@ -200,6 +202,10 @@ function Model(
     @static if TEMPERATURE
         buffers_T = [T(domains[d]) for d in 1:D]
         Tc = attach(buffers_T, Nx, Ny, Nz, Dx, Dy, Dz, "T")
+        buffers_Q = [Q(domains[d]) for d in 1:D]
+        Qc = attach(buffers_Q, Nx, Ny, Nz, Dx, Dy, Dz, "Q")
+        buffers_h = [htc(domains[d]) for d in 1:D]
+        hc = attach(buffers_h, Nx, Ny, Nz, Dx, Dy, Dz, "h")
     end
 
     @static if SURFACE
@@ -246,7 +252,7 @@ function Model(
                 Dx, Dy, Dz,
                 domains,
                 ρc, uc, Fc, fic, fc,
-                Tc,
+                Tc, Qc, hc,
                 w, c,
                 cached_collide_even,
                 cached_collide_odd,
@@ -298,6 +304,12 @@ flags(model::Model) = model.flags
 
 ρ(model::Model) = model.ρ
 u(model::Model) = model.u
+
+@static if TEMPERATURE
+    Q(model::Model) = model.Q
+    htc(model::Model) = model.h
+    thermal_k(model::Model) = thermal_k(model.domains[1])
+end
 
 @static if SURFACE
     σ(model::Model) = model.domains[1].σ
@@ -404,6 +416,7 @@ function export!(model::Model; dir::AbstractString="output")
         end
         @static if TEMPERATURE
             vtk["T"] = reshape(Float32.(si_T.(Ref(U), Array(domain.T.data))), Nx, Ny, Nz)
+            vtk["Q"] = reshape(Float32.(si_Q.(Ref(U), Array(domain.Q.data), ρ_host)), Nx, Ny, Nz)
         end
         pvd[t_si] = vtk
     end
@@ -501,7 +514,7 @@ function step!(model::Model)
         else
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data,
-                   domain.gi.data, domain.T.data,
+                   domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg,

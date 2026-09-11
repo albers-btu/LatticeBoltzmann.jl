@@ -203,6 +203,8 @@ end
 
 # D3Q7 thermal. Perturbation g' = g - w, T = 1 + Σg.
 # ω_T = 1/(2α + 1/2). Boussinesq: F_eff = F - F β (T - T_avg).
+# Volumetric Q: after SRT, add Δgeq(ΔT=Q) so ΣΔg = Q (lattice dT/step).
+# TYPE_H: equivalent Dirichlet from Fourier + Robin, k = c_sT² (τ_T-1/2) = α/2.
 @inline function geq_T_rest(Tn::CType) where {CType}
     return CType(0.25) * Tn - CType(0.25)
 end
@@ -210,8 +212,48 @@ end
     return CType(0.5) * Tn * ucomp + CType(0.125) * (Tn - one(CType))
 end
 
+@inline function thermal_conductivity(ω_T::CType) where {CType}
+    return CType(0.25) * (one(CType) / ω_T - CType(0.5))
+end
+
+@inline function flux_neighbor_T(Tfield, flags, x, y, z, Nx, Ny, Nz, ::Type{CType}) where {CType}
+    Tnb = zero(CType)
+    cnt = 0
+    src = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+    if (flags[src] & TYPE_S) != 0x00
+        Tnb += Tfield[src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)]
+        cnt += 1
+    end
+    src = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    if (flags[src] & TYPE_S) != 0x00
+        Tnb += Tfield[src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)]
+        cnt += 1
+    end
+    src = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+    if (flags[src] & TYPE_S) != 0x00
+        Tnb += Tfield[src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)]
+        cnt += 1
+    end
+    src = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    if (flags[src] & TYPE_S) != 0x00
+        Tnb += Tfield[src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)]
+        cnt += 1
+    end
+    src = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+    if (flags[src] & TYPE_S) != 0x00
+        Tnb += Tfield[src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)]
+        cnt += 1
+    end
+    src = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    if (flags[src] & TYPE_S) != 0x00
+        Tnb += Tfield[src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)]
+        cnt += 1
+    end
+    return Tnb, cnt
+end
+
 @inline function collide_temperature!(
-    t_odd::Val{odd}, gi, Tfield, flagsn,
+    t_odd::Val{odd}, gi, Tfield, Qin, hT, flags, flagsn,
     ux::CType, uy::CType, uz::CType,
     fxn::CType, fyn::CType, fzn::CType,
     fx::CType, fy::CType, fz::CType,
@@ -227,13 +269,33 @@ end
     gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
     gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
 
-    if (flagsn & TYPE_T) != 0x00
+    Qn = Qin[n]
+    dirichlet = (flagsn & TYPE_T) != 0x00
+    use_flux = false
+    Tn = zero(CType)
+
+    if dirichlet
         Tn = Tfield[n]
-    else
-        Tn = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
-        @static if UPDATE_FIELDS
-            Tfield[n] = Tn
+        Qn = zero(CType)
+    elseif (flagsn & TYPE_H) != 0x00
+        Tnb, cnt = flux_neighbor_T(Tfield, flags, x, y, z, Nx, Ny, Nz, CType)
+        if cnt > 0
+            kT = thermal_conductivity(ω_T)
+            hn = hT[n]
+            Tinf = Tfield[n]
+            Bi = hn / kT
+            Tn = (Tnb + Qn / kT + Bi * Tinf) / (one(CType) + Bi)
+            use_flux = true
+            Qn = zero(CType)
+            if hn == zero(CType)
+                Tfield[n] = Tn
+            end
         end
+    end
+
+    if !dirichlet && !use_flux
+        Tn = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+        Tfield[n] = Tn + Qn
     end
 
     ge0 = geq_T_rest(Tn)
@@ -241,20 +303,30 @@ end
     geyp, geym = geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy)
     gezp, gezm = geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz)
 
-    if (flagsn & TYPE_T) != 0x00
+    if dirichlet || use_flux
         gi[f_index(n, 1, N)] = eltype(gi)(ge0)
         store_pair!(gi, n, srcx, 2, gexp, gexm, t_odd, N)
         store_pair!(gi, n, srcy, 4, geyp, geym, t_odd, N)
         store_pair!(gi, n, srcz, 6, gezp, gezm, t_odd, N)
     else
         om = one(CType) - ω_T
-        gi[f_index(n, 1, N)] = eltype(gi)(om * g0 + ω_T * ge0)
-        store_pair!(gi, n, srcx, 2, om * gpx + ω_T * gexp, om * gmx + ω_T * gexm, t_odd, N)
-        store_pair!(gi, n, srcy, 4, om * gpy + ω_T * geyp, om * gmy + ω_T * geym, t_odd, N)
-        store_pair!(gi, n, srcz, 6, om * gpz + ω_T * gezp, om * gmz + ω_T * gezm, t_odd, N)
+        gi[f_index(n, 1, N)] = eltype(gi)(om * g0 + ω_T * ge0 + CType(0.25) * Qn)
+        store_pair!(gi, n, srcx, 2,
+            om * gpx + ω_T * gexp + CType(0.5) * Qn * ux + CType(0.125) * Qn,
+            om * gmx + ω_T * gexm + CType(0.5) * Qn * (-ux) + CType(0.125) * Qn,
+            t_odd, N)
+        store_pair!(gi, n, srcy, 4,
+            om * gpy + ω_T * geyp + CType(0.5) * Qn * uy + CType(0.125) * Qn,
+            om * gmy + ω_T * geym + CType(0.5) * Qn * (-uy) + CType(0.125) * Qn,
+            t_odd, N)
+        store_pair!(gi, n, srcz, 6,
+            om * gpz + ω_T * gezp + CType(0.5) * Qn * uz + CType(0.125) * Qn,
+            om * gmz + ω_T * gezm + CType(0.5) * Qn * (-uz) + CType(0.125) * Qn,
+            t_odd, N)
     end
 
-    dT = Tn - T_avg
+    Tmacro = dirichlet || use_flux ? Tn : Tn + Qn
+    dT = Tmacro - T_avg
     fxn -= fx * β * dT
     fyn -= fy * β * dT
     fzn -= fz * β * dT
@@ -469,7 +541,7 @@ end # SURFACE
 # generic fallback
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, gi, T,
+    flags, fi, ρ, u, F, gi, T, Qin, hT,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -534,7 +606,7 @@ end # SURFACE
             ux *= invρ; uy *= invρ; uz *= invρ
             @static if TEMPERATURE
                 fxn, fyn, fzn = collide_temperature!(
-                    t_odd, gi, T, flagsn, ux, uy, uz,
+                    t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
                     fxn, fyn, fzn, fx, fy, fz,
                     ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
             end
@@ -584,7 +656,7 @@ end
 
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, gi, T,
+    flags, fi, ρ, u, F, gi, T, Qin, hT,
     w::NTuple{19, CType},
     c::NTuple{19, SVector{3,Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -687,7 +759,7 @@ end
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
             fxn, fyn, fzn = collide_temperature!(
-                t_odd, gi, T, flagsn, ux, uy, uz,
+                t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
         end
@@ -811,7 +883,7 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    @Const(flags), fi, ρ, u, F, gi, T,
+    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -819,11 +891,11 @@ end
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    @Const(flags), fi, ρ, u, F, gi, T,
+    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
@@ -831,7 +903,7 @@ end
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -1055,7 +1127,7 @@ end
     u[n, 2] = uy * invρ
     u[n, 3] = uz * invρ
     @static if TEMPERATURE
-        if (flagsn & TYPE_T) == 0x00
+        if (flagsn & (TYPE_T | TYPE_H)) == 0x00
             srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
             srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
             srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
