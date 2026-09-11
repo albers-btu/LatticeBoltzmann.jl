@@ -30,6 +30,10 @@ mutable struct Model{
     fi::MemoryContainer{SType, Afi}
     flags::MemoryContainer{UInt8, Af}
 
+    @static if TEMPERATURE
+        T::MemoryContainer{CType, Aρ}
+    end
+
     @static if SURFACE
         phi::MemoryContainer{CType, Aρ}
         cached_surface_0_even!::Any
@@ -62,6 +66,9 @@ function Model(
     ν = 1.0e-6,
     gx = 0.0f0, gy = 0.0f0, gz = 0.0f0,
     σ = 0.0f0,
+    α = 0.0f0,
+    β = 0.0f0,
+    T_avg = 1.0f0,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -72,10 +79,11 @@ function Model(
     fy = CType(lbm_g(units, gy))
     fz = CType(lbm_g(units, gz))
     σ  = CType(lbm_σ(units, σ))
+    α  = CType(lbm_ν(units, α))
 
     # @info units
 
-    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, CType, SType, scheme, backend, workgroup)
+    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, α=α, β=CType(β), T_avg=CType(T_avg), CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -84,6 +92,9 @@ function Model(
     Nx, Ny, Nz, ν;
     fx = 0.0f0, fy = 0.0f0, fz = 0.0f0,
     σ = 0.0f0,
+    α = 0.0f0,
+    β = 0.0f0,
+    T_avg = 1.0f0,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -168,6 +179,9 @@ function Model(
             CType,
             SType;
             σ=CType(σ),
+            α=CType(α),
+            β=CType(β),
+            T_avg=CType(T_avg),
         )
     end
 
@@ -182,6 +196,11 @@ function Model(
     Fc = attach(buffers_F, Nx, Ny, Nz, Dx, Dy, Dz, "F")
     fic = attach(buffers_fi, Nx, Ny, Nz, Dx, Dy, Dz, "fi")
     fc = attach(buffers_flags, Nx, Ny, Nz, Dx, Dy, Dz, "flags")
+
+    @static if TEMPERATURE
+        buffers_T = [T(domains[d]) for d in 1:D]
+        Tc = attach(buffers_T, Nx, Ny, Nz, Dx, Dy, Dz, "T")
+    end
 
     @static if SURFACE
         buffers_ϕ = [ϕ(domains[d]) for d in 1:D]
@@ -219,26 +238,50 @@ function Model(
             Units{CType}()
         )
     else
-        Model(
-            scheme,
-            backend, workgroup,
-            Nx, Ny, Nz,
-            Dx, Dy, Dz,
-            domains,
-            ρc, uc, Fc, fic, fc,
-            w, c,
-            cached_collide_even,
-            cached_collide_odd,
-            cached_initialize,
-            cached_moments_even,
-            cached_moments_odd,
-            cached_moving,
-            cached_update_force,
-            cached_update_force_odd,
-            cached_reset_force,
-            false,
-            Units{CType}()
-        )
+        @static if TEMPERATURE
+            Model(
+                scheme,
+                backend, workgroup,
+                Nx, Ny, Nz,
+                Dx, Dy, Dz,
+                domains,
+                ρc, uc, Fc, fic, fc,
+                Tc,
+                w, c,
+                cached_collide_even,
+                cached_collide_odd,
+                cached_initialize,
+                cached_moments_even,
+                cached_moments_odd,
+                cached_moving,
+                cached_update_force,
+                cached_update_force_odd,
+                cached_reset_force,
+                false,
+                Units{CType}()
+            )
+        else
+            Model(
+                scheme,
+                backend, workgroup,
+                Nx, Ny, Nz,
+                Dx, Dy, Dz,
+                domains,
+                ρc, uc, Fc, fic, fc,
+                w, c,
+                cached_collide_even,
+                cached_collide_odd,
+                cached_initialize,
+                cached_moments_even,
+                cached_moments_odd,
+                cached_moving,
+                cached_update_force,
+                cached_update_force_odd,
+                cached_reset_force,
+                false,
+                Units{CType}()
+            )
+        end
     end
 end
 
@@ -310,6 +353,7 @@ function warn_lattice_stability(
 end
 
 function export!(model::Model; dir::AbstractString="output")
+    start_run_log!(dir)
     model.initialized || initialize!(model)
     moments!(model)
 
@@ -358,6 +402,9 @@ function export!(model::Model; dir::AbstractString="output")
         @static if SURFACE
             vtk["phi"] = reshape(Float32.(Array(domain.ϕ.data)), Nx, Ny, Nz)
         end
+        @static if TEMPERATURE
+            vtk["T"] = reshape(Float32.(si_T.(Ref(U), Array(domain.T.data))), Nx, Ny, Nz)
+        end
         pvd[t_si] = vtk
     end
 
@@ -404,7 +451,8 @@ function initialize!(model::Model)
                 domain.fi.data,
                 domain.flags.data,
                 model.weights, model.velocities,
-                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
+                domain.gi.data, domain.T.data;
                 ndrange = N
             )
         end
@@ -453,8 +501,10 @@ function step!(model::Model)
         else
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data,
+                   domain.gi.data, domain.T.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
+                   domain.ω_T, domain.β, domain.T_avg,
                    Nd, Nx, Ny, Nz; ndrange = N)
         end
 
@@ -486,6 +536,7 @@ function moments!(model::Model)
             domain.u.data,
             domain.flags.data,
             domain.fi.data,
+            domain.gi.data, domain.T.data,
             model.weights, model.velocities,
             Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
             ndrange = N

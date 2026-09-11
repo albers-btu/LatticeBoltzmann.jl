@@ -11,6 +11,7 @@ using ProgressMeter
 using Logging
 
 @assert MOVING_BOUNDARIES
+start_run_log!("output_cavity")
 
 Nx, Ny, Nz = 48, 48, 48
 si_L = 0.1u"m"                      # cube side

@@ -201,13 +201,87 @@ end
     return fp, fm
 end
 
+# D3Q7 thermal. Perturbation g' = g - w, T = 1 + Σg.
+# ω_T = 1/(2α + 1/2). Boussinesq: F_eff = F - F β (T - T_avg).
+@inline function geq_T_rest(Tn::CType) where {CType}
+    return CType(0.25) * Tn - CType(0.25)
+end
+@inline function geq_T_axis(Tn::CType, ucomp::CType) where {CType}
+    return CType(0.5) * Tn * ucomp + CType(0.125) * (Tn - one(CType))
+end
+
+@inline function collide_temperature!(
+    t_odd::Val{odd}, gi, Tfield, flagsn,
+    ux::CType, uy::CType, uz::CType,
+    fxn::CType, fyn::CType, fzn::CType,
+    fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
+    x::Int, y::Int, z::Int, Nx::Int, Ny::Int, Nz::Int, N::Int, n::Int,
+    ::Type{CType}
+) where {odd, CType}
+    srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    g0 = CType(gi[f_index(n, 1, N)])
+    gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
+    gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
+    gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
+
+    if (flagsn & TYPE_T) != 0x00
+        Tn = Tfield[n]
+    else
+        Tn = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+        @static if UPDATE_FIELDS
+            Tfield[n] = Tn
+        end
+    end
+
+    ge0 = geq_T_rest(Tn)
+    gexp, gexm = geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux)
+    geyp, geym = geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy)
+    gezp, gezm = geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz)
+
+    if (flagsn & TYPE_T) != 0x00
+        gi[f_index(n, 1, N)] = eltype(gi)(ge0)
+        store_pair!(gi, n, srcx, 2, gexp, gexm, t_odd, N)
+        store_pair!(gi, n, srcy, 4, geyp, geym, t_odd, N)
+        store_pair!(gi, n, srcz, 6, gezp, gezm, t_odd, N)
+    else
+        om = one(CType) - ω_T
+        gi[f_index(n, 1, N)] = eltype(gi)(om * g0 + ω_T * ge0)
+        store_pair!(gi, n, srcx, 2, om * gpx + ω_T * gexp, om * gmx + ω_T * gexm, t_odd, N)
+        store_pair!(gi, n, srcy, 4, om * gpy + ω_T * geyp, om * gmy + ω_T * geym, t_odd, N)
+        store_pair!(gi, n, srcz, 6, om * gpz + ω_T * gezp, om * gmz + ω_T * gezm, t_odd, N)
+    end
+
+    dT = Tn - T_avg
+    fxn -= fx * β * dT
+    fyn -= fy * β * dT
+    fzn -= fz * β * dT
+    return fxn, fyn, fzn
+end
+
+@inline function store_geq!(
+    gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd::Val{odd}, ::Type{CType}
+) where {odd, CType}
+    gi[f_index(n, 1, N)] = eltype(gi)(geq_T_rest(Tn))
+    srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    store_pair!(gi, n, srcx, 2, geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux), t_odd, N)
+    store_pair!(gi, n, srcy, 4, geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy), t_odd, N)
+    store_pair!(gi, n, srcz, 6, geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz), t_odd, N)
+    return nothing
+end
+
 @static if !SURFACE
 
 @kernel function initialize_kernel!(
     ρ, u, fi, flags,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
-    N::Int, Nx::Int, Ny::Int, Nz::Int
+    N::Int, Nx::Int, Ny::Int, Nz::Int,
+    gi, T
 ) where {Q, CType}
     n = @index(Global)
     @inbounds begin
@@ -249,6 +323,9 @@ end
                 feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
                 src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
                 store_pair!(fi, n, src, i, feqp, feqm, Val(false), N)
+            end
+            @static if TEMPERATURE
+                store_geq!(gi, n, x, y, z, T[n], ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType)
             end
         end
     end
@@ -392,10 +469,11 @@ end # SURFACE
 # generic fallback
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F,
+    flags, fi, ρ, u, F, gi, T,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -454,6 +532,12 @@ end # SURFACE
         else
             invρ = one(CType) / ρn
             ux *= invρ; uy *= invρ; uz *= invρ
+            @static if TEMPERATURE
+                fxn, fyn, fzn = collide_temperature!(
+                    t_odd, gi, T, flagsn, ux, uy, uz,
+                    fxn, fyn, fzn, fx, fy, fz,
+                    ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+            end
             @static if APPLY_FORCE
                 ux += fxn * invρ * CType(0.5)
                 uy += fyn * invρ * CType(0.5)
@@ -500,10 +584,11 @@ end
 
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F,
+    flags, fi, ρ, u, F, gi, T,
     w::NTuple{19, CType},
     c::NTuple{19, SVector{3,Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
     flagsn = flags[n]
@@ -600,6 +685,12 @@ end
     else
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
+        @static if TEMPERATURE
+            fxn, fyn, fzn = collide_temperature!(
+                t_odd, gi, T, flagsn, ux, uy, uz,
+                fxn, fyn, fzn, fx, fy, fz,
+                ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+        end
         @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
             uy += fyn * invρ * CType(0.5)
@@ -720,25 +811,27 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    @Const(flags), fi, ρ, u, F,
+    @Const(flags), fi, ρ, u, F, gi, T,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    @Const(flags), fi, ρ, u, F,
+    @Const(flags), fi, ρ, u, F, gi, T,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -891,7 +984,7 @@ end
 
 @inline function moments_body!(
     t_odd::Val{odd},
-    ρ, u, flags, fi,
+    ρ, u, flags, fi, gi, T,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
@@ -961,23 +1054,35 @@ end
     u[n, 1] = ux * invρ
     u[n, 2] = uy * invρ
     u[n, 3] = uz * invρ
+    @static if TEMPERATURE
+        if (flagsn & TYPE_T) == 0x00
+            srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+            srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+            srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+            g0 = CType(gi[f_index(n, 1, N)])
+            gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
+            gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
+            gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
+            T[n] = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+        end
+    end
     return nothing
 end
 
 @kernel function moments_even_kernel!(
-    ρ, u, @Const(flags), fi, w::NTuple{Q, CType},
+    ρ, u, @Const(flags), fi, gi, T, w::NTuple{Q, CType},
     c, N, Nx, Ny, Nz
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds moments_body!(Val(false), ρ, u, flags, fi, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds moments_body!(Val(false), ρ, u, flags, fi, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function moments_odd_kernel!(
-    ρ, u, @Const(flags), fi, w::NTuple{Q, CType},
+    ρ, u, @Const(flags), fi, gi, T, w::NTuple{Q, CType},
     c, N, Nx, Ny, Nz
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds moments_body!(Val(true), ρ, u, flags, fi, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds moments_body!(Val(true), ρ, u, flags, fi, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 @static if MOVING_BOUNDARIES

@@ -10,6 +10,7 @@ using ProgressMeter
 using Logging
 
 @assert EQUILIBRIUM_BOUNDARIES
+start_run_log!("output_channel")
 
 Nx, Ny, Nz = 48, 24, 24
 si_L = 0.048u"m"                    # streamwise length (cubic cells)

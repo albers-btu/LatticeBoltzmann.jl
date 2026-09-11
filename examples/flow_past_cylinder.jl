@@ -15,6 +15,7 @@ using ProgressMeter
 using Logging
 
 @assert FORCE_FIELD && EQUILIBRIUM_BOUNDARIES
+start_run_log!("output_cylinder")
 
 Nx, Ny, Nz = 96, 8, 48
 si_L = 0.192u"m"

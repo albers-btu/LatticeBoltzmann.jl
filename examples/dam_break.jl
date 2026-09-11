@@ -6,6 +6,7 @@ using ProgressMeter
 using Logging
 
 @assert SURFACE && VOLUME_FORCE && UPDATE_FIELDS
+start_run_log!("output_dam_break")
 
 Nx, Ny, Nz = 64, 64, 64
 si_L = 0.1u"m"                  # tank size

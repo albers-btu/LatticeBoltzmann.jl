@@ -18,6 +18,7 @@ using ProgressMeter
 using Logging
 
 @assert FORCE_FIELD && EQUILIBRIUM_BOUNDARIES
+start_run_log!("output_vortex")
 
 Nx, Ny, Nz = 192, 8, 96             # ~8 D of wake, H/D = 6
 si_L = 0.384u"m"

@@ -5,20 +5,21 @@ struct Units{T<:AbstractFloat}
     m::T
     kg::T
     s::T
+    K::T   # Kelvin at lattice T = 1 (identity: K=1)
 end
 
-function Units(x, u, ρ, si_x, si_u, si_ρ; T::Type{<:AbstractFloat}=Float32)
+function Units(x, u, ρ, si_x, si_u, si_ρ; T::Type{<:AbstractFloat}=Float32, K=1)
     m  = T(si_x / x)
     kg = T(si_ρ / ρ) * m^3
     s  = T(u / si_u) * m
-    Units{T}(m, kg, s)
+    Units{T}(m, kg, s, T(K))
 end
 
 function Units(
     si_x::Length, si_u::Velocity, si_ρ::Density;
-    x, u=0.05, ρ=1, T::Type{<:AbstractFloat}=Float32
+    x, u=0.05, ρ=1, T::Type{<:AbstractFloat}=Float32, K=1
 )
-    Units(x, u, ρ, ustrip(u"m", si_x), ustrip(u"m/s", si_u), ustrip(u"kg/m^3", si_ρ); T)
+    Units(x, u, ρ, ustrip(u"m", si_x), ustrip(u"m/s", si_u), ustrip(u"kg/m^3", si_ρ); T, K)
 end
 
 si_x(U::Units, x)              = x * U.m
@@ -29,6 +30,7 @@ si_p(U::Units{T}, ρ) where {T} = si_ρ(U, ρ) * (U.m / U.s)^2 / T(3) # p = ρ c
 si_ν(U::Units, ν)              = ν * U.m^2 / U.s
 si_g(U::Units, g)              = g * U.m / U.s^2
 si_σ(U::Units, σ)              = σ * U.kg / U.s^2
+si_T(U::Units, Tlat)           = Tlat * U.K
 
 lbm_x(U::Units, si_x)                  = si_x / U.m
 lbm_t(U::Units, si_t)                  = si_t / U.s
@@ -46,4 +48,4 @@ function Base.show(io::IO, U::Units)
     print(io, "Units: 1 cell = ", 1000*U.m, " mm, 1 step = ", U.s, " s")
 end
 
-Units{T}() where {T} = Units{T}(one(T), one(T), one(T))
+Units{T}() where {T} = Units{T}(one(T), one(T), one(T), one(T))

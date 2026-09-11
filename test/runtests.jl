@@ -11,6 +11,7 @@ using Test, StaticArrays, CUDA
 	include("test_equilibrium.jl")
 	include("test_moving.jl")
 	include("test_force_field.jl")
+	include("test_temperature.jl")
 
 	model = Model(64, 64, 64, 1.0; backend=CUDABackend())
 	#model = Model(64, 64, 64, 1.0)

@@ -36,10 +36,24 @@ mutable struct Domain{
         massex::Memory{CType, Aρ}
     end
 
+    @static if TEMPERATURE
+        α::CType
+        β::CType
+        T_avg::CType
+        ω_T::CType
+        T::Memory{CType, Aρ}
+        gi::Memory{SType, Afi}
+    end
+
     t::UInt64
 end
 
-function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{CType}, ::Type{SType}; σ::CType = zero(CType)) where {CType, SType}
+function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{CType}, ::Type{SType};
+    σ::CType = zero(CType),
+    α::CType = zero(CType),
+    β::CType = zero(CType),
+    T_avg::CType = one(CType),
+) where {CType, SType}
     Q = length(WEIGHTS[scheme])
     
     N = Int(Nx) * Int(Ny) * Int(Nz)
@@ -72,29 +86,63 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         fill!(massex.data, zero(CType))
     end
 
+    @static if TEMPERATURE
+        αT = α == zero(CType) ? CType(ν) : α
+        ω_T = one(CType) / (CType(2) * αT + CType(1) / CType(2))
+        Tmem = Memory(AT{CType}(undef, N))
+        fill!(Tmem.data, T_avg)
+        gi = Memory(AT{SType}(undef, N * 7))
+        fill!(gi.data, zero(SType))
+    end
+
     @static if SURFACE
-        Domain(
-            UInt(Nx), UInt(Ny), UInt(Nz),
-            Int(Ox), Int(Oy), Int(Oz),
-            CType(ν), N, ω,
-            CType(fx), CType(fy), CType(fz),
-            CType(σ),
-            ρ, u, F, fi, flags,
-            # --- SURFACE ---
-            ϕ, mass, massex,
-            # --- SURFACE ---
-            UInt64(0)
-        )
+        @static if TEMPERATURE
+            Domain(
+                UInt(Nx), UInt(Ny), UInt(Nz),
+                Int(Ox), Int(Oy), Int(Oz),
+                CType(ν), N, ω,
+                CType(fx), CType(fy), CType(fz),
+                CType(σ),
+                ρ, u, F, fi, flags,
+                ϕ, mass, massex,
+                αT, β, T_avg, ω_T, Tmem, gi,
+                UInt64(0)
+            )
+        else
+            Domain(
+                UInt(Nx), UInt(Ny), UInt(Nz),
+                Int(Ox), Int(Oy), Int(Oz),
+                CType(ν), N, ω,
+                CType(fx), CType(fy), CType(fz),
+                CType(σ),
+                ρ, u, F, fi, flags,
+                ϕ, mass, massex,
+                UInt64(0)
+            )
+        end
     else
-        Domain(
-            UInt(Nx), UInt(Ny), UInt(Nz),
-            Int(Ox), Int(Oy), Int(Oz),
-            CType(ν), N, ω,
-            CType(fx), CType(fy), CType(fz),
-            CType(σ),
-            ρ, u, F, fi, flags,
-            UInt64(0)
-        )
+        @static if TEMPERATURE
+            Domain(
+                UInt(Nx), UInt(Ny), UInt(Nz),
+                Int(Ox), Int(Oy), Int(Oz),
+                CType(ν), N, ω,
+                CType(fx), CType(fy), CType(fz),
+                CType(σ),
+                ρ, u, F, fi, flags,
+                αT, β, T_avg, ω_T, Tmem, gi,
+                UInt64(0)
+            )
+        else
+            Domain(
+                UInt(Nx), UInt(Ny), UInt(Nz),
+                Int(Ox), Int(Oy), Int(Oz),
+                CType(ν), N, ω,
+                CType(fx), CType(fy), CType(fz),
+                CType(σ),
+                ρ, u, F, fi, flags,
+                UInt64(0)
+            )
+        end
     end
 end
 
@@ -110,6 +158,11 @@ flags(domain::Domain) = domain.flags
     ϕ(domain::Domain) = domain.ϕ
     mass(domain::Domain) = domain.mass
     massex(domain::Domain) = domain.massex
+end
+
+@static if TEMPERATURE
+    T(domain::Domain) = domain.T
+    gi(domain::Domain) = domain.gi
 end
 
 τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + CType(1) / CType(2)
