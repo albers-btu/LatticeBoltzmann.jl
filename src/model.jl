@@ -411,6 +411,7 @@ function step!(model::Model)
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
+                   domain.ρ.data, domain.u.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    Nd, Nx, Ny, Nz; ndrange = N)
@@ -491,31 +492,49 @@ end
         return nothing
     end
 
-    # TYPE_I
-    ρn = fn1
-    ux = zero(CType); uy = zero(CType); uz = zero(CType)
-    for k in 1:NP
-        i = 2k
-        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-        fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
-        ρn += fp_out + fm_out
-        ux += CType(c[i][1])*fp_out + CType(c[i+1][1])*fm_out
-        uy += CType(c[i][2])*fp_out + CType(c[i+1][2])*fm_out
-        uz += CType(c[i][3])*fp_out + CType(c[i+1][3])*fm_out
+    if su != TYPE_I
+        mass[n] = massn
+        return nothing
     end
-    invρ = one(CType) / ρn
-    ux *= invρ; uy *= invρ; uz *= invρ
+
+    # TYPE_I
     cs = CType(1) / sqrt(CType(3))
-    ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
+    @static if EQUILIBRIUM_BOUNDARIES
+        eq = (flagsn & TYPE_BO) == TYPE_E
+    else
+        eq = false
+    end
+    if eq
+        ρn, ux, uy, uz = prescribed_hydro(ρ[n], u[n, 1], u[n, 2], u[n, 3], fx, fy, fz)
+    else
+        ρn = fn1
+        ux = zero(CType); uy = zero(CType); uz = zero(CType)
+        for k in 1:NP
+            i = 2k
+            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+            fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
+            ρn += fp_out + fm_out
+            ux += CType(c[i][1])*fp_out + CType(c[i+1][1])*fm_out
+            uy += CType(c[i][2])*fp_out + CType(c[i+1][2])*fm_out
+            uz += CType(c[i][3])*fp_out + CType(c[i+1][3])*fm_out
+        end
+        invρ = one(CType) / ρn
+        ux *= invρ; uy *= invρ; uz *= invρ
+        ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
+    end
 
     ϕin = calculate_phi(ρn, massn, flagsn)
     ρ_gas = gas_density_plic(σ, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
-    @static if VOLUME_FORCE
-        uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
-        uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)
-        uzg = clamp(uz + fz / (CType(2) * ρn), -cs, cs)
-    else
+    if eq
         uxg, uyg, uzg = ux, uy, uz
+    else
+        @static if VOLUME_FORCE
+            uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
+            uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)
+            uzg = clamp(uz + fz / (CType(2) * ρn), -cs, cs)
+        else
+            uxg, uyg, uzg = ux, uy, uz
+        end
     end
     uug = CType(1.5) * (uxg*uxg + uyg*uyg + uzg*uzg)
 

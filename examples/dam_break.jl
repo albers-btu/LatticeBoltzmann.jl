@@ -11,7 +11,7 @@ si_H = (2 * Nz ÷ 3) / Nz * si_L # dam height ~ 2/3 box height
 si_g = 9.81u"m/s^2"
 si_u = sqrt(ustrip(u"m/s^2", si_g) * ustrip(u"m", si_H)) * u"m/s"
 
-Ma = 0.05 # D3Q19 Ma is usual safe below 0.05
+Ma = 0.05 # D3Q19 Ma is usually safe below 0.05
 cs = 1 / sqrt(3)
 lbm_u = Ma * cs
 
@@ -46,11 +46,11 @@ d = model.domains[1]
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output")
 
-nsteps = 10000
-every  = 20
+nsteps = 2000
+every  = 50
 for i in 1:(nsteps ÷ every)
     run!(model, every)
-    export!(model; dir="output")
+    export!(model; dir="output_dam_break")
     t = Int(d.t)
     @info "dump" t t_si=si_t(model.units, t)*u"s"
 end

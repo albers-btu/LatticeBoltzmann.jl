@@ -1,9 +1,10 @@
-const TRT = true # false -> keep SRT
+const TRT                    = true # false -> keep SRT
 
-const SURFACE      = true
-const VOLUME_FORCE = true
+const SURFACE                = false
+const VOLUME_FORCE           = false
+const EQUILIBRIUM_BOUNDARIES = true
 
-const UPDATE_FIELDS = SURFACE
+const UPDATE_FIELDS          = SURFACE
 
 @static if SURFACE && !VOLUME_FORCE
     @warn "SURFACE without VOLUME_FORCE: gravity/fx,fy,fz will be ignored"

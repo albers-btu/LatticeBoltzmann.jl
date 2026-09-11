@@ -134,6 +134,55 @@ end
     return scale_force_pair(ωp, ωm, Fip, Fim)
 end
 
+@inline function prescribed_hydro(
+    ρn::CType, ux::CType, uy::CType, uz::CType,
+    fx::CType, fy::CType, fz::CType
+) where {CType}
+    cs = CType(1) / sqrt(CType(3))
+    if ρn <= zero(CType)
+        return one(CType), zero(CType), zero(CType), zero(CType)
+    end
+    @static if VOLUME_FORCE
+        invρ = one(CType) / ρn
+        ux = clamp(ux + fx * invρ * CType(0.5), -cs, cs)
+        uy = clamp(uy + fy * invρ * CType(0.5), -cs, cs)
+        uz = clamp(uz + fz * invρ * CType(0.5), -cs, cs)
+    else
+        ux = clamp(ux, -cs, cs)
+        uy = clamp(uy, -cs, cs)
+        uz = clamp(uz, -cs, cs)
+    end
+    return ρn, ux, uy, uz
+end
+
+@inline function store_feq!(
+    fi, n, x, y, z, ρn,
+    ux, uy, uz, w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
+    N, Nx, Ny, Nz, t_odd::Val{odd}
+) where {odd, Q, CType}
+    uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
+    fi[f_index(n, 1, N)] = eltype(fi)(feq(w[1], ρn, ux, uy, uz, uu, c[1], CType))
+    NP = (Q - 1) ÷ 2
+    for k in 1:NP
+        i = 2k
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        store_pair!(fi, n, src, i,
+            feq(w[i], ρn, ux, uy, uz, uu, c[i], CType),
+            feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType),
+            t_odd, N)
+    end
+    return nothing
+end
+
+@inline function equilibrium_boundary!(
+    t_odd::Val{odd}, fi, ρ, u, w, c, fx, fy, fz,
+    N, Nx, Ny, Nz, n, x, y, z, ::Type{CType}
+) where {odd, CType}
+    ρn, ux, uy, uz = prescribed_hydro(ρ[n], u[n, 1], u[n, 2], u[n, 3], fx, fy, fz)
+    store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, t_odd)
+    return nothing
+end
+
 @static if !SURFACE
 
 @kernel function initialize_kernel!(
@@ -223,26 +272,6 @@ end
     end
 end
 
-@inline function store_feq!(
-    fi, n, x, y, z, ρn,
-    ux, uy, uz, w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}}, 
-    N, Nx, Ny, Nz, t_odd::Val{odd}
-) where {odd, Q, CType}
-    uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
-    fi[f_index(n, 1, N)] = eltype(fi)(feq(w[1], ρn, ux, uy, uz, uu, c[1], CType))
-
-    NP = (Q - 1) ÷ 2
-    for k in 1:NP
-        i = 2k
-        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-        store_pair!(fi, n, src, i,
-            feq(w[i], ρn, ux, uy, uz, uu, c[i], CType),
-            feq(w[i+1], ρn, ux, uy, uz, uu, c[i+1], CType),
-            t_odd, N)
-    end
-    return nothing
-end
-
 @inline function initialize_body!(
     ρ, u, fi, flags, mass, massex, ϕ,
     w::NTuple{Q, CType},
@@ -322,20 +351,27 @@ end # SURFACE
 # generic fallback
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi,
+    flags, fi, ρ, u,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
-    if (flags[n] & TYPE_S) != TYPE_S
-        n0 = n - 1
-
-        x = n0 % Nx
-        y = (n0 ÷ Nx) % Ny
-        z = n0 ÷ (Nx * Ny)
-
-        fn1 = CType(fi[f_index(n, 1, N)])
+    flagsn = flags[n]
+    if (flagsn & TYPE_S) == TYPE_S
+        return nothing
+    end
+    n0 = n - 1
+    x = n0 % Nx
+    y = (n0 ÷ Nx) % Ny
+    z = n0 ÷ (Nx * Ny)
+    @static if EQUILIBRIUM_BOUNDARIES
+        if (flagsn & TYPE_BO) == TYPE_E
+            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fx, fy, fz, N, Nx, Ny, Nz, n, x, y, z, CType)
+            return nothing
+        end
+    end
+    fn1 = CType(fi[f_index(n, 1, N)])
         NP  = (Q - 1) ÷ 2
 
         # pairs: (2, 3), (4, 5), ...
@@ -409,19 +445,19 @@ end # SURFACE
             src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
             store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
         end
-    end
     return nothing
 end
 
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi,
+    flags, fi, ρ, u,
     w::NTuple{19, CType},
     c::NTuple{19, SVector{3,Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
-    if (flags[n] & TYPE_S) == TYPE_S
+    flagsn = flags[n]
+    if (flagsn & TYPE_S) == TYPE_S
         return nothing
     end
 
@@ -429,6 +465,13 @@ end
     x  = n0 % Nx
     y  = (n0 ÷ Nx) % Ny
     z  = n0 ÷ (Nx * Ny)
+
+    @static if EQUILIBRIUM_BOUNDARIES
+        if (flagsn & TYPE_BO) == TYPE_E
+            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fx, fy, fz, N, Nx, Ny, Nz, n, x, y, z, CType)
+            return nothing
+        end
+    end
 
     fn1 = CType(fi[f_index(n, 1, N)])
 
@@ -599,25 +642,25 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    @Const(flags), fi,
+    @Const(flags), fi, ρ, u,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    @Const(flags), fi,
+    @Const(flags), fi, ρ, u,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -640,6 +683,13 @@ end
     n0 = n - 1
     x = n0 % Nx; y = (n0 ÷ Nx) % Ny; z = n0 ÷ (Nx * Ny)
     NP = (Q - 1) ÷ 2
+
+    @static if EQUILIBRIUM_BOUNDARIES
+        if (flagsn & TYPE_BO) == TYPE_E
+            equilibrium_boundary!(t_odd, fi, ρ, u, w, c, fx, fy, fz, N, Nx, Ny, Nz, n, x, y, z, CType)
+            return nothing
+        end
+    end
 
     fn1 = CType(fi[f_index(n, 1, N)])
     pairs = ntuple(Val(NP)) do k
@@ -765,6 +815,11 @@ end
     skip = (flagsn & TYPE_S) == TYPE_S
     @static if SURFACE
         skip |= (su == TYPE_G) | (su == TYPE_IG)
+    end
+    @static if EQUILIBRIUM_BOUNDARIES
+        if (flagsn & TYPE_BO) == TYPE_E
+            return nothing
+        end
     end
     if skip
         ρ[n] = one(CType)
