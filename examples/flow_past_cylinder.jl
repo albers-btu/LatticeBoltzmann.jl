@@ -11,6 +11,8 @@ using LatticeBoltzmann
 using Printf
 using CUDA
 using Unitful
+using ProgressMeter
+using Logging
 
 @assert FORCE_FIELD && EQUILIBRIUM_BOUNDARIES
 
@@ -65,14 +67,30 @@ export!(model; dir="output_cylinder")
 
 nsteps = 4000
 every  = 50
+nchunks = nsteps ÷ every
 A = D_cells * Ny                         # projected area (span × diameter)
-for i in 1:(nsteps ÷ every)
-    run!(model, every)
+Ncell = Int(model.Nx) * Int(model.Ny) * Int(model.Nz)
+mlups_ema = NaN
+α = 0.2
+prog = Progress(nchunks; dt=0.2, desc="flow past cylinder ", showspeed=true)
+for i in 1:nchunks
+    t0 = time_ns()
+    with_logger(NullLogger()) do
+        run!(model, every)
+    end
+    dt = (time_ns() - t0) * 1e-9
+    mlups = Ncell * every / dt / 1e6
+    global mlups_ema = isfinite(mlups_ema) ? α * mlups + (1 - α) * mlups_ema : mlups
     reset_force_field!(model)
     update_force_field!(model)
     Fx = sum(Array(d.F.data)[cyl, 1])
     Cd = 2 * Fx / (u_in^2 * A)
     export!(model; dir="output_cylinder")
-    t = Int(d.t)
-    @info "dump" t t_si=si_t(model.units, t)*u"s" Cd
+    next!(prog; showvalues = [
+        (:t, Int(d.t)),
+        (:t_si, si_t(model.units, Int(d.t))),
+        (:MLUPS, round(mlups_ema; digits=1)),
+        (:Cd, round(Cd; digits=3)),
+    ])
 end
+finish!(prog)

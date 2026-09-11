@@ -7,6 +7,8 @@ using LatticeBoltzmann
 using Printf
 using CUDA
 using Unitful
+using ProgressMeter
+using Logging
 
 @assert MOVING_BOUNDARIES
 
@@ -49,9 +51,24 @@ export!(model; dir="output_cavity")
 
 nsteps = 4000
 every  = 50
-for i in 1:(nsteps ÷ every)
-    run!(model, every)
+nchunks = nsteps ÷ every
+Ncell = Int(model.Nx) * Int(model.Ny) * Int(model.Nz)
+mlups_ema = NaN
+α = 0.2
+prog = Progress(nchunks; dt=0.2, desc="lid-driven cavity ", showspeed=true)
+for i in 1:nchunks
+    t0 = time_ns()
+    with_logger(NullLogger()) do
+        run!(model, every)
+    end
+    dt = (time_ns() - t0) * 1e-9
+    mlups = Ncell * every / dt / 1e6
+    global mlups_ema = isfinite(mlups_ema) ? α * mlups + (1 - α) * mlups_ema : mlups
     export!(model; dir="output_cavity")
-    t = Int(d.t)
-    @info "dump" t t_si=si_t(model.units, t)*u"s"
+    next!(prog; showvalues = [
+        (:t, Int(d.t)),
+        (:t_si, si_t(model.units, Int(d.t))),
+        (:MLUPS, round(mlups_ema; digits=1)),
+    ])
 end
+finish!(prog)
