@@ -81,6 +81,8 @@ function Model(
     ν_l = nothing,
     k_sT = 0.0,
     k_lT = 0.0,
+    cp_sT = 0.0,
+    cp_lT = 0.0,
     ν_sT = 0.0,
     ν_lT = 0.0,
     β = 0.0f0,
@@ -119,6 +121,8 @@ function Model(
     νl = ν_l === nothing ? ν : CType(lbm_ν(units, ν_l))
     αsT = CType(lbm_αT(units, k_sT))
     αlT = CType(lbm_αT(units, k_lT))
+    γs = CType(lbm_γ(units, cp_sT))
+    γl = CType(lbm_γ(units, cp_lT))
     νsT = CType(lbm_νT(units, ν_sT))
     νlT = CType(lbm_νT(units, ν_lT))
     Λ  = CType(lbm_Λ(units, latent))
@@ -146,7 +150,7 @@ function Model(
     # @info units
 
     model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, α_s=αs, α_l=αl,
-                  ν_s=νs, ν_l=νl, α_sT=αsT, α_lT=αlT, ν_sT=νsT, ν_lT=νlT,
+                  ν_s=νs, ν_l=νl, α_sT=αsT, α_lT=αlT, γ_s=γs, γ_l=γl, ν_sT=νsT, ν_lT=νlT,
                   β=CType(β), T_avg=CType(T_avg),
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
@@ -168,6 +172,8 @@ function Model(
     α_l = 0.0f0,
     α_sT = 0.0f0,
     α_lT = 0.0f0,
+    γ_s = 0.0f0,
+    γ_l = 0.0f0,
     ν_s = 0.0f0,
     ν_l = 0.0f0,
     ν_sT = 0.0f0,
@@ -280,6 +286,8 @@ function Model(
             α_l=CType(α_l),
             α_sT=CType(α_sT),
             α_lT=CType(α_lT),
+            γ_s=CType(γ_s),
+            γ_l=CType(γ_l),
             ν_s=CType(ν_s),
             ν_l=CType(ν_l),
             ν_sT=CType(ν_sT),
@@ -764,7 +772,7 @@ function step!(model::Model)
             if domain.τ_p > 0
                 powder_gas_kernel!(model.backend, model.workgroup)(
                     domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
-                    domain.τ_p, domain.T_p, domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
+                    domain.τ_p, domain.T_p, domain.γ_s, domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
             end
         end
 
@@ -776,7 +784,8 @@ function step!(model::Model)
                model.weights, model.velocities,
                domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
                domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
-               Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
+               Nd, Nx, Ny, Nz, domain.Eacc.data,
+               domain.h.data, domain.Q.data, domain.ω_T; ndrange = N)
         end
 
         @static if MOVING_BOUNDARIES
@@ -796,6 +805,7 @@ function step!(model::Model)
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                   domain.γ_s, domain.γ_l,
                    domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
@@ -810,6 +820,7 @@ function step!(model::Model)
                    domain.ω_T, domain.β, domain.T_avg,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                   domain.γ_s, domain.γ_l,
                    domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad,
@@ -889,7 +900,7 @@ end
     c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType
 ) where {odd, Q, CType}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
@@ -931,7 +942,7 @@ end
         @static if TEMPERATURE
             fillc = ϕ[n]
             fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-            reconstruct_g_boundaries!(t_odd, gi, T, flags, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc)
+            reconstruct_g_boundaries!(t_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
         end
         return nothing
     end
@@ -1047,7 +1058,7 @@ end
     @static if TEMPERATURE
         fillc = ϕin
         fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-        reconstruct_g_boundaries!(t_odd, gi, T, flags, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc)
+        reconstruct_g_boundaries!(t_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
     end
     return nothing
 end
@@ -1057,10 +1068,10 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc)
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
 end
 
 @kernel function surface_0_odd_kernel!(
@@ -1068,10 +1079,10 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc)
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
 end
 
 end

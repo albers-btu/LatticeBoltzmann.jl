@@ -1,8 +1,8 @@
-# DED-style 316L melt track. Coarse lattice, larger pad, 200 W — fast demo.
-# Heat: PLIC + Fresnel laser. Powder: ballistic Gaussian jet (src/powder.jl)
-# from behind or ahead of the spot along the scan (x), so the bead is
-# symmetric in y. Set `n_layers` to retrace the bead.
-# Evaporation cooling, mass loss, and recoil are on (latent_v, T_v).
+# DED-style 316L melt track. 2 kW, 0.5 mm 1/e² spot. SI box is independent of
+# Δx: change `si_dx` only to refine. Heat: PLIC + Fresnel (multi-bounce).
+# Powder: ballistic Gaussian jet from behind or ahead of the spot along x.
+# Set `n_layers` to retrace. Evaporation cooling, mass loss, and recoil are on.
+# Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
 # isosurface slider. Open lbm.pvd, colour by T (or phi), then Contour.
@@ -26,15 +26,20 @@ bidirectional = true       # even layers scan x1 → x0; false = always x0 → x
 si_dwell      = 0.0u"s"    # laser + powder off between layers; 0 → none
 jet_along     = :back      # :back = trailing (behind the travel), :front = leading
 
-# --- user: grid / 316L ---
-# ~6.4 × 5.1 mm in xy, pad 1.6 mm, Δx ≈ 80 µm. Nz is set from `n_layers` below.
-Nx, Ny = 80, 64
-Hfill = 22
-L = Hfill - 2                           # pad thickness in cells
+# --- user: box / resolution (SI; Δx does not change the box or the spot) ---
+# 8 × 6 mm in xy. Pad 4 mm + 2 mm gas so a 2 kW keyhole can open in z without
+# hitting the Robin floor or the top lid. Refine with `si_dx` only.
+si_Lx     = 8.0e-3u"m"
+si_Ly     = 6.0e-3u"m"
+si_H      = 4.0e-3u"m"                  # substrate thickness (z = 2 … Hfill)
+si_gas    = 2.0e-3u"m"                  # TYPE_G above the expected bead
+si_dx     = 40.0e-6u"m"
+si_end_margin = 1.2e-3u"m"              # scan start/stop from each x-wall
 
-si_H      = 1.6e-3u"m"                  # → Δx ≈ 80 µm
 si_ρ      = 8000u"kg/m^3"
 si_cp     = 500u"J/kg/K"
+si_cp_sT  = 0.20u"J/kg/K^2"             # cp(T) = cp + cpT (T - Tm)
+si_cp_lT  = 0.08u"J/kg/K^2"
 # k(T) = k(Tm) + kT (T - Tm). k_s is at Tm so k(T_init) stays ~15 W/m/K.
 si_Tm     = 1673.0u"K"
 si_T_init = 300.0u"K"
@@ -47,7 +52,8 @@ si_Lv     = 7.45e6u"J/kg"
 si_Tv     = 3086.0u"K"
 si_M      = 0.0558u"kg/mol"
 si_K0     = 1.0e-10u"m^2"
-si_P      = 200.0u"W"
+si_P      = 2000.0u"W"
+si_h_sub  = 2.0e4u"W/m^2/K"             # Robin backing; ∞ was Dirichlet T_init
 si_d_spot = 0.5e-3u"m"
 si_v      = 8.0e-3u"m/s"
 si_δ      = 0.24e-3u"m"
@@ -107,7 +113,13 @@ si_ν_l = ustrip(u"m^2/s", α_l_si) * u"m^2/s"
 si_ν_s = 0.5 * si_ν_l
 si_ν_lT = -2.0e-9u"m^2/s/K"              # liquid thins with T; ν_sT = 0
 lbm_α_true = 0.1
-m = ustrip(u"m", si_H) / L
+# Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx so the
+# SI box and the SI spot stay put when you refine.
+L     = max(4, round(Int, ustrip(u"m", si_H) / ustrip(u"m", si_dx)))
+m     = ustrip(u"m", si_H) / L
+Nx    = max(16, round(Int, ustrip(u"m", si_Lx) / m))
+Ny    = max(16, round(Int, ustrip(u"m", si_Ly) / m))
+Hfill = L + 2
 s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
 lbm_u = 0.05
 si_u = (lbm_u * m / s) * u"m/s"
@@ -125,13 +137,13 @@ Q_full = Float32(lbm_Q(units, Q_si * u"W/m^3"))
 mdot_kg_s = si_eta * ustrip(u"kg/s", uconvert(u"kg/s", si_mdot))
 
 # Gas headroom: expected layer height from captured powder on a ~spot-wide bead,
-# plus a fixed clearance so the launch plane stays in TYPE_G.
+# plus `si_gas` so the keyhole depression and launch plane stay in TYPE_G.
 v_m      = ustrip(u"m/s", si_v)
 ρ_m      = ustrip(u"kg/m^3", si_ρ)
 w_bead   = 2 * w_m
 h_layer  = mdot_kg_s / max(ρ_m * w_bead * v_m, 1e-30)
 n_z_layer = max(2, ceil(Int, h_layer / m))
-n_gas_top = 8
+n_gas_top = max(6, ceil(Int, ustrip(u"m", si_gas) / m))
 Nz = Hfill + n_layers * n_z_layer + n_gas_top + 1
 
 model = Model(Nx, Ny, Nz, units;
@@ -141,7 +153,8 @@ model = Model(Nx, Ny, Nz, units;
               α_l = 2 * α_l_si,
               ν_s = si_ν_s,
               ν_l = si_ν_l,
-              k_sT = si_k_sT, k_lT = si_k_lT, ν_lT = si_ν_lT,
+              k_sT = si_k_sT, k_lT = si_k_lT, cp_sT = si_cp_sT, cp_lT = si_cp_lT,
+              ν_lT = si_ν_lT,
               β = 0.0f0, gz = 0.0f0,
               σ = si_σ, σT = si_σT, Tσ = si_Tm,
               latent = si_Lheat,
@@ -157,8 +170,11 @@ T_init  = Float32(lbm_T(units, si_T_init))
 w_cells = w_m / Float64(units.m)
 v_lat   = Float32(ustrip(u"m/s", si_v) * units.s / units.m)
 y_las   = Float32(Ny + 1) / 2
-x0      = Float32(8 + 2 * w_cells)
-x1      = Float32(Nx - 7 - 2 * w_cells)
+# Scan ends in metres, not a fixed cell count — otherwise refining eats the
+# run-in and the bead looks like it fills the box.
+n_end = ustrip(u"m", si_end_margin) / m
+x0    = Float32(clamp(n_end, 4.0, Nx / 4))
+x1    = Float32(clamp(Nx + 1 - n_end, 3 * Nx / 4, Nx - 3))
 nsteps_pass  = max(2, round(Int, abs(x1 - x0) / max(v_lat, Float32(1e-8))))
 nsteps_dwell = si_dwell > 0u"s" ?
     max(0, round(Int, ustrip(u"s", si_dwell) / Float64(units.s))) : 0
@@ -167,26 +183,29 @@ qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))
 # Frame spacing from one pass, not the whole job — otherwise n_layers=3
 # writes 3× fewer VTK/progress samples and the beam looks 3× faster.
 every   = max(qevery, max(1, nsteps_pass ÷ 40))
-dx_noz  = Float32(max(6, 2 * w_cells))   # standoff along the track
+dx_noz  = Float32(max(0.5e-3 / m, 2 * w_cells))   # ≥0.5 mm along the track
 z_noz   = Float32(Nz) - 1.4f0
 z_aim   = Float32(Hfill)
 σlat    = model.domains[1].σ
+h_lat   = Float32(lbm_h(units, si_h_sub))
 if Q_full > q_max
     @warn "surface peak Q_lat=$(Q_full) > q_max=$(q_max); raise skin/δ or lower P" Q_full nskin
 end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "DED 316L multilayer track" n_layers bidirectional si_dwell Nx Ny Nz m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top w_cells v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet A0 nskin Q_full τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
+@info "DED 316L multilayer track" n_layers bidirectional si_dwell Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_mm=(1e3*w_m) w_cells scan_mm=(1e3*m*abs(x1-x0)) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet A0 nskin Q_full h_lat γ_s=model.domains[1].γ_s γ_l=model.domains[1].γ_l τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
 fsh  = ones(Float32, Nx * Ny * Nz)
+hh   = zeros(Float32, Nx * Ny * Nz)
 for z in 1:Nz, y in 1:Ny, x in 1:Nx
     n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
     if z == 1
-        host[n] = TYPE_S | TYPE_T
+        host[n] = TYPE_S | TYPE_H
         Th[n] = T_init
+        hh[n] = h_lat
     elseif z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
         host[n] = TYPE_S
         Th[n] = T_init
@@ -199,11 +218,12 @@ end
 copyto!(model.domains[1].flags.data, host)
 copyto!(model.domains[1].T.data, Th)
 copyto!(model.domains[1].fs.data, fsh)
+copyto!(model.domains[1].h.data, hh)
 
 d = model.domains[1]
 model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
-                    nrays = 9, max_bounce = 6, every = qevery, skin = nskin)
+                    nrays = 11, max_bounce = 8, every = qevery, skin = nskin)
 model.powder_jet = PowderJet(units; mdot = si_eta * si_mdot, w = 0.6 * si_d_spot,
                              v = si_v_jet, x = x0, y = y_las, z = z_noz,
                              nparcels = 16)
@@ -307,4 +327,5 @@ nliq, depth, bead, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
 b = energy_budget(d)
 m = mass_budget(d)
 U = model.units
-@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth bead_cells=bead Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mpow_kg=si_mass(U, m.powder) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s
+dx = Float64(U.m)
+@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mpow_kg=si_mass(U, m.powder) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s

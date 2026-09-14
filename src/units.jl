@@ -71,6 +71,15 @@ lbm_Q(U::Units, si_Q, ρlat=1)          = si_Q / (si_ρ(U, ρlat) * U.cp * U.K /
 lbm_Q(U::Units, Q::Quantity, ρlat=1)   = lbm_Q(U, ustrip(u"W/m^3", Q), ρlat)
 lbm_q(U::Units, si_q, ρlat=1)          = si_q / (si_ρ(U, ρlat) * U.cp * U.K * U.m / U.s)
 lbm_q(U::Units, q::Quantity, ρlat=1)   = lbm_q(U, ustrip(u"W/m^2", q), ρlat)
+# Robin h [W/m²/K] → lattice. qlat = h_lat ΔT_lat.
+lbm_h(U::Units, hsi, ρlat=1)           = hsi * U.s / (si_ρ(U, ρlat) * U.cp * U.m)
+lbm_h(U::Units, h::Quantity, ρlat=1)   = lbm_h(U, ustrip(u"W/m^2/K", h), ρlat)
+si_h(U::Units, hlat, ρlat=1)           = hlat * si_ρ(U, ρlat) * U.cp * U.m / U.s
+# dcp/dT [J/kg/K²] → γ = d(cp/cp_ref)/dT_lat so cp/cp_ref = 1 + γ (T_lat - 1).
+function lbm_γ(U::Units, cpT)
+    cpTf = cpT isa Quantity ? ustrip(u"J/kg/K^2", cpT) : Float64(cpT)
+    return cpTf * U.K / U.cp
+end
 # volumetric mass source kg/m³/s → lattice Δmass/(ρ Δt)
 lbm_S(U::Units, si_S, ρlat=1)          = si_S * U.s / si_ρ(U, ρlat)
 lbm_S(U::Units, S::Quantity, ρlat=1)   = lbm_S(U, ustrip(u"kg/m^3/s", S), ρlat)

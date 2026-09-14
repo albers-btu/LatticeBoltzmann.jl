@@ -232,7 +232,7 @@ function advance_powder_jet!(model, domain)
         captured += dm
     end
     @static if TEMPERATURE
-        domain.E_powder += captured * domain.T_p
+        domain.E_powder += captured * sensible_H(domain.T_p, domain.γ_s)
         domain.M_powder += captured
     end
     copyto!(domain.mp.data, mp)

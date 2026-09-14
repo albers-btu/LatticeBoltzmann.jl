@@ -61,6 +61,8 @@ mutable struct Domain{
         α_l::CType
         α_sT::CType           # dα_s / dT_lat
         α_lT::CType
+        γ_s::CType            # d(cp/cp_ref)/dT_lat; 0 → constant cp
+        γ_l::CType
         ν_s::CType
         ν_l::CType
         ν_sT::CType           # dν_s / dT_lat
@@ -106,6 +108,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     α_l::CType = zero(CType),
     α_sT::CType = zero(CType),
     α_lT::CType = zero(CType),
+    γ_s::CType = zero(CType),
+    γ_l::CType = zero(CType),
     ν_s::CType = zero(CType),
     ν_l::CType = zero(CType),
     ν_sT::CType = zero(CType),
@@ -199,7 +203,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
-                αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
                 Macc, zero(CType), zero(CType),
@@ -227,7 +231,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
                 UInt64(0)
@@ -294,11 +298,13 @@ end
                 if su == TYPE_F || su == TYPE_I
                     fill = ϕA[n]
                     fill < zero(CType) && (fill = zero(CType))
-                    s += Float64(fill) * Float64(cell_enthalpy(TA[n], fsA[n], Λ))
+                    γn = blend_phase(fsA[n], domain.γ_s, domain.γ_l)
+                    s += Float64(fill) * Float64(cell_enthalpy(TA[n], fsA[n], Λ, γn))
                 end
-                s += Float64(mpA[n]) * Float64(Tp)
+                s += Float64(mpA[n]) * Float64(sensible_H(Tp, domain.γ_s))
             else
-                s += Float64(cell_enthalpy(TA[n], fsA[n], Λ))
+                γn = blend_phase(fsA[n], domain.γ_s, domain.γ_l)
+                s += Float64(cell_enthalpy(TA[n], fsA[n], Λ, γn))
             end
         end
         return CType(s)

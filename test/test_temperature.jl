@@ -139,6 +139,43 @@ end
     @test all(isfinite, TA)
 end
 
+@testset "TYPE_S|TYPE_H Robin plate cools the pad" begin
+    @test TEMPERATURE && SURFACE
+    Nx, Ny, Nz = 12, 8, 16
+    Hfill = 10
+    Tcold, Thot = 0.2f0, 1.0f0
+    hconv = 8.0f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0, T_avg=Thot,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Thot, Nx * Ny * Nz)
+    hh = zeros(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1
+            host[n] = TYPE_S | TYPE_H
+            Th[n] = Tcold
+            hh[n] = hconv
+        elseif z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].h.data, hh)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 80)
+    LatticeBoltzmann.moments!(model)
+    TA = Array(model.domains[1].T.data)
+    nbot = lbm_n(6, 4, 2, Nx, Ny)
+    @info "Robin plate" Tbot=TA[nbot]
+    @test TA[nbot] < Thot - 0.15f0
+    @test TA[nbot] > Tcold - 0.05f0
+    @test all(isfinite, TA)
+end
+
 @testset "TEMPERATURE Dirichlet conduction" begin
     @test TEMPERATURE
     Nx, Ny, Nz = 8, 8, 16
@@ -428,6 +465,16 @@ end
     @test T ≈ Ts && fl ≈ 0
     T, fl = LatticeBoltzmann.invert_enthalpy(Tl + Λm, Ts, Tl, Λm)
     @test T ≈ Tl && isapprox(fl, 1; atol=1.0f-6)
+    γ = 0.4f0
+    T0 = 1.2f0
+    H = LatticeBoltzmann.cell_enthalpy(T0, 0.0f0, Λ, γ)
+    T, fl = LatticeBoltzmann.invert_enthalpy(H, Tm, Tm, Λ, γ)
+    @test fl == 1
+    @test T ≈ T0 atol=1.0f-5
+    Hs = LatticeBoltzmann.sensible_H(Tm, γ)
+    T, fl = LatticeBoltzmann.invert_enthalpy(Hs + 0.3f0, Tm, Tm, Λ, γ)
+    @test T ≈ Tm
+    @test fl ≈ 0.3f0 / Λ
     dx, dy, dz = LatticeBoltzmann.darcy_force(1.0f0, 0.1f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 1.0f-3)
     @test dx ≈ -0.2f0
     @test dy == 0 && dz == 0
@@ -554,9 +601,9 @@ end
 
 # Periodic TYPE_F box: wrap_coord, no walls, no gas. Closed for energy.
 function _periodic_T_box(Nx, Ny, Nz; ν=0.1f0, α=0.2f0, Λ=0.0f0, Qv=0.0f0,
-                         T0=1.0f0, amp=0.0f0, Tm=1.0f0)
+                         T0=1.0f0, amp=0.0f0, Tm=1.0f0, γ_s=0.0f0, γ_l=0.0f0)
     model = Model(Nx, Ny, Nz, ν; α=α, fz=0, σ=0, Λ=Λ, Ts=Tm, Tl=Tm,
-                  T_avg=Tm, backend=CPU(), workgroup=64)
+                  T_avg=Tm, γ_s=γ_s, γ_l=γ_l, backend=CPU(), workgroup=64)
     N = Nx * Ny * Nz
     host = fill(TYPE_F, N)
     Th = fill(T0, N)
@@ -627,6 +674,24 @@ end
     @test E1 > E0
     b = energy_budget(model)
     @test isapprox(b.residual, 0; atol=5.0f-2, rtol=1.0f-3)
+end
+
+@testset "closed energy: cp(T) Q is ΔH not ΔT" begin
+    @test TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 8
+    γ, T0, Qv = 0.4f0, 1.5f0, 5.0f-4
+    nsteps = 40
+    model = _periodic_T_box(Nx, Ny, Nz; Qv=Qv, T0=T0, amp=0.0f0, γ_s=γ, γ_l=γ)
+    Qin = heat_source(model)
+    run!(model, nsteps)
+    b = energy_budget(model)
+    TA = Array(model.domains[1].T.data)
+    ΔT = sum(TA) / length(TA) - T0
+    @info "cp(T) energy" b.H b.H0 b.Q b.residual ΔT nQ=(nsteps * Qin)
+    @test isapprox(b.residual, 0; atol=5.0f-3, rtol=1.0f-4)
+    @test isapprox(b.H - b.H0, nsteps * Qin; rtol=2.0f-4, atol=2.0f-3)
+    @test ΔT > 0
+    @test ΔT < nsteps * Qv * 0.95f0
 end
 
 @testset "open energy: radiation and cold plate" begin
