@@ -47,6 +47,11 @@ mutable struct Domain{
         gi::Memory{SType, Afi}
         Q::Memory{CType, Aρ}
         h::Memory{CType, Aρ}  # Robin h; 0 -> pure Neumann
+        Λ::CType              # latent L/cp in lattice T; 0 → no melting
+        Ts::CType             # solidus
+        Tl::CType             # liquidus (Ts=Tl → isothermal Stefan)
+        K0::CType             # Kozeny–Carman K0; 0 → no Darcy
+        fs::Memory{CType, Aρ} # solid fraction
     end
 
     t::UInt64
@@ -59,6 +64,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     α::CType = zero(CType),
     β::CType = zero(CType),
     T_avg::CType = one(CType),
+    Λ::CType = zero(CType),
+    Ts::CType = zero(CType),
+    Tl::CType = zero(CType),
+    K0::CType = zero(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
 
@@ -103,6 +112,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         fill!(Qmem.data, zero(CType))
         hmem = Memory(AT{CType}(undef, N))
         fill!(hmem.data, zero(CType))
+        fsmem = Memory(AT{CType}(undef, N))
+        fill!(fsmem.data, zero(CType))
     end
 
     @static if SURFACE
@@ -115,7 +126,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex,
-                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem,
+                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 UInt64(0)
             )
         else
@@ -139,7 +150,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem,
+                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 UInt64(0)
             )
         else
@@ -175,6 +186,7 @@ end
     gi(domain::Domain) = domain.gi
     Q(domain::Domain) = domain.Q
     htc(domain::Domain) = domain.h
+    fs(domain::Domain) = domain.fs
     # D3Q7 Peng c_sT² = 1/4. Model `α` sets ω_T = 1/(2α+1/2); Fourier k = α/2.
     thermal_k(domain::Domain{CType}) where CType =
         CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))

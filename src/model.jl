@@ -34,6 +34,7 @@ mutable struct Model{
         T::MemoryContainer{CType, Aρ}
         Q::MemoryContainer{CType, Aρ}
         h::MemoryContainer{CType, Aρ}
+        fs::MemoryContainer{CType, Aρ}
     end
 
     @static if SURFACE
@@ -73,6 +74,10 @@ function Model(
     α = 0.0f0,
     β = 0.0f0,
     T_avg = 1.0f0,
+    latent = 0.0f0,
+    Ts = nothing,
+    Tl = nothing,
+    K0 = 0.0f0,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -87,10 +92,17 @@ function Model(
     Tσl = Tσ === nothing ? CType(T_avg) :
           Tσ isa Quantity ? CType(lbm_T(units, Tσ)) : CType(Tσ)
     α  = CType(lbm_ν(units, α))
+    Λ  = CType(lbm_Λ(units, latent))
+    Tsl = Ts === nothing ? CType(T_avg) :
+          Ts isa Quantity ? CType(lbm_T(units, Ts)) : CType(Ts)
+    Tll = Tl === nothing ? Tsl :
+          Tl isa Quantity ? CType(lbm_T(units, Tl)) : CType(Tl)
+    K0l = K0 isa Quantity ? CType(ustrip(u"m^2", K0) / units.m^2) : CType(K0 / units.m^2)
 
     # @info units
 
-    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, β=CType(β), T_avg=CType(T_avg), CType, SType, scheme, backend, workgroup)
+    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, β=CType(β), T_avg=CType(T_avg),
+                  Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -104,6 +116,10 @@ function Model(
     α = 0.0f0,
     β = 0.0f0,
     T_avg = 1.0f0,
+    Λ = 0.0f0,
+    Ts = nothing,
+    Tl = nothing,
+    K0 = 0.0f0,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -193,6 +209,10 @@ function Model(
             α=CType(α),
             β=CType(β),
             T_avg=CType(T_avg),
+            Λ=CType(Λ),
+            Ts=Ts === nothing ? CType(T_avg) : CType(Ts),
+            Tl=Tl === nothing ? (Ts === nothing ? CType(T_avg) : CType(Ts)) : CType(Tl),
+            K0=CType(K0),
         )
     end
 
@@ -215,6 +235,8 @@ function Model(
         Qc = attach(buffers_Q, Nx, Ny, Nz, Dx, Dy, Dz, "Q")
         buffers_h = [htc(domains[d]) for d in 1:D]
         hc = attach(buffers_h, Nx, Ny, Nz, Dx, Dy, Dz, "h")
+        buffers_fs = [fs(domains[d]) for d in 1:D]
+        fsc = attach(buffers_fs, Nx, Ny, Nz, Dx, Dy, Dz, "fs")
     end
 
     @static if SURFACE
@@ -231,7 +253,7 @@ function Model(
                 Dx, Dy, Dz,
                 domains,
                 ρc, uc, Fc, fic, fc,
-                Tc, Qc, hc,
+                Tc, Qc, hc, fsc,
                 ϕc,
                 cached_surface_0_even,
                 cached_surface_0_odd,
@@ -290,7 +312,7 @@ function Model(
                 Dx, Dy, Dz,
                 domains,
                 ρc, uc, Fc, fic, fc,
-                Tc, Qc, hc,
+                Tc, Qc, hc, fsc,
                 w, c,
                 cached_collide_even,
                 cached_collide_odd,
@@ -346,6 +368,7 @@ u(model::Model) = model.u
 @static if TEMPERATURE
     Q(model::Model) = model.Q
     htc(model::Model) = model.h
+    fs(model::Model) = model.fs
     thermal_k(model::Model) = thermal_k(model.domains[1])
 end
 
@@ -455,6 +478,7 @@ function export!(model::Model; dir::AbstractString="output")
         @static if TEMPERATURE
             vtk["T"] = reshape(Float32.(si_T.(Ref(U), Array(domain.T.data))), Nx, Ny, Nz)
             vtk["Q"] = reshape(Float32.(si_Q.(Ref(U), Array(domain.Q.data), ρ_host)), Nx, Ny, Nz)
+            vtk["fs"] = reshape(Float32.(Array(domain.fs.data)), Nx, Ny, Nz)
         end
         pvd[t_si] = vtk
     end
@@ -548,18 +572,21 @@ function step!(model::Model)
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
                    domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                   domain.ϕ.data,
+                   domain.ϕ.data, domain.fs.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
+                   domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data,
                    domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                   domain.fs.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg,
+                   domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    Nd, Nx, Ny, Nz; ndrange = N)
         end
 

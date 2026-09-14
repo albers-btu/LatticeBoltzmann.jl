@@ -6,6 +6,14 @@ using KernelAbstractions
     return x + (y - 1) * Nx + (z - 1) * Nx * Ny
 end
 
+@inline function erf_as(x::Float32)
+    t = 1.0f0 / (1.0f0 + 0.3275911f0 * abs(x))
+    τ = t * (0.254829592f0 + t * (-0.284496736f0 + t * (1.421413741f0 +
+        t * (-1.453152027f0 + t * 1.061405429f0))))
+    y = 1.0f0 - τ * exp(-x * x)
+    return ifelse(x >= 0, y, -y)
+end
+
 @testset "TEMPERATURE Dirichlet conduction" begin
     @test TEMPERATURE
     Nx, Ny, Nz = 8, 8, 16
@@ -274,4 +282,94 @@ end
     us2 = sum(ux_s2) / length(ux_s2)
     @test us2 < 0
     @test us2 * us < 0
+end
+
+@testset "enthalpy invert and Darcy cap" begin
+    Tm, Λ = 1.0f0, 0.75f0
+    T, fl = LatticeBoltzmann.invert_enthalpy(Tm - 0.1f0, Tm, Tm, Λ)
+    @test fl == 0
+    @test T ≈ Tm - 0.1f0
+    T, fl = LatticeBoltzmann.invert_enthalpy(Tm + 0.3f0, Tm, Tm, Λ)
+    @test T ≈ Tm
+    @test fl ≈ 0.3f0 / Λ
+    T, fl = LatticeBoltzmann.invert_enthalpy(Tm + Λ + 0.2f0, Tm, Tm, Λ)
+    @test fl == 1
+    @test T ≈ Tm + 0.2f0
+    Ts, Tl, Λm = 1.0f0, 1.1f0, 0.5f0
+    T, fl = LatticeBoltzmann.invert_enthalpy(Ts, Ts, Tl, Λm)
+    @test T ≈ Ts && fl ≈ 0
+    T, fl = LatticeBoltzmann.invert_enthalpy(Tl + Λm, Ts, Tl, Λm)
+    @test T ≈ Tl && isapprox(fl, 1; atol=1.0f-6)
+    dx, dy, dz = LatticeBoltzmann.darcy_force(1.0f0, 0.1f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 1.0f-3)
+    @test dx ≈ -0.2f0
+    @test dy == 0 && dz == 0
+    dx, dy, dz = LatticeBoltzmann.darcy_force(0.0f0, 0.1f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 1.0f-3)
+    @test abs(dx) < 1.0f-5
+    dx, dy, dz = LatticeBoltzmann.darcy_force(0.5f0, 0.0f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 0.0f0)
+    @test dx == 0 && dy == 0 && dz == 0
+end
+
+@testset "Enthalpy Stefan melting vs Neumann" begin
+    @test TEMPERATURE
+    Nx, Ny, Nz = 64, 4, 4
+    ν = 0.1f0
+    α = 0.2f0
+    Tm = 1.0f0
+    Tb = 1.15f0
+    Λ = 0.75f0
+    Ste = (Tb - Tm) / Λ
+    model = Model(Nx, Ny, Nz, ν; α = α, β = 0.0f0, fz = 0.0f0, σ = 0.0f0,
+                  Λ = Λ, Ts = Tm, Tl = Tm, K0 = 1.0f-3, T_avg = Tm,
+                  backend=CPU(), workgroup=64)
+    k = thermal_k(model.domains[1])
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Tm, Nx * Ny * Nz)
+    fsh = ones(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
+            host[n] = TYPE_S
+        elseif x == 2
+            host[n] = TYPE_T
+            Th[n] = Tb
+            fsh[n] = 0
+        else
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    nsteps = 4000
+    run!(model, nsteps)
+    LatticeBoltzmann.moments!(model)
+    fsA = Array(model.domains[1].fs.data)
+    uA = Array(model.domains[1].u.data)
+    # Neumann λ: λ exp(λ²) erf(λ) = Ste/√π
+    rhs = Ste / sqrt(Float32(π))
+    lo, hi = 0.01f0, 2.0f0
+    λ = 0.3f0
+    for _ in 1:40
+        λ = 0.5f0 * (lo + hi)
+        f = λ * exp(λ^2) * erf_as(λ)
+        f > rhs ? (hi = λ) : (lo = λ)
+    end
+    Xan = 2 * λ * sqrt(k * Float32(nsteps))
+    y0, z0 = 2, 2
+    xif = Nx - 1
+    for x in 3:Nx-1
+        n = lbm_n(x, y0, z0, Nx, Ny)
+        if fsA[n] > 0.5f0
+            xif = x
+            break
+        end
+    end
+    Xnum = Float32(xif - 2)
+    nsolid = lbm_n(Nx - 3, y0, z0, Nx, Ny)
+    @info "Stefan vs Neumann" Ste λ k Xnum Xan ratio=(Xnum / Xan)
+    @test Xnum > 4
+    @test isapprox(Xnum, Xan; rtol=0.35)
+    @test hypot(uA[nsolid, 1], uA[nsolid, 2], uA[nsolid, 3]) < 0.01f0
+    @test isfinite(Xnum)
 end

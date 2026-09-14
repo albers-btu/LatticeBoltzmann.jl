@@ -60,6 +60,9 @@ lbm_Q(U::Units, si_Q, ρlat=1)          = si_Q / (si_ρ(U, ρlat) * U.cp * U.K /
 lbm_Q(U::Units, Q::Quantity, ρlat=1)   = lbm_Q(U, ustrip(u"W/m^3", Q), ρlat)
 lbm_q(U::Units, si_q, ρlat=1)          = si_q / (si_ρ(U, ρlat) * U.cp * U.K * U.m / U.s)
 lbm_q(U::Units, q::Quantity, ρlat=1)   = lbm_q(U, ustrip(u"W/m^2", q), ρlat)
+# latent heat L [J/kg] → lattice Λ = L/(cp K) (temperature units)
+lbm_Λ(U::Units, L)                     = L / (U.cp * U.K)
+lbm_Λ(U::Units, L::Quantity)           = lbm_Λ(U, ustrip(u"J/kg", L))
 
 function Base.show(io::IO, U::Units)
     print(io, "Units: 1 cell = ", 1000*U.m, " mm, 1 step = ", U.s, " s")

@@ -300,12 +300,60 @@ end
     return σT * dTx, σT * dTy, σT * dTz
 end
 
+@inline function fs_from_T(Tn::CType, Ts::CType, Tl::CType) where {CType}
+    Tn <= Ts && return one(CType)
+    Tn >= Tl && return zero(CType)
+    Δ = Tl - Ts
+    Δ <= eps(CType) && return zero(CType)
+    return (Tl - Tn) / Δ
+end
+
+# H = T + Λ f_l, Λ = L/cp in lattice T. Invert to (T, f_l).
+@inline function invert_enthalpy(H::CType, Ts::CType, Tl::CType, Λ::CType) where {CType}
+    ΔTm = Tl - Ts
+    if ΔTm <= eps(CType)
+        Tm = Ts
+        if H <= Tm
+            return H, zero(CType)
+        elseif H >= Tm + Λ
+            return H - Λ, one(CType)
+        else
+            return Tm, (H - Tm) / Λ
+        end
+    end
+    Hl = Tl + Λ
+    if H <= Ts
+        return H, zero(CType)
+    elseif H >= Hl
+        return H - Λ, one(CType)
+    else
+        T = (H + Λ * Ts / ΔTm) / (one(CType) + Λ / ΔTm)
+        fl = (T - Ts) / ΔTm
+        return T, ifelse(fl < zero(CType), zero(CType), ifelse(fl > one(CType), one(CType), fl))
+    end
+end
+
+@inline function darcy_force(
+    fsn::CType, ux::CType, uy::CType, uz::CType, ρn::CType, ν::CType, K0::CType
+) where {CType}
+    K0 <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+    fl = one(CType) - fsn
+    maxd = CType(2) * ρn
+    if fl < CType(1e-3)
+        return -maxd * ux, -maxd * uy, -maxd * uz
+    end
+    K = K0 * (fl * fl * fl) / (fsn * fsn + CType(1e-8))
+    drag = ν / K
+    drag = ifelse(drag > maxd, maxd, drag)
+    return -drag * ux, -drag * uy, -drag * uz
+end
+
 @inline function collide_temperature!(
-    t_odd::Val{odd}, gi, Tfield, Qin, hT, flags, flagsn,
+    t_odd::Val{odd}, gi, Tfield, Qin, hT, flags, flagsn, fs,
     ux::CType, uy::CType, uz::CType,
     fxn::CType, fyn::CType, fzn::CType,
     fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType,
     x::Int, y::Int, z::Int, Nx::Int, Ny::Int, Nz::Int, N::Int, n::Int,
     ::Type{CType}
 ) where {odd, CType}
@@ -320,11 +368,15 @@ end
     Qn = Qin[n]
     dirichlet = (flagsn & TYPE_T) != 0x00
     use_flux = false
+    write_geq = false
     Tn = zero(CType)
 
     if dirichlet
         Tn = Tfield[n]
         Qn = zero(CType)
+        if Λ > zero(CType)
+            fs[n] = fs_from_T(Tn, Ts, Tl)
+        end
     elseif (flagsn & TYPE_H) != 0x00
         Tnb, cnt = flux_neighbor_T(Tfield, flags, x, y, z, Nx, Ny, Nz, CType)
         if cnt > 0
@@ -342,8 +394,25 @@ end
     end
 
     if !dirichlet && !use_flux
-        Tn = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
-        Tfield[n] = Tn + Qn
+        Tfromg = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+        if Λ > zero(CType)
+            fl_old = one(CType) - fs[n]
+            H = Tfromg + Qn + Λ * fl_old
+            Tnew, fl = invert_enthalpy(H, Ts, Tl, Λ)
+            fs[n] = one(CType) - fl
+            Tfield[n] = Tnew
+            if fl > zero(CType) && fl < one(CType)
+                Tn = Tnew
+                Qn = zero(CType)
+                write_geq = true
+            else
+                Qn = Tnew - Tfromg
+                Tn = Tfromg
+            end
+        else
+            Tn = Tfromg
+            Tfield[n] = Tn + Qn
+        end
     end
 
     ge0 = geq_T_rest(Tn)
@@ -351,7 +420,7 @@ end
     geyp, geym = geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy)
     gezp, gezm = geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz)
 
-    if dirichlet || use_flux
+    if dirichlet || use_flux || write_geq
         gi[f_index(n, 1, N)] = eltype(gi)(ge0)
         store_pair!(gi, n, srcx, 2, gexp, gexm, t_odd, N)
         store_pair!(gi, n, srcy, 4, geyp, geym, t_odd, N)
@@ -617,11 +686,11 @@ end # SURFACE
 # generic fallback
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, gi, T, Qin, hT,
+    flags, fi, ρ, u, F, gi, T, Qin, hT, fs,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -682,9 +751,18 @@ end # SURFACE
             ux *= invρ; uy *= invρ; uz *= invρ
             @static if TEMPERATURE
                 fxn, fyn, fzn = collide_temperature!(
-                    t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
+                    t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                     fxn, fyn, fzn, fx, fy, fz,
-                    ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+                    ω_T, β, T_avg, Λ, Ts, Tl, x, y, z, Nx, Ny, Nz, N, n, CType)
+            end
+            @static if TEMPERATURE
+                νc = (one(CType) / ω - CType(0.5)) / CType(3)
+                dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
+                if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
+                    fxn, fyn, fzn = dx, dy, dz
+                else
+                    fxn += dx; fyn += dy; fzn += dz
+                end
             end
             @static if APPLY_FORCE
                 ux += fxn * invρ * CType(0.5)
@@ -732,11 +810,11 @@ end
 
 @inline function stream_collide_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, gi, T, Qin, hT,
+    flags, fi, ρ, u, F, gi, T, Qin, hT, fs,
     w::NTuple{19, CType},
     c::NTuple{19, SVector{3,Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
     flagsn = flags[n]
@@ -835,9 +913,18 @@ end
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
             fxn, fyn, fzn = collide_temperature!(
-                t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
+                t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
-                ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+                ω_T, β, T_avg, Λ, Ts, Tl, x, y, z, Nx, Ny, Nz, N, n, CType)
+        end
+        @static if TEMPERATURE
+            νc = (one(CType) / ω - CType(0.5)) / CType(3)
+            dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
+            if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
+                fxn, fyn, fzn = dx, dy, dz
+            else
+                fxn += dx; fyn += dy; fzn += dz
+            end
         end
         @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
@@ -959,27 +1046,27 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT,
+    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT, fs,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT,
+    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT, fs,
     w::NTuple{Q, CType}, 
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -988,11 +1075,11 @@ end
 
 @inline function stream_collide_surface_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType, σT::CType,
+    ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -1050,12 +1137,21 @@ end
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
             fxn, fyn, fzn = collide_temperature!(
-                t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
+                t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
-                ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+                ω_T, β, T_avg, Λ, Ts, Tl, x, y, z, Nx, Ny, Nz, N, n, CType)
             if (flagsn & TYPE_SU) == TYPE_I && σT != zero(CType)
                 mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
                 fxn += mx; fyn += my; fzn += mz
+            end
+        end
+        @static if TEMPERATURE
+            νc = (one(CType) / ω - CType(0.5)) / CType(3)
+            dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
+            if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
+                fxn, fyn, fzn = dx, dy, dz
+            else
+                fxn += dx; fyn += dy; fzn += dz
             end
         end
         @static if APPLY_FORCE
@@ -1120,25 +1216,25 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType, σT::CType,
+    ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType, σT::CType,
+    ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, N, Nx, Ny, Nz, Int(n))
 end
 
 end
