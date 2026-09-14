@@ -36,7 +36,10 @@ mutable struct Domain{
         ϕ::Memory{CType, Aρ}
         mass::Memory{CType, Aρ}
         massex::Memory{CType, Aρ}
-        msrc::Memory{CType, Aρ}  # mass source Δmass/(ρ Δt); 0 → none
+        msrc::Memory{CType, Aρ}  # feed Δmass/(ρ Δt); 0 → none
+        mp::Memory{CType, Aρ}    # unmelted powder mass (same units as mass)
+        τ_p::CType               # powder lifetime (lattice steps); 0 → msrc→mass
+        T_p::CType               # powder temperature (lattice)
     end
 
     @static if TEMPERATURE
@@ -87,6 +90,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     C_hk::CType = zero(CType),
     p0v::CType = zero(CType),
     β_v::CType = zero(CType),
+    τ_p::CType = zero(CType),
+    T_p::CType = one(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
 
@@ -121,6 +126,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
 
         msrc = Memory(AT{CType}(undef, N))
         fill!(msrc.data, zero(CType))
+
+        mp = Memory(AT{CType}(undef, N))
+        fill!(mp.data, zero(CType))
     end
 
     @static if TEMPERATURE
@@ -151,7 +159,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                ϕ, mass, massex, msrc,
+                ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
                 αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v,
                 UInt64(0)
@@ -164,7 +172,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                ϕ, mass, massex, msrc,
+                ϕ, mass, massex, msrc, mp,
+                CType(τ_p), CType(T_p),
                 UInt64(0)
             )
         end
@@ -208,6 +217,7 @@ flags(domain::Domain) = domain.flags
     mass(domain::Domain) = domain.mass
     massex(domain::Domain) = domain.massex
     msrc(domain::Domain) = domain.msrc
+    mp(domain::Domain) = domain.mp
 end
 
 @static if TEMPERATURE

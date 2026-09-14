@@ -64,6 +64,7 @@ mutable struct Model{
     initialized::Bool
     units::Units{CType}
     laser::Any
+    powder_jet::Any
 end
 
 function Model(
@@ -88,7 +89,10 @@ function Model(
     T_v = nothing,
     M = 0.0558,
     p_atm = 101325.0,
+    powder_τ = 0.0,
+    powder_T = nothing,
     laser = nothing,
+    powder_jet = nothing,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -121,6 +125,9 @@ function Model(
         @warn "latent_v > 0 but T_v is unset; evaporation will stay off"
         Λv = zero(CType)
     end
+    τp = powder_τ isa Quantity ? CType(ustrip(u"s", powder_τ) / units.s) : CType(powder_τ)
+    Tp = powder_T === nothing ? CType(T_avg) :
+         powder_T isa Quantity ? CType(lbm_T(units, powder_T)) : CType(powder_T)
 
     # @info units
 
@@ -128,7 +135,8 @@ function Model(
                   ν_s=νs, ν_l=νl, β=CType(β), T_avg=CType(T_avg),
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
-                  laser=laser, CType, SType, scheme, backend, workgroup)
+                  τ_p=τp, T_p=Tp,
+                  laser=laser, powder_jet=powder_jet, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -155,7 +163,10 @@ function Model(
     C_hk = 0.0f0,
     p0v = 0.0f0,
     β_v = 0.0f0,
+    τ_p = 0.0f0,
+    T_p = nothing,
     laser = nothing,
+    powder_jet = nothing,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -258,6 +269,8 @@ function Model(
             C_hk=CType(C_hk),
             p0v=CType(p0v),
             β_v=CType(β_v),
+            τ_p=CType(τ_p),
+            T_p=T_p === nothing ? CType(T_avg) : CType(T_p),
         )
     end
 
@@ -321,6 +334,7 @@ function Model(
                 false,
                 Units{CType}(),
                 laser,
+                powder_jet,
             )
         else
             Model(
@@ -350,6 +364,7 @@ function Model(
                 false,
                 Units{CType}(),
                 laser,
+                powder_jet,
             )
         end
     else
@@ -375,6 +390,7 @@ function Model(
                 false,
                 Units{CType}(),
                 laser,
+                powder_jet,
             )
         else
             Model(
@@ -397,6 +413,7 @@ function Model(
                 false,
                 Units{CType}(),
                 laser,
+                powder_jet,
             )
         end
     end
@@ -529,6 +546,7 @@ function export!(model::Model; dir::AbstractString="output")
         @static if SURFACE
             vtk["phi"] = reshape(Float32.(Array(domain.ϕ.data)), Nx, Ny, Nz)
             vtk["S"] = reshape(Float32.(si_S.(Ref(U), Array(domain.msrc.data), ρ_host)), Nx, Ny, Nz)
+            vtk["mp"] = reshape(Float32.(Array(domain.mp.data) ./ max.(ρ_host, Float32(eps(Float32)))), Nx, Ny, Nz)
         end
         @static if TEMPERATURE
             vtk["T"] = reshape(Float32.(si_T.(Ref(U), Array(domain.T.data))), Nx, Ny, Nz)
@@ -609,6 +627,12 @@ function step!(model::Model)
 
         @static if SURFACE && TEMPERATURE
             deposit_laser!(model, domain)
+            advance_powder_jet!(model, domain)
+            if domain.τ_p > 0
+                powder_gas_kernel!(model.backend, model.workgroup)(
+                    domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
+                    domain.τ_p, Nd; ndrange = N)
+            end
         end
 
         @static if SURFACE
@@ -633,13 +657,14 @@ function step!(model::Model)
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
                    domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                   domain.ϕ.data, domain.fs.data, domain.msrc.data,
+                   domain.ϕ.data, domain.fs.data, domain.msrc.data, domain.mp.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
+                   domain.τ_p, domain.T_p,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,

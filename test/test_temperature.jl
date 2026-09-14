@@ -748,6 +748,123 @@ end
     @test hC > hE + 0.3f0
 end
 
+@testset "unmelted powder decays; hot pool still captures" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 16, 8, 20
+    Hfill = 12
+    Tm = 1.0f0
+    Tcold = 0.2f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.2f0,
+                  Ts=Tm, Tl=Tm, T_avg=Tm, τ_p=8.0f0, T_p=Tcold,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx*Ny*Nz)
+    Th = fill(Tcold, Nx*Ny*Nz)
+    fsh = ones(Float32, Nx*Ny*Nz)
+    Sh = zeros(Float32, Nx*Ny*Nz)
+    xc, yc = Nx ÷ 2, Ny ÷ 2
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z==1 || z==Nz || x==1 || x==Nx || y==1 || y==Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    fl = Array(model.domains[1].flags.data)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        su = fl[n] & TYPE_SU
+        if su == TYPE_I || su == TYPE_G
+            dx, dy = Float32(x - xc), Float32(y - yc)
+            Sh[n] = 0.01f0 * exp(-(dx*dx + dy*dy) / 8.0f0)
+        end
+    end
+    copyto!(model.domains[1].msrc.data, Sh)
+    M0 = sum(Array(model.domains[1].mass.data))
+    run!(model, 4)
+    Mp = sum(Array(model.domains[1].mp.data))
+    M1 = sum(Array(model.domains[1].mass.data))
+    @info "cold powder" M0 M1 Mp
+    @test Mp > 0.01f0
+    @test abs(M1 - M0) < 0.05f0
+    fill!(model.domains[1].msrc.data, 0)
+    run!(model, 40)
+    Mp2 = sum(Array(model.domains[1].mp.data))
+    M2 = sum(Array(model.domains[1].mass.data))
+    @info "cold powder after decay" Mp2 M2
+    @test Mp2 < 0.1f0 * Mp
+    @test abs(M2 - M0) < 0.05f0
+
+    modelh = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.0f0,
+                   T_avg=Tm, τ_p=20.0f0, T_p=Tm, backend=CPU(), workgroup=64)
+    Th .= Tm
+    fsh .= 0
+    copyto!(modelh.domains[1].flags.data, host)
+    copyto!(modelh.domains[1].T.data, Th)
+    copyto!(modelh.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(modelh)
+    fl = Array(modelh.domains[1].flags.data)
+    fill!(Sh, 0)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if (fl[n] & TYPE_SU) == TYPE_I
+            dx, dy = Float32(x - xc), Float32(y - yc)
+            Sh[n] = 0.008f0 * exp(-(dx*dx + dy*dy) / 8.0f0)
+        end
+    end
+    copyto!(modelh.domains[1].msrc.data, Sh)
+    Mh0 = sum(Array(modelh.domains[1].mass.data))
+    run!(modelh, 400)
+    Mh1 = sum(Array(modelh.domains[1].mass.data))
+    @info "hot powder capture" Mh0 Mh1
+    @test Mh1 > Mh0 + 0.5f0
+end
+
+@testset "powder jet hits pad from above" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 24, 16, 24
+    Hfill = 14
+    Tm = 1.0f0
+    Tcold = 0.2f0
+    si_H = 0.002
+    Lpad = Hfill - 2
+    m = si_H / Lpad
+    st = 0.1 * m^2 / 7.5e-6
+    units = Units(Lpad, 0.05, 1, si_H, 0.05 * m / st, 8000.0; T=Float32, K=1673.0f0, cp=500.0f0)
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.2f0, Ts=Tm, Tl=Tm,
+                  T_avg=Tm, τ_p=1.0f5, T_p=Tcold, backend=CPU(), workgroup=64)
+    model.units = units
+    host = zeros(UInt8, Nx*Ny*Nz)
+    Th = fill(Tcold, Nx*Ny*Nz)
+    fsh = ones(Float32, Nx*Ny*Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z==1 || z==Nz || x==1 || x==Nx || y==1 || y==Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    model.powder_jet = PowderJet(units; mdot=1.0e-4, w=2.0, v=2.0,
+                                 x=Nx/2, y=Ny/2, z=Float32(Nz)-1.2f0,
+                                 dir=(0, 0, -1), nparcels=25)
+    LatticeBoltzmann.initialize!(model)
+    M0 = sum(Array(model.domains[1].mass.data))
+    run!(model, 10)
+    Mp = sum(Array(model.domains[1].mp.data))
+    M1 = sum(Array(model.domains[1].mass.data))
+    @info "powder jet" Mp M0 M1 nalive=count(model.powder_jet.alive)
+    @test Mp > 0
+    @test abs(M1 - M0) < 0.05f0
+end
+
 @testset "PLIC laser Fresnel deposit" begin
     A0 = LatticeBoltzmann.fresnel_absorptance(1.0f0, 3.27f0, 4.48f0)
     Ag = LatticeBoltzmann.fresnel_absorptance(0.0f0, 3.27f0, 4.48f0)

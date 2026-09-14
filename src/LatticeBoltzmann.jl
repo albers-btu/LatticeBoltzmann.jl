@@ -25,7 +25,7 @@ export attach
 
 include("domain.jl")
 export Domain
-export ρ, u, F, τ, msrc
+export ρ, u, F, τ, msrc, mp
 export T, Q, htc, fs, thermal_k, thermal_k_s, thermal_k_l
 export get_N
 export increment_time_step!
@@ -34,13 +34,16 @@ include("log.jl")
 export start_run_log!, stop_run_log!
 
 include("kernel.jl")
-export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!
+export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!, powder_gas_kernel!
 
 include("plic.jl")
 export plic_cube, calculate_curvature, calculate_normal_py
 
 include("laser.jl")
 export Laser, set_laser_position!, deposit_laser!, fresnel_absorptance
+
+include("powder.jl")
+export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 
 include("model.jl")
 export Model

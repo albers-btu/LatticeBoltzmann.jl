@@ -1198,13 +1198,14 @@ end
 
 @inline function stream_collide_surface_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -1262,18 +1263,35 @@ end
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
             ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
+            debit = zero(CType)
+            if τ_p > zero(CType)
+                mpn = mp[n] + msrc[n] * ρn
+                Tpred = T[n] + Qin[n]
+                if Tpred >= Ts
+                    dm = mpn < ρn ? mpn : ρn
+                    mpn -= dm
+                    mass[n] += dm
+                    debit = (dm / ρn) * (max(Tpred - T_p, zero(CType)) + Λ)
+                    Qin[n] -= debit
+                else
+                    mpn *= exp(-one(CType) / τ_p)
+                end
+                mp[n] = ifelse(mpn > CType(1e-12), mpn, zero(CType))
+            else
+                Sn = msrc[n]
+                if is_solid_fraction(fs[n])
+                    Sn = zero(CType)
+                end
+                mass[n] += Sn * ρn
+            end
             fxn, fyn, fzn, mevap = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
+            debit != zero(CType) && (Qin[n] += debit)
             if mevap > zero(CType)
                 mass[n] -= mevap * ρn
             end
-            Sn = msrc[n]
-            if is_solid_fraction(fs[n])
-                Sn = zero(CType)
-            end
-            mass[n] += Sn * ρn
             if (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
                 if σT != zero(CType)
                     mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
@@ -1363,29 +1381,50 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
+end
+
+# Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).
+@kernel function powder_gas_kernel!(
+    flags, mp, msrc, ρ, τ_p::CType, N::Int
+) where {CType}
+    n = @index(Global)
+    @inbounds begin
+        if τ_p > zero(CType)
+            fl = flags[n]
+            if (fl & TYPE_BO) != TYPE_S && (fl & TYPE_SU) == TYPE_G
+                ρn = ρ[n]
+                ρn = ifelse(ρn > zero(CType), ρn, one(CType))
+                mpn = mp[n] + msrc[n] * ρn
+                mpn *= exp(-one(CType) / τ_p)
+                mp[n] = ifelse(mpn > CType(1e-12), mpn, zero(CType))
+            end
+        end
+    end
 end
 
 end
