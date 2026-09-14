@@ -546,6 +546,11 @@ end
     Qe = LatticeBoltzmann.evaporative_dT(1.6f0, 8.0f0, 1.5f0, 0.01f0, 0.5f0, 30.0f0)
     @test Qe > 0
     @test Qe ≤ 1.6f0 - 1.5f0 + 1.0f-6
+    Qe2, mdot = LatticeBoltzmann.evaporative_flux(1.6f0, 8.0f0, 1.5f0, 0.01f0, 0.5f0, 30.0f0)
+    @test Qe2 == Qe
+    @test mdot ≈ Qe / 8.0f0
+    @test LatticeBoltzmann.p_sat(1.5f0, 1.5f0, 1.0f0, 20.0f0) ≈ 1
+    @test LatticeBoltzmann.p_sat(1.0f0, 1.5f0, 1.0f0, 20.0f0) < 0.05f0
 end
 
 @testset "surface evaporation caps T near Tv" begin
@@ -569,7 +574,7 @@ end
         elseif z <= Hfill
             host[n] = TYPE_F
             fsh[n] = 0
-            if z >= Hfill - 1
+            if z >= Hfill - 4
                 dx, dy = Float32(x - xc), Float32(y - yc)
                 Qh[n] = 0.03f0 * exp(-(dx * dx + dy * dy) / 8.0f0)
             end
@@ -605,4 +610,78 @@ end
     @test isfinite(Tmax_I)
     @test Tmax_I > Tm
     @test Tmax_I < Tv + 0.40f0
+end
+
+@testset "recoil dimples free surface under a hot spot" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 16, 8, 20
+    Hfill = 12
+    Tm, Tv = 1.0f0, 1.5f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α = 0.2f0, β = 0.0f0, fz = 0.0f0, σ = 0.0f0,
+                  Λ = 0.75f0, Ts = Tm, Tl = Tm, K0 = 1.0f-3, T_avg = Tm,
+                  Λ_v = 8.0f0, T_v = Tv, C_hk = 0.08f0, p0v = 1.0f0, β_v = 20.0f0,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Tm, Nx * Ny * Nz)
+    fsh = zeros(Float32, Nx * Ny * Nz)
+    Qh = zeros(Float32, Nx * Ny * Nz)
+    xc, yc = Nx ÷ 2, Ny ÷ 2
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+            fsh[n] = 0
+            if z >= Hfill - 4
+                dx, dy = Float32(x - xc), Float32(y - yc)
+                Qh[n] = 0.03f0 * exp(-(dx * dx + dy * dy) / 8.0f0)
+            end
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    copyto!(model.domains[1].Q.data, Qh)
+    LatticeBoltzmann.initialize!(model)
+    fl = Array(model.domains[1].flags.data)
+    Qh2 = Array(model.domains[1].Q.data)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if (fl[n] & TYPE_SU) == TYPE_I
+            dx, dy = Float32(x - xc), Float32(y - yc)
+            Qh2[n] = 0.03f0 * exp(-(dx * dx + dy * dy) / 8.0f0)
+        end
+    end
+    copyto!(model.domains[1].Q.data, Qh2)
+    M0 = sum(Array(model.domains[1].mass.data))
+    run!(model, 2500)
+    LatticeBoltzmann.moments!(model)
+    M1 = sum(Array(model.domains[1].mass.data))
+    ϕA = Array(model.domains[1].ϕ.data)
+    fl = Array(model.domains[1].flags.data)
+    TA = Array(model.domains[1].T.data)
+    function fill_z(x, y)
+        ztop = 0.0f0
+        for z in (Nz - 1):-1:2
+            n = lbm_n(x, y, z, Nx, Ny)
+            su = fl[n] & TYPE_SU
+            if su == TYPE_I || (su == TYPE_F && ϕA[n] > 0.05f0)
+                return Float32(z - 1) + ϕA[n]
+            end
+        end
+        return ztop
+    end
+    hC = fill_z(xc, yc)
+    hE = fill_z(3, yc)
+    Tmax_I = -Inf32
+    for n in eachindex(TA)
+        (fl[n] & TYPE_SU) == TYPE_I && (Tmax_I = max(Tmax_I, TA[n]))
+    end
+    @info "recoil dimple" hC hE Tmax_I Tv M0 M1
+    @test isfinite(hC) && isfinite(hE)
+    @test hC < hE - 0.3f0
+    @test Tmax_I < Tv + 0.40f0
+    @test M0 > 10
+    @test M1 < M0 - 0.5f0
 end

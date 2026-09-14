@@ -602,6 +602,7 @@ function step!(model::Model)
                domain.fs.data,
                model.weights, model.velocities,
                domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
+               domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
                Nd, Nx, Ny, Nz; ndrange = N)
         end
 
@@ -710,6 +711,7 @@ end
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
+    Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -811,12 +813,18 @@ end
             uxg, uyg, uzg = ux, uy, uz
         end
         @static if TEMPERATURE
+            inv2ρ = one(CType) / (CType(2) * ρn)
             if σT != zero(CType)
                 mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
-                inv2ρ = one(CType) / (CType(2) * ρn)
                 uxg = clamp(uxg + mx * inv2ρ, -cs, cs)
                 uyg = clamp(uyg + my * inv2ρ, -cs, cs)
                 uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
+            end
+            if Λ_v > zero(CType)
+                rx, ry, rz = recoil_force(T, ϕ, n, x, y, z, Nx, Ny, Nz, Λ_v, T_v, p0v, β_v, CType)
+                uxg = clamp(uxg + rx * inv2ρ, -cs, cs)
+                uyg = clamp(uyg + ry * inv2ρ, -cs, cs)
+                uzg = clamp(uzg + rz * inv2ρ, -cs, cs)
             end
         end
     end
@@ -861,20 +869,22 @@ end
     fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
+    Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function surface_0_odd_kernel!(
     fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
+    Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n))
 end
 
 end

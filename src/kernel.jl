@@ -364,6 +364,16 @@ end
     return one(CType) / (CType(2) * α + CType(0.5))
 end
 
+# Clausius–Clapeyron p_sat (lattice). p0 at T_v.
+@inline function p_sat(Tn::CType, T_v::CType, p0::CType, β_v::CType) where {CType}
+    if !(T_v > zero(CType) && Tn > zero(CType))
+        return zero(CType)
+    end
+    x = -β_v * (one(CType) / Tn - one(CType) / T_v)
+    x = clamp(x, CType(-20), CType(20))
+    return p0 * exp(x)
+end
+
 # Hertz–Knudsen cooling as lattice dT/step. Zero for T ≤ T_v or Λ_v = 0.
 # Capped so T cannot fall below T_v in one collide.
 @inline function evaporative_dT(
@@ -372,13 +382,48 @@ end
     if !(Λ_v > zero(CType) && T_v > zero(CType) && Tn > T_v)
         return zero(CType)
     end
-    x = -β_v * (one(CType) / Tn - one(CType) / T_v)
-    x = clamp(x, CType(-20), CType(20))
-    ps = p0 * exp(x)
+    ps = p_sat(Tn, T_v, p0, β_v)
     mdot = C_hk * ps / sqrt(Tn)
     Qe = mdot * Λ_v
     Qmax = Tn - T_v
     return ifelse(Qe > Qmax, Qmax, ifelse(Qe > zero(CType), Qe, zero(CType)))
+end
+
+# Mass flux consistent with the capped heat sink: ṁ = Qe / Λ_v.
+@inline function evaporative_flux(
+    Tn::CType, Λ_v::CType, T_v::CType, C_hk::CType, p0::CType, β_v::CType
+) where {CType}
+    Qe = evaporative_dT(Tn, Λ_v, T_v, C_hk, p0, β_v)
+    mdot = (Λ_v > zero(CType) && Qe > zero(CType)) ? Qe / Λ_v : zero(CType)
+    return Qe, mdot
+end
+
+# Anisimov recoil: F = p_r n, p_r = 0.54 p_sat, n = ∇ϕ/|∇ϕ| (into liquid).
+# Λ_v = 0 → off. |F| capped so Guo Δu stays O(0.1).
+@inline function recoil_force(
+    Tfield, ϕ, n::Int, x::Int, y::Int, z::Int,
+    Nx::Int, Ny::Int, Nz::Int,
+    Λ_v::CType, T_v::CType, p0::CType, β_v::CType, ::Type{CType}
+) where {CType}
+    Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+    Tn = Tfield[n]
+    pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
+    pr = ifelse(pr > CType(0.5), CType(0.5), pr)
+    pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+    xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+    yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+    zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+    half = CType(0.5)
+    dϕx = half * (ϕ[xp] - ϕ[xm])
+    dϕy = half * (ϕ[yp] - ϕ[ym])
+    dϕz = half * (ϕ[zp] - ϕ[zm])
+    mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
+    mag <= eps(CType) && return zero(CType), zero(CType), zero(CType)
+    inv = one(CType) / mag
+    return pr * dϕx * inv, pr * dϕy * inv, pr * dϕz * inv
 end
 
 @inline function collide_temperature!(
@@ -404,6 +449,7 @@ end
     use_flux = false
     write_geq = false
     Tn = zero(CType)
+    mevap = zero(CType)
 
     if dirichlet
         Tn = Tfield[n]
@@ -453,7 +499,7 @@ end
         if !dirichlet && !use_flux && Λ_v > zero(CType) &&
            (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
             Te = Tfield[n]
-            Qe = evaporative_dT(Te, Λ_v, T_v, C_hk, p0v, β_v)
+            Qe, mevap = evaporative_flux(Te, Λ_v, T_v, C_hk, p0v, β_v)
             Qn -= Qe
             Tfield[n] = Te - Qe
             write_geq && (Tn = Tfield[n])
@@ -492,7 +538,7 @@ end
     fxn -= fx * β * dT
     fyn -= fy * β * dT
     fzn -= fz * β * dT
-    return fxn, fyn, fzn
+    return fxn, fyn, fzn, mevap
 end
 
 @inline function store_geq!(
@@ -818,7 +864,7 @@ end # SURFACE
             ux *= invρ; uy *= invρ; uz *= invρ
             @static if TEMPERATURE
                 ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
-                fxn, fyn, fzn = collide_temperature!(
+                fxn, fyn, fzn, _ = collide_temperature!(
                     t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                     fxn, fyn, fzn, fx, fy, fz,
                     ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
@@ -984,7 +1030,7 @@ end
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
             ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
-            fxn, fyn, fzn = collide_temperature!(
+            fxn, fyn, fzn, _ = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
@@ -1216,13 +1262,22 @@ end
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
             ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
-            fxn, fyn, fzn = collide_temperature!(
+            fxn, fyn, fzn, mevap = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
-            if (flagsn & TYPE_SU) == TYPE_I && σT != zero(CType) && !is_solid_fraction(fs[n])
-                mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
-                fxn += mx; fyn += my; fzn += mz
+            if mevap > zero(CType)
+                mass[n] -= mevap * ρn
+            end
+            if (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
+                if σT != zero(CType)
+                    mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
+                    fxn += mx; fyn += my; fzn += mz
+                end
+                if Λ_v > zero(CType)
+                    rx, ry, rz = recoil_force(T, ϕ, n, x, y, z, Nx, Ny, Nz, Λ_v, T_v, p0v, β_v, CType)
+                    fxn += rx; fyn += ry; fzn += rz
+                end
             end
         end
         @static if TEMPERATURE
