@@ -64,6 +64,22 @@ lbm_q(U::Units, q::Quantity, ρlat=1)   = lbm_q(U, ustrip(u"W/m^2", q), ρlat)
 lbm_Λ(U::Units, L)                     = L / (U.cp * U.K)
 lbm_Λ(U::Units, L::Quantity)           = lbm_Λ(U, ustrip(u"J/kg", L))
 
+const R_GAS = 8.314462618  # J/mol/K
+
+# Hertz–Knudsen / Clausius–Clapeyron lattice scalars.
+# Λ_v = L_v/(cp K), β_v = L_v/(R_sp K), p0_lat, C_hk for ṁ_lat = C_hk p_lat/√T.
+function lbm_evap(U::Units{T}, L_v, M, p0) where {T}
+    Lv = L_v isa Quantity ? ustrip(u"J/kg", L_v) : Float64(L_v)
+    Mv = M isa Quantity ? ustrip(u"kg/mol", M) : Float64(M)
+    p0s = p0 isa Quantity ? ustrip(u"Pa", p0) : Float64(p0)
+    Rsp = R_GAS / Mv
+    Λ_v = T(Lv / (U.cp * U.K))
+    β_v = T(Lv / (Rsp * U.K))
+    p0l = T(p0s * U.s^2 / (si_ρ(U, one(T)) * U.m^2))
+    C_hk = T(U.m / (U.s * sqrt(2 * π * Rsp * U.K)))
+    return Λ_v, β_v, p0l, C_hk
+end
+
 function Base.show(io::IO, U::Units)
     print(io, "Units: 1 cell = ", 1000*U.m, " mm, 1 step = ", U.s, " s")
 end

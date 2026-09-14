@@ -56,6 +56,11 @@ mutable struct Domain{
         Tl::CType             # liquidus (Ts=Tl → isothermal Stefan)
         K0::CType             # Kozeny–Carman K0; 0 → no Darcy
         fs::Memory{CType, Aρ} # solid fraction
+        Λ_v::CType            # vaporization L_v/(cp K); 0 → no evaporation
+        T_v::CType            # boiling T (lattice)
+        C_hk::CType           # Hertz–Knudsen prefactor (lattice)
+        p0v::CType            # p_atm (lattice)
+        β_v::CType            # L_v/(R_sp K) Clausius–Clapeyron
     end
 
     t::UInt64
@@ -76,6 +81,11 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     Ts::CType = zero(CType),
     Tl::CType = zero(CType),
     K0::CType = zero(CType),
+    Λ_v::CType = zero(CType),
+    T_v::CType = zero(CType),
+    C_hk::CType = zero(CType),
+    p0v::CType = zero(CType),
+    β_v::CType = zero(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
 
@@ -139,6 +149,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex,
                 αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                Λ_v, T_v, C_hk, p0v, β_v,
                 UInt64(0)
             )
         else
@@ -163,6 +174,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                Λ_v, T_v, C_hk, p0v, β_v,
                 UInt64(0)
             )
         else

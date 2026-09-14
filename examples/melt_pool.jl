@@ -72,6 +72,9 @@ si_k_l    = 30.0u"W/m/K"
 si_Tm     = 1673.0u"K"                  # 316L ~ 1400 °C
 si_T_init = 300.0u"K"
 si_Lheat  = 2.8e5u"J/kg"
+si_Lv     = 7.45e6u"J/kg"               # vaporization; 0 → off
+si_Tv     = 3086.0u"K"                  # 316L boiling
+si_M      = 0.0558u"kg/mol"
 si_K0     = 1.0e-10u"m^2"
 si_P      = 2000.0u"W"
 si_d_spot = 0.5e-3u"m"                  # 1/e² diameter
@@ -115,6 +118,7 @@ model = Model(Nx, Ny, Nz, units;
               σ = si_σ, σT = si_σT, Tσ = si_Tm,
               latent = si_Lheat,
               Ts = si_Tm, Tl = si_Tm, K0 = si_K0,
+              latent_v = si_Lv, T_v = si_Tv, M = si_M,
               T_avg = Float32(lbm_T(units, si_Tm)),
               backend = CUDABackend())
 

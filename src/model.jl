@@ -82,6 +82,10 @@ function Model(
     Ts = nothing,
     Tl = nothing,
     K0 = 0.0f0,
+    latent_v = 0.0f0,
+    T_v = nothing,
+    M = 0.0558,
+    p_atm = 101325.0,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -106,12 +110,22 @@ function Model(
     Tll = Tl === nothing ? Tsl :
           Tl isa Quantity ? CType(lbm_T(units, Tl)) : CType(Tl)
     K0l = K0 isa Quantity ? CType(ustrip(u"m^2", K0) / units.m^2) : CType(K0 / units.m^2)
+    Tvl = T_v === nothing ? zero(CType) :
+          T_v isa Quantity ? CType(lbm_T(units, T_v)) : CType(T_v)
+    Λv, βv, p0l, Chk = lbm_evap(units, latent_v, M, p_atm)
+    Lvsi = latent_v isa Quantity ? ustrip(u"J/kg", latent_v) : Float64(latent_v)
+    if Lvsi > 0 && Tvl == 0
+        @warn "latent_v > 0 but T_v is unset; evaporation will stay off"
+        Λv = zero(CType)
+    end
 
     # @info units
 
     model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, α_s=αs, α_l=αl,
                   ν_s=νs, ν_l=νl, β=CType(β), T_avg=CType(T_avg),
-                  Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l, CType, SType, scheme, backend, workgroup)
+                  Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
+                  Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
+                  CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -133,6 +147,11 @@ function Model(
     Ts = nothing,
     Tl = nothing,
     K0 = 0.0f0,
+    Λ_v = 0.0f0,
+    T_v = 0.0f0,
+    C_hk = 0.0f0,
+    p0v = 0.0f0,
+    β_v = 0.0f0,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -230,6 +249,11 @@ function Model(
             Ts=Ts === nothing ? CType(T_avg) : CType(Ts),
             Tl=Tl === nothing ? (Ts === nothing ? CType(T_avg) : CType(Ts)) : CType(Tl),
             K0=CType(K0),
+            Λ_v=CType(Λ_v),
+            T_v=CType(T_v),
+            C_hk=CType(C_hk),
+            p0v=CType(p0v),
+            β_v=CType(β_v),
         )
     end
 
@@ -598,6 +622,7 @@ function step!(model::Model)
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
+                   domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
@@ -609,6 +634,7 @@ function step!(model::Model)
                    domain.ω_T, domain.β, domain.T_avg,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
+                   domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    Nd, Nx, Ny, Nz; ndrange = N)
         end
 
