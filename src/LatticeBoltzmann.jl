@@ -27,6 +27,7 @@ include("domain.jl")
 export Domain
 export ρ, u, F, τ, msrc, mp
 export T, Q, htc, fs, thermal_k, thermal_k_s, thermal_k_l, enthalpy, heat_source, cell_enthalpy
+export energy_budget, reset_energy_budget!
 export get_N
 export increment_time_step!
 

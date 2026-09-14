@@ -230,18 +230,23 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
         nliq, depth, bead, Tmax_K, Tmin_K, umax, _, zI, xl = track_metrics(
             Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
             Nx, Ny, Nz, Hfill, x_las, y_las, model.units)
-        Hlat = enthalpy(d)
+        b = energy_budget(d)
+        U = model.units
         next!(prog; showvalues = [
             (:layer, layer),
             (:t, Int(d.t)),
-            (:t_si, round(si_t(model.units, Int(d.t)); digits=4)),
+            (:t_si, round(si_t(U, Int(d.t)); digits=4)),
             (:x_las, round(xl; digits=1)),
             (:nliq, nliq),
             (:depth, depth),
             (:bead, bead),
             (:Tmax_K, round(Tmax_K; digits=1)),
             (:Tmin_K, round(Tmin_K; digits=1)),
-            (:H_J, round(si_enthalpy(model.units, Hlat); digits=3)),
+            (:H_J, round(si_enthalpy(U, b.H); digits=3)),
+            (:Qin_J, round(si_enthalpy(U, b.Q); digits=3)),
+            (:Qout_J, round(si_enthalpy(U, b.rad + b.evap + b.wall); digits=3)),
+            (:pow_J, round(si_enthalpy(U, b.powder); digits=3)),
+            (:res_J, round(si_enthalpy(U, b.residual); digits=3)),
             (:umax, round(umax; digits=3)),
             (:zI, zI),
             (:MLUPS, round(mlups_ema; digits=1)),
@@ -297,5 +302,6 @@ LatticeBoltzmann.moments!(model)
 nliq, depth, bead, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
     Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
     Nx, Ny, Nz, Hfill, x_end, y_las, model.units)
-Hlat = enthalpy(d)
-@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth bead_cells=bead Tmax_K Tmin_K H_J=si_enthalpy(model.units, Hlat) umax u_sol zI Hfill x_las=xl t_end=si_t(model.units, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s
+b = energy_budget(d)
+U = model.units
+@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth bead_cells=bead Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) umax u_sol zI Hfill x_las=xl t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s

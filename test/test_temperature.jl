@@ -532,6 +532,10 @@ end
     E1 = enthalpy(model)
     @info "closed energy Q" E0 E1 ΔH=(E1-E0) nQ=(nsteps * Qin)
     @test isapprox(E1 - E0, nsteps * Qin; rtol=2.0f-4, atol=2.0f-3)
+    b = energy_budget(model)
+    @test isapprox(b.Q, nsteps * Qin; rtol=2.0f-4, atol=2.0f-3)
+    @test isapprox(b.residual, 0; atol=5.0f-3, rtol=1.0f-4)
+    @test b.rad == 0 && b.evap == 0 && b.wall == 0
 end
 
 @testset "closed energy: latent heating still closes" begin
@@ -549,6 +553,64 @@ end
     @info "closed energy latent" E0 E1 ΔH=(E1-E0) nQ=(nsteps * Qin) fsmin=minimum(fsA)
     @test isapprox(E1 - E0, nsteps * Qin; rtol=5.0f-4, atol=5.0f-3)
     @test E1 > E0
+    b = energy_budget(model)
+    @test isapprox(b.residual, 0; atol=5.0f-2, rtol=1.0f-3)
+end
+
+@testset "open energy: radiation and cold plate" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 16
+    Hfill = 10
+    Tinf, Thot = 1.0f0, 1.8f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.0f0,
+                  T_avg=Tinf, C_rad=0.02f0, T_rad=Tinf,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Thot, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 25)
+    b = energy_budget(model)
+    @info "open energy rad" b.H b.H0 b.rad b.wall b.residual ΔH=(b.H-b.H0)
+    @test b.rad > 0
+    @test b.H < b.H0
+    @test abs(b.residual) < abs(b.H - b.H0)
+
+    Tplate, Tpad = 0.2f0, 1.0f0
+    model2 = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.0f0,
+                   T_avg=Tpad, backend=CPU(), workgroup=64)
+    host2 = zeros(UInt8, Nx * Ny * Nz)
+    Th2 = fill(Tpad, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host2[n] = TYPE_S
+            Th2[n] = Tplate
+        elseif z == 2
+            host2[n] = TYPE_F | TYPE_T
+            Th2[n] = Tplate
+        elseif z <= Hfill
+            host2[n] = TYPE_F
+        end
+    end
+    copyto!(model2.domains[1].flags.data, host2)
+    copyto!(model2.domains[1].T.data, Th2)
+    LatticeBoltzmann.initialize!(model2)
+    run!(model2, 40)
+    w = energy_budget(model2)
+    @info "open energy wall" w.H w.H0 w.wall w.residual ΔH=(w.H-w.H0)
+    @test w.wall > 0
+    @test w.H < w.H0
+    @test abs(w.residual) < abs(w.H - w.H0)
 end
 
 @testset "Enthalpy Stefan melting vs Neumann" begin

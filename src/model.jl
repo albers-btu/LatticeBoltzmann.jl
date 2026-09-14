@@ -470,6 +470,19 @@ u(model::Model) = model.u
     thermal_k_l(model::Model) = thermal_k_l(model.domains[1])
     enthalpy(model::Model) = mapreduce(enthalpy, +, model.domains)
     heat_source(model::Model) = mapreduce(heat_source, +, model.domains)
+    reset_energy_budget!(model::Model) = (foreach(reset_energy_budget!, model.domains); model)
+    function energy_budget(model::Model)
+        parts = map(energy_budget, model.domains)
+        H = sum(p -> p.H, parts)
+        H0 = sum(p -> p.H0, parts)
+        Q = sum(p -> p.Q, parts)
+        rad = sum(p -> p.rad, parts)
+        evap = sum(p -> p.evap, parts)
+        wall = sum(p -> p.wall, parts)
+        powder = sum(p -> p.powder, parts)
+        expected = H0 + Q - rad - evap + powder - wall
+        return (; H, H0, Q, rad, evap, wall, powder, expected, residual=H - expected)
+    end
 end
 
 @static if SURFACE
@@ -716,6 +729,9 @@ function initialize!(model::Model)
 
     KernelAbstractions.synchronize(model.backend)
     model.initialized = true
+    @static if TEMPERATURE
+        reset_energy_budget!(model)
+    end
     @info "finished init"
 end
 
@@ -732,7 +748,7 @@ function step!(model::Model)
             if domain.τ_p > 0
                 powder_gas_kernel!(model.backend, model.workgroup)(
                     domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
-                    domain.τ_p, Nd; ndrange = N)
+                    domain.τ_p, domain.T_p, domain.Eacc.data, Nd; ndrange = N)
             end
         end
 
@@ -767,7 +783,7 @@ function step!(model::Model)
                    domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
-                   Nd, Nx, Ny, Nz; ndrange = N)
+                   Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data,
@@ -781,7 +797,7 @@ function step!(model::Model)
                    domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad,
-                   Nd, Nx, Ny, Nz; ndrange = N)
+                   Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
         end
 
         @static if SURFACE

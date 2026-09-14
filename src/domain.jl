@@ -1,3 +1,11 @@
+# Cumulative lattice-enthalpy account (into-metal Q, out-of-metal rad/evap/wall).
+const EACC_Q = 1
+const EACC_RAD = 2
+const EACC_EVAP = 3
+const EACC_WALL = 4
+const EACC_POWDER = 5
+const EACC_N = 5
+
 mutable struct Domain{
     CType<:AbstractFloat,
     SType<:AbstractFloat,
@@ -71,6 +79,9 @@ mutable struct Domain{
         β_v::CType            # L_v/(R_sp K) Clausius–Clapeyron
         C_rad::CType          # εσ K³ s/(ρ cp m); Q = C_rad (T^4-T_∞^4); 0 → off
         T_rad::CType          # far-field T for radiation (lattice)
+        Eacc::Memory{CType, Aρ}
+        H0::CType
+        E_powder::CType       # host: jet deposit × T_p
     end
 
     t::UInt64
@@ -160,6 +171,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         fill!(hmem.data, zero(CType))
         fsmem = Memory(AT{CType}(undef, N))
         fill!(fsmem.data, zero(CType))
+        Eacc = Memory(AT{CType}(undef, EACC_N))
+        fill!(Eacc.data, zero(CType))
     end
 
     @static if SURFACE
@@ -174,6 +187,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
                 αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
+                Eacc, zero(CType), zero(CType),
                 UInt64(0)
             )
         else
@@ -200,6 +214,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 ρ, u, F, fi, flags,
                 αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
+                Eacc, zero(CType), zero(CType),
                 UInt64(0)
             )
         else
@@ -289,6 +304,27 @@ end
             s += Float64(QA[n])
         end
         return CType(s)
+    end
+
+    function reset_energy_budget!(domain::Domain{CType}) where {CType}
+        fill!(domain.Eacc.data, zero(CType))
+        domain.E_powder = zero(CType)
+        domain.H0 = enthalpy(domain)
+        return domain
+    end
+
+    # H = H0 + Q - rad - evap + powder - wall + residual (streaming/BC leak).
+    function energy_budget(domain::Domain{CType}) where {CType}
+        acc = Array(domain.Eacc.data)
+        Q = acc[EACC_Q]
+        rad = acc[EACC_RAD]
+        evap = acc[EACC_EVAP]
+        wall = acc[EACC_WALL]
+        powder = acc[EACC_POWDER] + domain.E_powder
+        H = enthalpy(domain)
+        expected = domain.H0 + Q - rad - evap + powder - wall
+        residual = H - expected
+        return (; H, H0=domain.H0, Q, rad, evap, wall, powder, expected, residual)
     end
 end
 

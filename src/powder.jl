@@ -131,15 +131,17 @@ end
 @inline function _deposit_parcel!(mp, mass, flags, n::Int, pmass, τ_p)
     if τ_p > 0
         @inbounds mp[n] += pmass
+        return pmass
     else
         @inbounds begin
             su = flags[n] & TYPE_SU
             if su == TYPE_I || su == TYPE_F
                 mass[n] += pmass
+                return pmass
             end
         end
+        return zero(pmass)
     end
-    return nothing
 end
 
 # DDA along dir for at most dist_max cells. Hits I/F → deposit; S/OOB → die.
@@ -153,30 +155,30 @@ end
     max_step = Nx + Ny + Nz + 8
     @inbounds for _ in 1:max_step
         remaining = dist_max - traveled
-        remaining <= T(1e-6) && return ox, oy, oz, true
+        remaining <= T(1e-6) && return ox, oy, oz, true, zero(T)
         ix = floor(Int, ox + T(0.5))
         iy = floor(Int, oy + T(0.5))
         iz = floor(Int, oz + T(0.5))
         if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
-            return ox, oy, oz, false
+            return ox, oy, oz, false, zero(T)
         end
         n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
         fl = flags[n]
         su = fl & TYPE_SU
         if (fl & TYPE_BO) == TYPE_S
-            return ox, oy, oz, false
+            return ox, oy, oz, false, zero(T)
         elseif su == TYPE_I
             ϕ0 = T(ϕ[n])
             phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
             hit, t, _nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
                                    T(ix), T(iy), T(iz))
             if hit && t > zero(T) && t <= remaining + T(0.5)
-                _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
-                return ox, oy, oz, false
+                dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+                return ox, oy, oz, false, dm
             end
         elseif su == TYPE_F
-            _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
-            return ox, oy, oz, false
+            dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+            return ox, oy, oz, false, dm
         end
         tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
                 dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
@@ -191,7 +193,7 @@ end
         oz += tstep * dirz
         traveled += tstep
     end
-    return ox, oy, oz, false
+    return ox, oy, oz, false, zero(T)
 end
 
 function advance_powder_jet!(model, domain)
@@ -210,6 +212,7 @@ function advance_powder_jet!(model, domain)
         _spawn_parcels!(J, m_step / T(J.nparcels))
     end
     invv = J.v > 0 ? one(T) / J.v : one(T)
+    captured = zero(T)
     @inbounds for i in 1:J.nmax
         J.alive[i] || continue
         dirx, diry, dirz = J.pvx[i]*invv, J.pvy[i]*invv, J.pvz[i]*invv
@@ -219,13 +222,17 @@ function advance_powder_jet!(model, domain)
             continue
         end
         dirx /= nd; diry /= nd; dirz /= nd
-        ox, oy, oz, live = _walk_parcel!(
+        ox, oy, oz, live, dm = _walk_parcel!(
             mp, mass, flags, ϕ, τ_p,
             J.px[i], J.py[i], J.pz[i], dirx, diry, dirz,
             J.v, J.pm[i], Nx, Ny, Nz,
         )
         J.px[i] = ox; J.py[i] = oy; J.pz[i] = oz
         J.alive[i] = live
+        captured += dm
+    end
+    @static if TEMPERATURE
+        domain.E_powder += captured * domain.T_p
     end
     copyto!(domain.mp.data, mp)
     τ_p > 0 || copyto!(domain.mass.data, mass)
