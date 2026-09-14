@@ -48,6 +48,17 @@ lbm_u(U::Units, v::Velocity)           = lbm_u(U, ustrip(u"m/s", v))
 lbm_ρ(U::Units, si_ρ)                  = si_ρ * U.m^3 / U.kg
 lbm_ν(U::Units, si_ν)                  = si_ν * U.s / U.m^2
 lbm_ν(U::Units, ν::KinematicViscosity) = lbm_ν(U, ustrip(u"m^2/s", ν))
+# dk/dT [W/m/K²] → d(Model-α_lat)/dT_lat, Model-α = 2 k/(ρ cp)
+function lbm_αT(U::Units, kT, ρlat=1)
+    kTf = kT isa Quantity ? ustrip(u"W/m/K^2", kT) : Float64(kT)
+    αT_si = 2 * kTf / (si_ρ(U, ρlat) * U.cp)
+    return lbm_ν(U, αT_si) * U.K
+end
+# dν/dT_si [m²/s/K] → dν_lat/dT_lat
+function lbm_νT(U::Units, νT)
+    νTf = νT isa Quantity ? ustrip(u"m^2/s/K", νT) : Float64(νT)
+    return lbm_ν(U, νTf) * U.K
+end
 lbm_g(U::Units, si_g)                  = si_g * U.s^2 / U.m # lattice gravity; fz if ρ_lbm=1
 lbm_g(U::Units, g::Acceleration)       = lbm_g(U, ustrip(u"m/s^2", g))
 lbm_σ(U::Units, si_σ)                  = si_σ * U.s^2 / U.kg

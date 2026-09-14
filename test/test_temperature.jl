@@ -366,6 +366,17 @@ end
     @test LatticeBoltzmann.blend_phase(0.0f0, 0.4f0, 0.2f0) ≈ 0.2f0
     @test LatticeBoltzmann.blend_phase(1.0f0, 0.4f0, 0.2f0) ≈ 0.4f0
     @test LatticeBoltzmann.blend_phase(0.5f0, 0.4f0, 0.2f0) ≈ 0.3f0
+    @test LatticeBoltzmann.prop_fs_T(0.0f0, 0.2f0, 0.0f0, 0.4f0, 0.1f0, 2.0f0, 1.0f0, 1.0f-6) ≈ 0.5f0
+    @test LatticeBoltzmann.prop_fs_T(1.0f0, 0.2f0, 0.05f0, 0.4f0, 0.0f0, 3.0f0, 1.0f0, 1.0f-6) ≈ 0.3f0
+    @test LatticeBoltzmann.prop_fs_T(0.0f0, 0.2f0, 0.0f0, 0.4f0, 0.1f0, 1.0f0, 1.0f0, 1.0f-6) ≈ 0.4f0
+    pmin = LatticeBoltzmann.prop_fs_T(1.0f0, 0.2f0, 1.0f0, 0.4f0, 0.0f0, 0.0f0, 1.0f0, 0.05f0)
+    @test pmin ≈ 0.05f0
+    # linear law through 0 at cold T floors at 10% of the Tref value, not ~0
+    pcold = LatticeBoltzmann.prop_fs_T(1.0f0, 0.2f0, 0.3f0, 0.4f0, 0.0f0, 0.2f0, 1.0f0, 1.0f-6)
+    @test pcold ≈ 0.02f0
+    @test LatticeBoltzmann.floor_prop(0.2f0, 1.0f-6) ≈ 0.02f0
+    @test LatticeBoltzmann.omega_T_from_alpha(1.0f-6) <= 1.95f0
+    @test LatticeBoltzmann.omega_from_nu(1.0f-8) <= 1.95f0
     @test LatticeBoltzmann.radiation_dT(2.0f0, 0.01f0, 1.0f0) ≈ 0.01f0 * (16.0f0 - 1.0f0)
     @test LatticeBoltzmann.radiation_dT(1.0f0, 0.01f0, 1.0f0) == 0
     @test LatticeBoltzmann.radiation_dT(2.0f0, 0.0f0, 1.0f0) == 0
@@ -417,6 +428,58 @@ end
     @info "radiation TYPE_I" T0 T1 nI
     @test T1 < T0 - 0.02f0
     @test T1 > Tinf
+end
+
+# k(Tm)+kT*(Troom-Tm) < 0 used to clamp α to 1e-6, ω_T→2, T oscillates
+# through Tm, pad melts, FSLBM converts the whole domain to gas.
+@testset "cold pad with k(T) is not eaten" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 12, 10, 16
+    Hfill = 8
+    Tm, Tcold = 1.0f0, 0.18f0
+    model = Model(Nx, Ny, Nz, 0.1f0;
+                  α=0.2f0, α_s=0.1f0, α_l=0.2f0,
+                  α_sT=0.145f0, α_lT=0.056f0,
+                  ν_s=0.05f0, ν_l=0.1f0, ν_lT=-0.045f0,
+                  fz=0, σ=0.01f0, σT=0, Tσ=Tm,
+                  Λ=0.3f0, Ts=Tm, Tl=Tm, K0=0.02f0,
+                  T_avg=Tm, backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Tcold, Nx * Ny * Nz)
+    fsh = ones(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z == 2
+            host[n] = TYPE_F | TYPE_T
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    d = model.domains[1]
+    fl0 = Array(d.flags.data)
+    nF0 = count(n -> (fl0[n] & TYPE_SU) == TYPE_F, eachindex(fl0))
+    mass0 = sum(Array(d.mass.data))
+    run!(model, 80)
+    LatticeBoltzmann.moments!(model)
+    fl = Array(d.flags.data)
+    TA = Array(d.T.data)
+    nF = count(n -> (fl[n] & TYPE_SU) == TYPE_F, eachindex(fl))
+    nI = count(n -> (fl[n] & TYPE_SU) == TYPE_I, eachindex(fl))
+    mass1 = sum(Array(d.mass.data))
+    Tmin = minimum(TA[i] for i in eachindex(fl) if (fl[i] & TYPE_SU) == TYPE_F || (fl[i] & TYPE_SU) == TYPE_I)
+    Tmax = maximum(TA[i] for i in eachindex(fl) if (fl[i] & TYPE_SU) == TYPE_F || (fl[i] & TYPE_SU) == TYPE_I)
+    @info "cold pad k(T)" nF0 nF nI mass0 mass1 Tmin Tmax
+    @test nF == nF0
+    @test nI > 0
+    @test isapprox(mass1, mass0; rtol=0.02)
+    @test Tmax < Tm
+    @test all(isfinite, TA)
 end
 
 @testset "Enthalpy Stefan melting vs Neumann" begin

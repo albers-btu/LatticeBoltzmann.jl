@@ -44,10 +44,14 @@ mutable struct Domain{
 
     @static if TEMPERATURE
         α::CType
-        α_s::CType            # solid Model-α (twice CE diffusivity)
-        α_l::CType            # liquid Model-α
+        α_s::CType            # solid Model-α at T_avg (twice CE diffusivity)
+        α_l::CType
+        α_sT::CType           # dα_s / dT_lat
+        α_lT::CType
         ν_s::CType
         ν_l::CType
+        ν_sT::CType           # dν_s / dT_lat
+        ν_lT::CType
         β::CType
         T_avg::CType
         ω_T::CType
@@ -79,8 +83,12 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     α::CType = zero(CType),
     α_s::CType = zero(CType),
     α_l::CType = zero(CType),
+    α_sT::CType = zero(CType),
+    α_lT::CType = zero(CType),
     ν_s::CType = zero(CType),
     ν_l::CType = zero(CType),
+    ν_sT::CType = zero(CType),
+    ν_lT::CType = zero(CType),
     β::CType = zero(CType),
     T_avg::CType = one(CType),
     Λ::CType = zero(CType),
@@ -164,7 +172,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
-                αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 UInt64(0)
             )
@@ -190,7 +198,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 UInt64(0)
             )

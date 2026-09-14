@@ -35,10 +35,13 @@ L = Hfill - 2                           # pad thickness in cells
 si_H      = 1.6e-3u"m"                  # → Δx ≈ 80 µm
 si_ρ      = 8000u"kg/m^3"
 si_cp     = 500u"J/kg/K"
-si_k_s    = 15.0u"W/m/K"
-si_k_l    = 30.0u"W/m/K"
+# k(T) = k(Tm) + kT (T - Tm). k_s is at Tm so k(T_init) stays ~15 W/m/K.
 si_Tm     = 1673.0u"K"
 si_T_init = 300.0u"K"
+si_k_sT   = 0.013u"W/m/K^2"
+si_k_lT   = 0.005u"W/m/K^2"
+si_k_s    = 15.0u"W/m/K" + si_k_sT * (si_Tm - si_T_init)
+si_k_l    = 30.0u"W/m/K"
 si_Lheat  = 2.8e5u"J/kg"
 si_Lv     = 7.45e6u"J/kg"
 si_Tv     = 3086.0u"K"
@@ -102,6 +105,7 @@ n_layers >= 1 || throw(ArgumentError("n_layers must be ≥ 1"))
 α_s_si = si_k_s / (si_ρ * si_cp)
 si_ν_l = ustrip(u"m^2/s", α_l_si) * u"m^2/s"
 si_ν_s = 0.5 * si_ν_l
+si_ν_lT = -2.0e-9u"m^2/s/K"              # liquid thins with T; ν_sT = 0
 lbm_α_true = 0.1
 m = ustrip(u"m", si_H) / L
 s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
@@ -137,6 +141,7 @@ model = Model(Nx, Ny, Nz, units;
               α_l = 2 * α_l_si,
               ν_s = si_ν_s,
               ν_l = si_ν_l,
+              k_sT = si_k_sT, k_lT = si_k_lT, ν_lT = si_ν_lT,
               β = 0.0f0, gz = 0.0f0,
               σ = si_σ, σT = si_σT, Tσ = si_Tm,
               latent = si_Lheat,

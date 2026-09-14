@@ -367,12 +367,41 @@ end
     return fsn * solid + (one(CType) - fsn) * liquid
 end
 
+# Never below 10% of the Tref value (or pmin). Linear k(T) about Tm goes
+# negative at room T if kT is large; clamping to ~0 put ω on 2 and the
+# pad melted / FSLBM ate the domain in a few tens of steps.
+@inline function floor_prop(p0::CType, pmin::CType) where {CType}
+    pabs = ifelse(p0 > zero(CType), p0, -p0)
+    frac = CType(0.1) * pabs
+    return ifelse(frac > pmin, frac, pmin)
+end
+
+# Phase property at T: p = p0 + pT (T - Tref), then fs-blend.
+@inline function prop_fs_T(fsn::CType, p_s::CType, p_sT::CType, p_l::CType, p_lT::CType,
+                           Tn::CType, Tref::CType, pmin::CType) where {CType}
+    dT = Tn - Tref
+    ps = p_s + p_sT * dT
+    pl = p_l + p_lT * dT
+    pslo = floor_prop(p_s, pmin)
+    pllo = floor_prop(p_l, pmin)
+    ps = ifelse(ps > pslo, ps, pslo)
+    pl = ifelse(pl > pllo, pl, pllo)
+    return blend_phase(fsn, ps, pl)
+end
+
+# BGK is unstable at ω = 0 or 2. Stay off the wall.
+@inline function clamp_omega(ω::CType) where {CType}
+    lo = CType(0.05)
+    hi = CType(1.95)
+    return ifelse(ω > hi, hi, ifelse(ω < lo, lo, ω))
+end
+
 @inline function omega_from_nu(ν::CType) where {CType}
-    return one(CType) / (CType(3) * ν + CType(0.5))
+    return clamp_omega(one(CType) / (CType(3) * ν + CType(0.5)))
 end
 
 @inline function omega_T_from_alpha(α::CType) where {CType}
-    return one(CType) / (CType(2) * α + CType(0.5))
+    return clamp_omega(one(CType) / (CType(2) * α + CType(0.5)))
 end
 
 # Clausius–Clapeyron p_sat (lattice). p0 at T_v.
@@ -839,7 +868,7 @@ end # SURFACE
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
@@ -901,14 +930,14 @@ end # SURFACE
             invρ = one(CType) / ρn
             ux *= invρ; uy *= invρ; uz *= invρ
             @static if TEMPERATURE
-                ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
+                ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
                 fxn, fyn, fzn, _ = collide_temperature!(
                     t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                     fxn, fyn, fzn, fx, fy, fz,
                     ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType)
             end
             @static if TEMPERATURE
-                νc = blend_phase(fs[n], ν_s, ν_l)
+                νc = prop_fs_T(fs[n], ν_s, ν_sT, ν_l, ν_lT, T[n], T_avg, CType(1e-8))
                 ω = omega_from_nu(νc)
                 dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
                 if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
@@ -968,7 +997,7 @@ end
     c::NTuple{19, SVector{3,Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
@@ -1068,14 +1097,14 @@ end
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
-            ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
+            ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
             fxn, fyn, fzn, _ = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType)
         end
         @static if TEMPERATURE
-            νc = blend_phase(fs[n], ν_s, ν_l)
+            νc = prop_fs_T(fs[n], ν_s, ν_sT, ν_l, ν_lT, T[n], T_avg, CType(1e-8))
             ω = omega_from_nu(νc)
             dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
             if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
@@ -1209,13 +1238,13 @@ end
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -1224,13 +1253,13 @@ end
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -1244,7 +1273,7 @@ end
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
@@ -1303,7 +1332,7 @@ end
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
-            ωTn = omega_T_from_alpha(blend_phase(fs[n], α_s, α_l))
+            ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
             debit = zero(CType)
             if τ_p > zero(CType)
                 mpn = mp[n] + msrc[n] * ρn
@@ -1345,7 +1374,7 @@ end
             end
         end
         @static if TEMPERATURE
-            νc = blend_phase(fs[n], ν_s, ν_l)
+            νc = prop_fs_T(fs[n], ν_s, ν_sT, ν_l, ν_lT, T[n], T_avg, CType(1e-8))
             ω = omega_from_nu(νc)
             dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
             if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
@@ -1426,13 +1455,13 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -1440,13 +1469,13 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
-    α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
 end
 
 # Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).

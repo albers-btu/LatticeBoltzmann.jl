@@ -79,6 +79,10 @@ function Model(
     α_l = nothing,
     ν_s = nothing,
     ν_l = nothing,
+    k_sT = 0.0,
+    k_lT = 0.0,
+    ν_sT = 0.0,
+    ν_lT = 0.0,
     β = 0.0f0,
     T_avg = 1.0f0,
     latent = 0.0f0,
@@ -113,6 +117,10 @@ function Model(
     αl = α_l === nothing ? α : CType(lbm_ν(units, α_l))
     νs = ν_s === nothing ? ν : CType(lbm_ν(units, ν_s))
     νl = ν_l === nothing ? ν : CType(lbm_ν(units, ν_l))
+    αsT = CType(lbm_αT(units, k_sT))
+    αlT = CType(lbm_αT(units, k_lT))
+    νsT = CType(lbm_νT(units, ν_sT))
+    νlT = CType(lbm_νT(units, ν_lT))
     Λ  = CType(lbm_Λ(units, latent))
     Tsl = Ts === nothing ? CType(T_avg) :
           Ts isa Quantity ? CType(lbm_T(units, Ts)) : CType(Ts)
@@ -138,7 +146,8 @@ function Model(
     # @info units
 
     model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, α_s=αs, α_l=αl,
-                  ν_s=νs, ν_l=νl, β=CType(β), T_avg=CType(T_avg),
+                  ν_s=νs, ν_l=νl, α_sT=αsT, α_lT=αlT, ν_sT=νsT, ν_lT=νlT,
+                  β=CType(β), T_avg=CType(T_avg),
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
                   C_rad=Crad, T_rad=Trad,
@@ -157,8 +166,12 @@ function Model(
     α = 0.0f0,
     α_s = 0.0f0,
     α_l = 0.0f0,
+    α_sT = 0.0f0,
+    α_lT = 0.0f0,
     ν_s = 0.0f0,
     ν_l = 0.0f0,
+    ν_sT = 0.0f0,
+    ν_lT = 0.0f0,
     β = 0.0f0,
     T_avg = 1.0f0,
     Λ = 0.0f0,
@@ -265,8 +278,12 @@ function Model(
             α=CType(α),
             α_s=CType(α_s),
             α_l=CType(α_l),
+            α_sT=CType(α_sT),
+            α_lT=CType(α_lT),
             ν_s=CType(ν_s),
             ν_l=CType(ν_l),
+            ν_sT=CType(ν_sT),
+            ν_lT=CType(ν_lT),
             β=CType(β),
             T_avg=CType(T_avg),
             Λ=CType(Λ),
@@ -744,7 +761,8 @@ function step!(model::Model)
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
-                   domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
+                   domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                   domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
                    Nd, Nx, Ny, Nz; ndrange = N)
@@ -757,7 +775,8 @@ function step!(model::Model)
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
-                   domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
+                   domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                   domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad,
                    Nd, Nx, Ny, Nz; ndrange = N)

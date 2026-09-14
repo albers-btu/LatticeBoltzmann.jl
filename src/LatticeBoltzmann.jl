@@ -13,7 +13,7 @@ export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING
 
 include("units.jl")
 export Units
-export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, si_σT, si_S, lbm_ν, lbm_g, lbm_σ, lbm_σT, lbm_u, lbm_T, lbm_Q, lbm_q, lbm_Λ, lbm_evap, lbm_S, lbm_s, lbm_rad, σ_SB
+export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, si_σT, si_S, lbm_ν, lbm_νT, lbm_g, lbm_σ, lbm_σT, lbm_u, lbm_T, lbm_Q, lbm_q, lbm_Λ, lbm_evap, lbm_S, lbm_s, lbm_rad, lbm_αT, σ_SB
 
 include("flags.jl")
 export TYPE_S, TYPE_E, TYPE_T, TYPE_F, TYPE_I, TYPE_G, TYPE_H, TYPE_MS
