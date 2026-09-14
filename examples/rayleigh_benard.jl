@@ -64,6 +64,7 @@ for z in 1:Nz, y in 1:Ny, x in 1:Nx
         host[n] = TYPE_T
         Th[n] = T_cold
     else
+        host[n] = TYPE_F
         uh[n, 1] = 0.015f0 * (rand(rng, Float32) - 0.5f0)
         uh[n, 3] = 0.015f0 * (rand(rng, Float32) - 0.5f0)
     end

@@ -452,8 +452,25 @@ end
     end
 end
 
+@inline function average_neighbors_T(
+    Tfield, flags, x, y, z, c::NTuple{Q, SVector{3, Int}},
+    Nx, Ny, Nz, ::Type{CType}
+) where {Q, CType}
+    s = zero(CType)
+    cnt = 0
+    for i in 2:Q
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        su = flags[src] & (TYPE_SU | TYPE_S)
+        if su == TYPE_F || su == TYPE_I || su == TYPE_IF
+            s += Tfield[src]
+            cnt += 1
+        end
+    end
+    return cnt > 0 ? s / CType(cnt) : one(CType)
+end
+
 @inline function initialize_body!(
-    ρ, u, fi, flags, mass, massex, ϕ,
+    ρ, u, fi, flags, mass, massex, ϕ, gi, T,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
@@ -474,7 +491,7 @@ end
         flags[src]
     end
 
-    if (flagsn & (TYPE_S | TYPE_E | TYPE_T | TYPE_F | TYPE_I)) == 0x00
+    if (flagsn & (TYPE_S | TYPE_E | TYPE_T | TYPE_H | TYPE_F | TYPE_I)) == 0x00
         flagsn = (flagsn & ~TYPE_SU) | TYPE_G
     end
 
@@ -514,6 +531,16 @@ end
             ϕn = one(CType)
         end
         store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(false))
+        @static if TEMPERATURE
+            store_geq!(gi, n, x, y, z, T[n], ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType)
+        end
+    end
+
+    @static if TEMPERATURE
+        if (flagsn & TYPE_SU) == TYPE_G
+            store_geq!(gi, n, x, y, z, T[n], zero(CType), zero(CType), zero(CType),
+                       N, Nx, Ny, Nz, Val(false), CType)
+        end
     end
 
     ϕ[n] = ϕn
@@ -528,10 +555,11 @@ end
     mass, massex, ϕ,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
-    N::Int, Nx::Int, Ny::Int, Nz::Int
+    N::Int, Nx::Int, Ny::Int, Nz::Int,
+    gi, T
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds initialize_body!(ρ, u, fi, flags, mass, massex, ϕ, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds initialize_body!(ρ, u, fi, flags, mass, massex, ϕ, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 end # SURFACE
@@ -912,10 +940,11 @@ end
 
 @inline function stream_collide_surface_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, mass,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -971,6 +1000,12 @@ end
     else
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
+        @static if TEMPERATURE
+            fxn, fyn, fzn = collide_temperature!(
+                t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
+                fxn, fyn, fzn, fx, fy, fz,
+                ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+        end
         @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
             uy += fyn * invρ * CType(0.5)
@@ -1033,23 +1068,25 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    flags, fi, ρ, u, F, mass,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    flags, fi, ρ, u, F, mass,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, w, c, ω, fx, fy, fz, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -1268,7 +1305,7 @@ end
 
 @inline function surface_2_body!(
     t_odd::Val{odd},
-    fi, ρ, u, flags,
+    fi, ρ, u, flags, gi, T,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
@@ -1279,6 +1316,11 @@ end
     if sus == TYPE_GI
         ρn, ux, uy, uz = average_neighbors_non_gas(ρ, u, flags, x, y, z, c, Nx, Ny, Nz, CType)
         store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, t_odd)
+        @static if TEMPERATURE
+            Tn = average_neighbors_T(T, flags, x, y, z, c, Nx, Ny, Nz, CType)
+            T[n] = Tn
+            store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd, CType)
+        end
         return nothing
     elseif sus == TYPE_IG
         for i in 2:Q
@@ -1294,13 +1336,13 @@ end
     return nothing
 end
 
-@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
-@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function surface_3_kernel!(

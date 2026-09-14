@@ -214,35 +214,64 @@ function Model(
     end
 
     @static if SURFACE
-        Model(
-            scheme,
-            backend, workgroup,
-            Nx, Ny, Nz,
-            Dx, Dy, Dz,
-            domains,
-            ρc, uc, Fc, fic, fc,
-            # --- SURFACE --- 
-            ϕc,        
-            cached_surface_0_even,
-            cached_surface_0_odd,
-            cached_surface_1,
-            cached_surface_2_even,
-            cached_surface_2_odd,
-            cached_surface_3,
-            # --- SURFACE --- 
-            w, c,
-            cached_collide_even,
-            cached_collide_odd,
-            cached_initialize,
-            cached_moments_even,
-            cached_moments_odd,
-            cached_moving,
-            cached_update_force,
-            cached_update_force_odd,
-            cached_reset_force,
-            false,
-            Units{CType}()
-        )
+        @static if TEMPERATURE
+            Model(
+                scheme,
+                backend, workgroup,
+                Nx, Ny, Nz,
+                Dx, Dy, Dz,
+                domains,
+                ρc, uc, Fc, fic, fc,
+                Tc, Qc, hc,
+                ϕc,
+                cached_surface_0_even,
+                cached_surface_0_odd,
+                cached_surface_1,
+                cached_surface_2_even,
+                cached_surface_2_odd,
+                cached_surface_3,
+                w, c,
+                cached_collide_even,
+                cached_collide_odd,
+                cached_initialize,
+                cached_moments_even,
+                cached_moments_odd,
+                cached_moving,
+                cached_update_force,
+                cached_update_force_odd,
+                cached_reset_force,
+                false,
+                Units{CType}()
+            )
+        else
+            Model(
+                scheme,
+                backend, workgroup,
+                Nx, Ny, Nz,
+                Dx, Dy, Dz,
+                domains,
+                ρc, uc, Fc, fic, fc,
+                ϕc,
+                cached_surface_0_even,
+                cached_surface_0_odd,
+                cached_surface_1,
+                cached_surface_2_even,
+                cached_surface_2_odd,
+                cached_surface_3,
+                w, c,
+                cached_collide_even,
+                cached_collide_odd,
+                cached_initialize,
+                cached_moments_even,
+                cached_moments_odd,
+                cached_moving,
+                cached_update_force,
+                cached_update_force_odd,
+                cached_reset_force,
+                false,
+                Units{CType}()
+            )
+        end
     else
         @static if TEMPERATURE
             Model(
@@ -454,7 +483,8 @@ function initialize!(model::Model)
                 domain.flags.data,
                 domain.mass.data, domain.massex.data, domain.ϕ.data,
                 model.weights, model.velocities,
-                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
+                domain.gi.data, domain.T.data;
                 ndrange = N
             )
         else
@@ -508,8 +538,10 @@ function step!(model::Model)
         @static if SURFACE
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
+                   domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
+                   domain.ω_T, domain.β, domain.T_avg,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
@@ -526,6 +558,7 @@ function step!(model::Model)
                 Nd, Nx, Ny, Nz; ndrange = N)
             s2 = t_odd ? model.cached_surface_2_odd! : model.cached_surface_2_even!
             s2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+               domain.gi.data, domain.T.data,
                model.weights, model.velocities, Nd, Nx, Ny, Nz; ndrange = N)
             model.cached_surface_3!(
                 domain.ρ.data, domain.flags.data, domain.mass.data,

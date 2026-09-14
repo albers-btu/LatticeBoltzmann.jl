@@ -1,6 +1,6 @@
 const TRT                    = true # false -> keep SRT
 
-const SURFACE                = false
+const SURFACE                = true # FSLBM; with TEMPERATURE: T on F/I, gas skipped (adiabatic FS)
 const VOLUME_FORCE           = true
 const EQUILIBRIUM_BOUNDARIES = false
 const MOVING_BOUNDARIES      = false

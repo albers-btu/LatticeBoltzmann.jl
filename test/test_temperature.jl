@@ -24,6 +24,8 @@ end
         elseif z == Nz - 1
             host[n] = TYPE_T
             Th[n] = T_cold
+        else
+            host[n] = TYPE_F
         end
     end
     copyto!(model.domains[1].flags.data, host)
@@ -43,6 +45,7 @@ end
     Qv = 2.0f-4
     nsteps = 40
     model = Model(Nx, Ny, Nz, 0.05; α = 0.05f0, β = 0.0f0, fz = 0.0f0, backend=CPU(), workgroup=64)
+    fill!(model.domains[1].flags.data, TYPE_F)
     fill!(model.domains[1].Q.data, Qv)
     LatticeBoltzmann.initialize!(model)
     T0 = Array(model.domains[1].T.data)
@@ -74,6 +77,8 @@ end
         elseif z == Nz - 1
             host[n] = TYPE_T
             Th[n] = T_cold
+        else
+            host[n] = TYPE_F
         end
     end
     copyto!(model.domains[1].flags.data, host)
@@ -116,6 +121,8 @@ end
         elseif z == Nz - 1
             host[n] = TYPE_T
             Th[n] = T_cold
+        else
+            host[n] = TYPE_F
         end
     end
     copyto!(model.domains[1].flags.data, host)
@@ -134,4 +141,52 @@ end
     @test isapprox(T[nF], A + (T_cold - A) / L; rtol=0.2)
     @test T[nF] > T_cold
     @test T[nF] < T∞
+end
+
+@testset "SURFACE+T insulated liquid layer" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 8, 8, 20
+    α = 0.2f0
+    Qv = 2.0f-5
+    T_b = 1.0f0
+    Hfill = 12
+    model = Model(Nx, Ny, Nz, 0.2; α = α, β = 0.0f0, fz = 0.0f0, σ = 0.0f0,
+                  backend=CPU(), workgroup=64)
+    k = thermal_k(model.domains[1])
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(T_b, Nx * Ny * Nz)
+    Qh = zeros(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z == 2
+            host[n] = TYPE_T
+            Th[n] = T_b
+            Qh[n] = Qv
+        elseif z <= Hfill
+            host[n] = TYPE_F
+            Qh[n] = Qv
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].Q.data, Qh)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 4000)
+    LatticeBoltzmann.moments!(model)
+    T = Array(model.domains[1].T.data)
+    flags = Array(model.domains[1].flags.data)
+    zb = 2
+    zmid = (zb + Hfill) ÷ 2
+    nM = lbm_n(4, 4, zmid, Nx, Ny)
+    nG = lbm_n(4, 4, Nz - 2, Nx, Ny)
+    H = Float32(Hfill - zb)
+    zstar = Float32(zmid - zb)
+    Tan = T_b + (Qv / k) * (H * zstar - zstar^2 / 2)
+    @test (flags[nM] & TYPE_F) == TYPE_F || (flags[nM] & TYPE_I) == TYPE_I
+    @test (flags[nG] & TYPE_G) == TYPE_G
+    @test T[nM] > T_b
+    @test isapprox(T[nM], Tan; rtol=0.35)
+    @test isfinite(T[nM])
 end

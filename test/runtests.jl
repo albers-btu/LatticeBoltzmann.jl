@@ -20,9 +20,11 @@ using Test, StaticArrays, CUDA
 	Nx, Ny, Nz = Int(model.Nx), Int(model.Ny), Int(model.Nz)
 	host = zeros(UInt8, Nx * Ny * Nz)
 	for z in 1:Nz, y in 1:Ny, x in 1:Nx
+		n = x + (y-1)*Nx + (z-1)*Nx*Ny
 		if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
-			n = x + (y-1)*Nx + (z-1)*Nx*Ny
 			host[n] = TYPE_S
+		else
+			host[n] = TYPE_F
 		end
 	end
 	copyto!(model.domains[1].flags.data, host)

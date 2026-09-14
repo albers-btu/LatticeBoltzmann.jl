@@ -63,6 +63,8 @@ for z in 1:Nz, y in 1:Ny, x in 1:Nx
         end
     elseif z == 1 || z == Nz
         host[n] = TYPE_S
+    else
+        host[n] = TYPE_F
     end
 end
 copyto!(model.domains[1].flags.data, host)
