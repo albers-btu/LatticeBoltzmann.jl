@@ -14,6 +14,25 @@ end
     return ifelse(x >= 0, y, -y)
 end
 
+@inline erfc_as(x::Float32) = 1.0f0 - erf_as(x)
+
+# Two-phase Neumann λ: X=2λ√(κ_l t),
+# λ√π = Ste_l e^{-λ²}/erf(λ) - Ste_s √(κ_s/κ_l) e^{-λ² κ_l/κ_s}/erfc(λ√(κ_l/κ_s))
+function neumann_lambda_two_phase(Ste_l::Float32, Ste_s::Float32, κs_over_κl::Float32)
+    r = sqrt(κs_over_κl)
+    invr = 1.0f0 / r
+    lo, hi = 0.01f0, 2.0f0
+    λ = 0.2f0
+    for _ in 1:60
+        λ = 0.5f0 * (lo + hi)
+        t1 = Ste_l * exp(-λ * λ) / erf_as(λ)
+        t2 = Ste_s * r * exp(-λ * λ * invr * invr) / erfc_as(λ * invr)
+        f = t1 - t2 - λ * sqrt(Float32(π))
+        f > 0 ? (lo = λ) : (hi = λ)
+    end
+    return λ
+end
+
 @testset "TEMPERATURE Dirichlet conduction" begin
     @test TEMPERATURE
     Nx, Ny, Nz = 8, 8, 16
@@ -307,6 +326,11 @@ end
     @test abs(dx) < 1.0f-5
     dx, dy, dz = LatticeBoltzmann.darcy_force(0.5f0, 0.0f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 0.0f0)
     @test dx == 0 && dy == 0 && dz == 0
+    @test LatticeBoltzmann.blend_phase(0.0f0, 0.4f0, 0.2f0) ≈ 0.2f0
+    @test LatticeBoltzmann.blend_phase(1.0f0, 0.4f0, 0.2f0) ≈ 0.4f0
+    @test LatticeBoltzmann.blend_phase(0.5f0, 0.4f0, 0.2f0) ≈ 0.3f0
+    ωT = LatticeBoltzmann.omega_T_from_alpha(0.2f0)
+    @test isapprox(LatticeBoltzmann.thermal_conductivity(ωT), 0.1f0; rtol=1.0f-5)
 end
 
 @testset "Enthalpy Stefan melting vs Neumann" begin
@@ -371,6 +395,69 @@ end
     @test Xnum > 4
     @test isapprox(Xnum, Xan; rtol=0.35)
     @test hypot(uA[nsolid, 1], uA[nsolid, 2], uA[nsolid, 3]) < 0.01f0
+    @test isfinite(Xnum)
+end
+
+@testset "two-phase Neumann melting k_s ≠ k_l" begin
+    @test TEMPERATURE
+    Nx, Ny, Nz = 64, 4, 4
+    ν_l, ν_s = 0.1f0, 0.05f0
+    α_l, α_s = 0.2f0, 0.4f0          # Model-α; κ = α/2
+    Tm, Tb, Ti = 1.0f0, 1.15f0, 0.85f0
+    Λ = 0.75f0
+    Ste_l = (Tb - Tm) / Λ
+    Ste_s = (Tm - Ti) / Λ
+    model = Model(Nx, Ny, Nz, ν_l; α = α_l, α_s = α_s, α_l = α_l,
+                  ν_s = ν_s, ν_l = ν_l, β = 0.0f0, fz = 0.0f0, σ = 0.0f0,
+                  Λ = Λ, Ts = Tm, Tl = Tm, K0 = 1.0f-3, T_avg = Tm,
+                  backend=CPU(), workgroup=64)
+    k_l = thermal_k_l(model.domains[1])
+    k_s = thermal_k_s(model.domains[1])
+    @test k_l ≈ 0.1f0
+    @test k_s ≈ 0.2f0
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Ti, Nx * Ny * Nz)
+    fsh = ones(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
+            host[n] = TYPE_S
+        elseif x == 2
+            host[n] = TYPE_T
+            Th[n] = Tb
+            fsh[n] = 0
+        else
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    nsteps = 4000
+    run!(model, nsteps)
+    LatticeBoltzmann.moments!(model)
+    fsA = Array(model.domains[1].fs.data)
+    uA = Array(model.domains[1].u.data)
+    λ = neumann_lambda_two_phase(Ste_l, Ste_s, k_s / k_l)
+    Xan = 2 * λ * sqrt(k_l * Float32(nsteps))
+    y0, z0 = 2, 2
+    xif = Nx - 1
+    for x in 3:Nx-1
+        n = lbm_n(x, y0, z0, Nx, Ny)
+        if fsA[n] > 0.5f0
+            xif = x
+            break
+        end
+    end
+    Xnum = Float32(xif - 2)
+    nsolid = lbm_n(Nx - 3, y0, z0, Nx, Ny)
+    nliq = lbm_n(4, y0, z0, Nx, Ny)
+    @info "two-phase Neumann" Ste_l Ste_s k_l k_s λ Xnum Xan ratio=(Xnum / Xan)
+    @test Xnum > 3
+    @test isapprox(Xnum, Xan; rtol=0.40)
+    @test hypot(uA[nsolid, 1], uA[nsolid, 2], uA[nsolid, 3]) < 0.01f0
+    @test fsA[nliq] < 0.5f0
     @test isfinite(Xnum)
 end
 

@@ -72,6 +72,10 @@ function Model(
     σT = 0.0f0,
     Tσ = nothing,
     α = 0.0f0,
+    α_s = nothing,
+    α_l = nothing,
+    ν_s = nothing,
+    ν_l = nothing,
     β = 0.0f0,
     T_avg = 1.0f0,
     latent = 0.0f0,
@@ -92,6 +96,10 @@ function Model(
     Tσl = Tσ === nothing ? CType(T_avg) :
           Tσ isa Quantity ? CType(lbm_T(units, Tσ)) : CType(Tσ)
     α  = CType(lbm_ν(units, α))
+    αs = α_s === nothing ? α : CType(lbm_ν(units, α_s))
+    αl = α_l === nothing ? α : CType(lbm_ν(units, α_l))
+    νs = ν_s === nothing ? ν : CType(lbm_ν(units, ν_s))
+    νl = ν_l === nothing ? ν : CType(lbm_ν(units, ν_l))
     Λ  = CType(lbm_Λ(units, latent))
     Tsl = Ts === nothing ? CType(T_avg) :
           Ts isa Quantity ? CType(lbm_T(units, Ts)) : CType(Ts)
@@ -101,7 +109,8 @@ function Model(
 
     # @info units
 
-    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, β=CType(β), T_avg=CType(T_avg),
+    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, α_s=αs, α_l=αl,
+                  ν_s=νs, ν_l=νl, β=CType(β), T_avg=CType(T_avg),
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
@@ -114,6 +123,10 @@ function Model(
     σT = 0.0f0,
     Tσ = nothing,
     α = 0.0f0,
+    α_s = 0.0f0,
+    α_l = 0.0f0,
+    ν_s = 0.0f0,
+    ν_l = 0.0f0,
     β = 0.0f0,
     T_avg = 1.0f0,
     Λ = 0.0f0,
@@ -207,6 +220,10 @@ function Model(
             σT=CType(σT),
             Tσ=Tσ === nothing ? CType(T_avg) : CType(Tσ),
             α=CType(α),
+            α_s=CType(α_s),
+            α_l=CType(α_l),
+            ν_s=CType(ν_s),
+            ν_l=CType(ν_l),
             β=CType(β),
             T_avg=CType(T_avg),
             Λ=CType(Λ),
@@ -370,6 +387,8 @@ u(model::Model) = model.u
     htc(model::Model) = model.h
     fs(model::Model) = model.fs
     thermal_k(model::Model) = thermal_k(model.domains[1])
+    thermal_k_s(model::Model) = thermal_k_s(model.domains[1])
+    thermal_k_l(model::Model) = thermal_k_l(model.domains[1])
 end
 
 @static if SURFACE
@@ -578,6 +597,7 @@ function step!(model::Model)
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                   domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
@@ -588,6 +608,7 @@ function step!(model::Model)
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg,
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                   domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
                    Nd, Nx, Ny, Nz; ndrange = N)
         end
 

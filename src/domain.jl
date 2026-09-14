@@ -40,6 +40,10 @@ mutable struct Domain{
 
     @static if TEMPERATURE
         α::CType
+        α_s::CType            # solid Model-α (twice CE diffusivity)
+        α_l::CType            # liquid Model-α
+        ν_s::CType
+        ν_l::CType
         β::CType
         T_avg::CType
         ω_T::CType
@@ -62,6 +66,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     σT::CType = zero(CType),
     Tσ::CType = one(CType),
     α::CType = zero(CType),
+    α_s::CType = zero(CType),
+    α_l::CType = zero(CType),
+    ν_s::CType = zero(CType),
+    ν_l::CType = zero(CType),
     β::CType = zero(CType),
     T_avg::CType = one(CType),
     Λ::CType = zero(CType),
@@ -103,6 +111,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
 
     @static if TEMPERATURE
         αT = α == zero(CType) ? CType(ν) : α
+        αs = α_s == zero(CType) ? αT : α_s
+        αl = α_l == zero(CType) ? αT : α_l
+        νs = ν_s == zero(CType) ? CType(ν) : ν_s
+        νl = ν_l == zero(CType) ? CType(ν) : ν_l
         ω_T = one(CType) / (CType(2) * αT + CType(1) / CType(2))
         Tmem = Memory(AT{CType}(undef, N))
         fill!(Tmem.data, T_avg)
@@ -126,7 +138,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex,
-                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 UInt64(0)
             )
         else
@@ -150,7 +162,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 UInt64(0)
             )
         else
@@ -190,6 +202,8 @@ end
     # D3Q7 Peng c_sT² = 1/4. Model `α` sets ω_T = 1/(2α+1/2); Fourier k = α/2.
     thermal_k(domain::Domain{CType}) where CType =
         CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))
+    thermal_k_s(domain::Domain{CType}) where CType = CType(0.5) * domain.α_s
+    thermal_k_l(domain::Domain{CType}) where CType = CType(0.5) * domain.α_l
 end
 
 τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + CType(1) / CType(2)

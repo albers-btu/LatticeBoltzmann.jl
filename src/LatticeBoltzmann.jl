@@ -26,7 +26,7 @@ export attach
 include("domain.jl")
 export Domain
 export ρ, u, F, τ
-export T, Q, htc, fs, thermal_k
+export T, Q, htc, fs, thermal_k, thermal_k_s, thermal_k_l
 export get_N
 export increment_time_step!
 
