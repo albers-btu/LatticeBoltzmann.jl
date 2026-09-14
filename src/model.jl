@@ -517,7 +517,7 @@ function initialize!(model::Model)
                 domain.mass.data, domain.massex.data, domain.ϕ.data,
                 model.weights, model.velocities,
                 Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
-                domain.gi.data, domain.T.data;
+                domain.gi.data, domain.T.data, domain.fs.data;
                 ndrange = N
             )
         else
@@ -556,6 +556,7 @@ function step!(model::Model)
             s0 = t_odd ? model.cached_surface_0_odd! : model.cached_surface_0_even!
             s0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+               domain.fs.data,
                model.weights, model.velocities,
                domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
                Nd, Nx, Ny, Nz; ndrange = N)
@@ -595,11 +596,11 @@ function step!(model::Model)
                 Nd, Nx, Ny, Nz; ndrange = N)
             s2 = t_odd ? model.cached_surface_2_odd! : model.cached_surface_2_even!
             s2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
-               domain.gi.data, domain.T.data,
+               domain.gi.data, domain.T.data, domain.fs.data,
                model.weights, model.velocities, Nd, Nx, Ny, Nz; ndrange = N)
             model.cached_surface_3!(
                 domain.ρ.data, domain.flags.data, domain.mass.data,
-                domain.massex.data, domain.ϕ.data, model.velocities,
+                domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                 Nd, Nx, Ny, Nz; ndrange = N)
         end
 
@@ -658,7 +659,7 @@ end
 
 @inline function surface_0_body!(
     t_odd::Val{odd},
-    fi, ρ, u, flags, mass, massex, ϕ, T,
+    fi, ρ, u, flags, mass, massex, ϕ, T, fs,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
@@ -674,22 +675,31 @@ end
     y = (n0 ÷ Nx) % Ny
     z = n0 ÷ (Nx * Ny)
 
+    frozen = false
+    @static if TEMPERATURE
+        frozen = is_solid_fraction(fs[n])
+    end
+
     massn = mass[n]
-    for i in 2:Q
-        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-        massn += massex[src]
+    if !frozen
+        for i in 2:Q
+            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+            massn += massex[src]
+        end
     end
 
     NP = (Q - 1) ÷ 2
     fn1 = CType(fi[f_index(n, 1, N)])
 
     if su == TYPE_F
-        for k in 1:NP
-            i = 2k
-            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-            fp_in,  fm_in  = load_pair(fi, n, src, i, t_odd, N, CType)
-            fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
-            massn += (fp_in - fp_out) + (fm_in - fm_out)
+        if !frozen
+            for k in 1:NP
+                i = 2k
+                src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                fp_in,  fm_in  = load_pair(fi, n, src, i, t_odd, N, CType)
+                fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
+                massn += (fp_in - fp_out) + (fm_in - fm_out)
+            end
         end
         mass[n] = massn
         return nothing
@@ -707,8 +717,23 @@ end
     else
         eq = false
     end
-    if eq
+    if frozen
+        ρn = ρ[n]
+        ρn = ρn > zero(CType) ? ρn : one(CType)
+        ux = zero(CType); uy = zero(CType); uz = zero(CType)
+        uxg = zero(CType); uyg = zero(CType); uzg = zero(CType)
+        ρ_gas = one(CType)
+        ϕin = calculate_phi(ρn, massn, flagsn)
+    elseif eq
         ρn, ux, uy, uz = prescribed_hydro(ρ[n], u[n, 1], u[n, 2], u[n, 3], fx, fy, fz)
+        ϕin = calculate_phi(ρn, massn, flagsn)
+        σn = σ
+        @static if TEMPERATURE
+            σn = σ + σT * (T[n] - Tσ)
+            σn = ifelse(σn > zero(CType), σn, zero(CType))
+        end
+        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
+        uxg, uyg, uzg = ux, uy, uz
     else
         ρn = fn1
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
@@ -724,18 +749,13 @@ end
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
         ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
-    end
-
-    ϕin = calculate_phi(ρn, massn, flagsn)
-    σn = σ
-    @static if TEMPERATURE
-        σn = σ + σT * (T[n] - Tσ)
-        σn = ifelse(σn > zero(CType), σn, zero(CType))
-    end
-    ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
-    if eq
-        uxg, uyg, uzg = ux, uy, uz
-    else
+        ϕin = calculate_phi(ρn, massn, flagsn)
+        σn = σ
+        @static if TEMPERATURE
+            σn = σ + σT * (T[n] - Tσ)
+            σn = ifelse(σn > zero(CType), σn, zero(CType))
+        end
+        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
         @static if VOLUME_FORCE
             uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
             uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)
@@ -743,14 +763,14 @@ end
         else
             uxg, uyg, uzg = ux, uy, uz
         end
-    end
-    @static if TEMPERATURE
-        if σT != zero(CType)
-            mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
-            inv2ρ = one(CType) / (CType(2) * ρn)
-            uxg = clamp(uxg + mx * inv2ρ, -cs, cs)
-            uyg = clamp(uyg + my * inv2ρ, -cs, cs)
-            uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
+        @static if TEMPERATURE
+            if σT != zero(CType)
+                mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
+                inv2ρ = one(CType) / (CType(2) * ρn)
+                uxg = clamp(uxg + mx * inv2ρ, -cs, cs)
+                uyg = clamp(uyg + my * inv2ρ, -cs, cs)
+                uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
+            end
         end
     end
     uug = CType(1.5) * (uxg*uxg + uyg*uyg + uzg*uzg)
@@ -767,13 +787,15 @@ end
         fp_in,  fm_in  = load_pair(fi, n, srcp, i, t_odd, N, CType)
         fp_out, fm_out = load_outgoing_pair(fi, n, srcp, i, t_odd, N, CType)
 
-        if (sup & (TYPE_F | TYPE_I)) != 0x00
-            fluxp = fm_in - fp_out
-            massn += sup == TYPE_F ? fluxp : CType(0.5) * (ϕp + ϕin) * fluxp
-        end
-        if (sum_ & (TYPE_F | TYPE_I)) != 0x00
-            fluxm = fp_in - fm_out
-            massn += sum_ == TYPE_F ? fluxm : CType(0.5) * (ϕm + ϕin) * fluxm
+        if !frozen
+            if (sup & (TYPE_F | TYPE_I)) != 0x00
+                fluxp = fm_in - fp_out
+                massn += sup == TYPE_F ? fluxp : CType(0.5) * (ϕp + ϕin) * fluxp
+            end
+            if (sum_ & (TYPE_F | TYPE_I)) != 0x00
+                fluxm = fp_in - fm_out
+                massn += sum_ == TYPE_F ? fluxm : CType(0.5) * (ϕm + ϕin) * fluxm
+            end
         end
 
         fegp = feq(w[i],     ρ_gas, uxg, uyg, uzg, uug, cp, CType)
@@ -789,23 +811,23 @@ end
 end
 
 @kernel function surface_0_even_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T,
+    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function surface_0_odd_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T,
+    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
 end
 
 end

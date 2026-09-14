@@ -373,3 +373,82 @@ end
     @test hypot(uA[nsolid, 1], uA[nsolid, 2], uA[nsolid, 3]) < 0.01f0
     @test isfinite(Xnum)
 end
+
+@testset "SURFACE × enthalpy: open-layer freeze vs Neumann" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 8, 8, 40
+    ν = 0.1f0
+    α = 0.2f0
+    Tm = 1.0f0
+    Tb = 0.85f0
+    Λ = 0.75f0
+    Ste = (Tm - Tb) / Λ
+    Hfill = 32
+    zB = 2
+    model = Model(Nx, Ny, Nz, ν; α = α, β = 0.0f0, fz = 0.0f0, σ = 0.0f0,
+                  Λ = Λ, Ts = Tm, Tl = Tm, K0 = 1.0f-3, T_avg = Tm,
+                  backend=CPU(), workgroup=64)
+    k = thermal_k(model.domains[1])
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Tm, Nx * Ny * Nz)
+    fsh = zeros(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z == zB
+            host[n] = TYPE_T
+            Th[n] = Tb
+            fsh[n] = 1
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    nsteps = 4000
+    run!(model, nsteps)
+    LatticeBoltzmann.moments!(model)
+    fsA = Array(model.domains[1].fs.data)
+    uA = Array(model.domains[1].u.data)
+    flags = Array(model.domains[1].flags.data)
+    TA = Array(model.domains[1].T.data)
+    rhs = Ste / sqrt(Float32(π))
+    lo, hi = 0.01f0, 2.0f0
+    λ = 0.3f0
+    for _ in 1:40
+        λ = 0.5f0 * (lo + hi)
+        f = λ * exp(λ^2) * erf_as(λ)
+        f > rhs ? (hi = λ) : (lo = λ)
+    end
+    Xan = 2 * λ * sqrt(k * Float32(nsteps))
+    x0, y0 = 4, 4
+    Xnum = 0.0f0
+    for z in zB+1:Hfill-1
+        n = lbm_n(x0, y0, z, Nx, Ny)
+        np = lbm_n(x0, y0, z + 1, Nx, Ny)
+        if fsA[n] >= 0.5f0 && fsA[np] < 0.5f0
+            Xnum = Float32(z - zB) + (fsA[n] - 0.5f0) / (fsA[n] - fsA[np] + 1.0f-8)
+            break
+        end
+    end
+    zI = 0
+    for z in 1:Nz
+        n = lbm_n(x0, y0, z, Nx, Ny)
+        if (flags[n] & TYPE_SU) == TYPE_I
+            zI = z
+        end
+    end
+    nG = lbm_n(x0, y0, Nz - 2, Nx, Ny)
+    nsolid = lbm_n(x0, y0, zB + 2, Nx, Ny)
+    @info "open-layer freeze vs Neumann" Ste λ k Xnum Xan ratio=(Xnum / Xan) zI Hfill
+    @test Xnum > 4
+    @test isapprox(Xnum, Xan; rtol=0.35)
+    @test abs(zI - (Hfill + 1)) <= 2
+    @test (flags[nG] & TYPE_G) == TYPE_G
+    @test hypot(uA[nsolid, 1], uA[nsolid, 2], uA[nsolid, 3]) < 0.01f0
+    @test isfinite(TA[nG])
+    @test isfinite(Xnum)
+end

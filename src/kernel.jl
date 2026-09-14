@@ -348,6 +348,10 @@ end
     return -drag * ux, -drag * uy, -drag * uz
 end
 
+@inline function is_solid_fraction(fsn::CType) where {CType}
+    return (one(CType) - fsn) < CType(1e-3)
+end
+
 @inline function collide_temperature!(
     t_odd::Val{odd}, gi, Tfield, Qin, hT, flags, flagsn, fs,
     ux::CType, uy::CType, uz::CType,
@@ -586,8 +590,25 @@ end
     return cnt > 0 ? s / CType(cnt) : one(CType)
 end
 
+@inline function average_neighbors_fs(
+    fs, flags, x, y, z, c::NTuple{Q, SVector{3, Int}},
+    Nx, Ny, Nz, ::Type{CType}
+) where {Q, CType}
+    s = zero(CType)
+    cnt = 0
+    for i in 2:Q
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        su = flags[src] & (TYPE_SU | TYPE_S)
+        if su == TYPE_F || su == TYPE_I || su == TYPE_IF
+            s += fs[src]
+            cnt += 1
+        end
+    end
+    return cnt > 0 ? s / CType(cnt) : zero(CType)
+end
+
 @inline function initialize_body!(
-    ρ, u, fi, flags, mass, massex, ϕ, gi, T,
+    ρ, u, fi, flags, mass, massex, ϕ, gi, T, fs,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
@@ -623,6 +644,9 @@ end
             ρn, ux, uy, uz = average_neighbors_fluid(ρ, u, flags, x, y, z, c, Nx, Ny, Nz, CType)
             ρ[n] = ρn
             u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz
+            @static if TEMPERATURE
+                fs[n] = average_neighbors_fs(fs, flags, x, y, z, c, Nx, Ny, Nz, CType)
+            end
         end
     end
 
@@ -673,10 +697,10 @@ end
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int,
-    gi, T
+    gi, T, fs
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds initialize_body!(ρ, u, fi, flags, mass, massex, ϕ, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds initialize_body!(ρ, u, fi, flags, mass, massex, ϕ, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 end # SURFACE
@@ -1140,7 +1164,7 @@ end
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ω_T, β, T_avg, Λ, Ts, Tl, x, y, z, Nx, Ny, Nz, N, n, CType)
-            if (flagsn & TYPE_SU) == TYPE_I && σT != zero(CType)
+            if (flagsn & TYPE_SU) == TYPE_I && σT != zero(CType) && !is_solid_fraction(fs[n])
                 mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
                 fxn += mx; fyn += my; fzn += mz
             end
@@ -1170,18 +1194,24 @@ end
     end
 
     if (flagsn & TYPE_SU) == TYPE_I
-        noF = true; noG = true
-        for i in 2:Q
-            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-            suj = flags[src] & TYPE_SU
-            noF &= suj != TYPE_F
-            noG &= suj != TYPE_G
+        frozen_i = false
+        @static if TEMPERATURE
+            frozen_i = is_solid_fraction(fs[n])
         end
-        massn = mass[n]
-        if massn > ρn || noG
-            flags[n] = (flagsn & ~TYPE_SU) | TYPE_IF
-        elseif massn < 0 || noF
-            flags[n] = (flagsn & ~TYPE_SU) | TYPE_IG
+        if !frozen_i
+            noF = true; noG = true
+            for i in 2:Q
+                src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                suj = flags[src] & TYPE_SU
+                noF &= suj != TYPE_F
+                noG &= suj != TYPE_G
+            end
+            massn = mass[n]
+            if massn > ρn || noG
+                flags[n] = (flagsn & ~TYPE_SU) | TYPE_IF
+            elseif massn < 0 || noF
+                flags[n] = (flagsn & ~TYPE_SU) | TYPE_IG
+            end
         end
     end
 
@@ -1453,7 +1483,7 @@ end
 
 @inline function surface_2_body!(
     t_odd::Val{odd},
-    fi, ρ, u, flags, gi, T,
+    fi, ρ, u, flags, gi, T, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
@@ -1468,6 +1498,7 @@ end
             Tn = average_neighbors_T(T, flags, x, y, z, c, Nx, Ny, Nz, CType)
             T[n] = Tn
             store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd, CType)
+            fs[n] = average_neighbors_fs(fs, flags, x, y, z, c, Nx, Ny, Nz, CType)
         end
         return nothing
     elseif sus == TYPE_IG
@@ -1484,17 +1515,17 @@ end
     return nothing
 end
 
-@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, fs, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n))
 end
-@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, fs, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function surface_3_kernel!(
-    ρ, flags, mass, massex, ϕ,
+    ρ, flags, mass, massex, ϕ, fs,
     c::NTuple{Q, SVector{3, Int}},
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q}
@@ -1505,12 +1536,20 @@ end
         if (sus & TYPE_S) == 0x00
             CType = eltype(ρ)
 
+            frozen = false
+            @static if TEMPERATURE
+                frozen = is_solid_fraction(fs[n])
+            end
+
             ρn = ρ[n]
             massn = mass[n]
             massexn = zero(CType)
             ϕn = zero(CType)
 
-            if sus == TYPE_F
+            if frozen && (sus == TYPE_F || sus == TYPE_I)
+                massexn = zero(CType)
+                ϕn = sus == TYPE_F ? one(CType) : calculate_phi(ρn, massn, TYPE_I)
+            elseif sus == TYPE_F
                 massexn = massn - ρn
                 massn = ρn
                 ϕn = one(CType)
@@ -1545,9 +1584,15 @@ end
             for i in 2:Q
                 j = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
                 suj = flags[j] & (TYPE_SU | TYPE_S)
-                counter += Int(suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI)
+                liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
+                @static if TEMPERATURE
+                    liquid = liquid && !is_solid_fraction(fs[j])
+                end
+                counter += Int(liquid)
             end
-            if counter == 0
+            if frozen
+                massexn = zero(CType)
+            elseif counter == 0
                 massn += massexn
                 massexn = zero(CType)
             else
