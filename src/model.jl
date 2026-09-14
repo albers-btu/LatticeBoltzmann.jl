@@ -63,6 +63,7 @@ mutable struct Model{
 
     initialized::Bool
     units::Units{CType}
+    laser::Any
 end
 
 function Model(
@@ -87,6 +88,7 @@ function Model(
     T_v = nothing,
     M = 0.0558,
     p_atm = 101325.0,
+    laser = nothing,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -126,7 +128,7 @@ function Model(
                   ν_s=νs, ν_l=νl, β=CType(β), T_avg=CType(T_avg),
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
-                  CType, SType, scheme, backend, workgroup)
+                  laser=laser, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -153,6 +155,7 @@ function Model(
     C_hk = 0.0f0,
     p0v = 0.0f0,
     β_v = 0.0f0,
+    laser = nothing,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -316,7 +319,8 @@ function Model(
                 cached_update_force_odd,
                 cached_reset_force,
                 false,
-                Units{CType}()
+                Units{CType}(),
+                laser,
             )
         else
             Model(
@@ -344,7 +348,8 @@ function Model(
                 cached_update_force_odd,
                 cached_reset_force,
                 false,
-                Units{CType}()
+                Units{CType}(),
+                laser,
             )
         end
     else
@@ -368,7 +373,8 @@ function Model(
                 cached_update_force_odd,
                 cached_reset_force,
                 false,
-                Units{CType}()
+                Units{CType}(),
+                laser,
             )
         else
             Model(
@@ -389,7 +395,8 @@ function Model(
                 cached_update_force_odd,
                 cached_reset_force,
                 false,
-                Units{CType}()
+                Units{CType}(),
+                laser,
             )
         end
     end
@@ -599,6 +606,10 @@ function step!(model::Model)
         t_odd = isodd(domain.t)
         Nx = Int(domain.Nx); Ny = Int(domain.Ny); Nz = Int(domain.Nz)
         Nd = Int(domain.N)
+
+        @static if SURFACE && TEMPERATURE
+            deposit_laser!(model, domain)
+        end
 
         @static if SURFACE
             s0 = t_odd ? model.cached_surface_0_odd! : model.cached_surface_0_even!

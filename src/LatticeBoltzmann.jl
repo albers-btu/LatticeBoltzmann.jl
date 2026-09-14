@@ -39,6 +39,9 @@ export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kerne
 include("plic.jl")
 export plic_cube, calculate_curvature, calculate_normal_py
 
+include("laser.jl")
+export Laser, set_laser_position!, deposit_laser!, fresnel_absorptance
+
 include("model.jl")
 export Model
 export get_D

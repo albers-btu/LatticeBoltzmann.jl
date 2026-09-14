@@ -1,7 +1,7 @@
-# DED-style 316L melt track. Square-ish pad with Ny ≈ Nx/2, Δx ≈ 18 µm so a
-# 2 kW / 0.5 mm Gaussian is close to D3Q7-stable Q. The beam and powder feed
-# walk in x (Q + msrc fields — no laser/powder module). Pad starts at 300 K.
-# Evaporation cooling, evaporative mass loss, and recoil are on (latent_v, T_v).
+# DED-style 316L melt track. Coarse lattice, larger pad, 200 W — fast demo.
+# Heat: PLIC + Fresnel ray-traced laser (src/laser.jl). Powder: moving msrc.
+# Set `n_layers` to retrace the same bead; Nz grows with layers (gas above the stack).
+# Evaporation cooling, mass loss, and recoil are on (latent_v, T_v).
 #
 #   SURFACE = true, TEMPERATURE = true, VOLUME_FORCE = true
 using LatticeBoltzmann
@@ -14,22 +14,68 @@ using Logging
 @assert SURFACE && TEMPERATURE
 start_run_log!("output_melt_pool")
 
-function set_moving_gaussians!(Qh, Sh, Nx, Ny, Nz, Hfill, zQmin, zSmin,
-        x_las, y_las, invw2, invw2S, Q0, S0, rmax)
-    fill!(Qh, 0)
+# --- user: scan ---
+n_layers      = 1          # passes over the same bead (1 = single track)
+bidirectional = true       # even layers scan x1 → x0; false = always x0 → x1
+si_dwell      = 0.0u"s"    # laser + powder off between layers; 0 → none
+
+# --- user: grid / 316L ---
+# ~6.4 × 5.1 mm in xy, pad 1.6 mm, Δx ≈ 80 µm. Nz is set from `n_layers` below.
+Nx, Ny = 80, 64
+Hfill = 22
+L = Hfill - 2                           # pad thickness in cells
+
+si_H      = 1.6e-3u"m"                  # → Δx ≈ 80 µm
+si_ρ      = 8000u"kg/m^3"
+si_cp     = 500u"J/kg/K"
+si_k_s    = 15.0u"W/m/K"
+si_k_l    = 30.0u"W/m/K"
+si_Tm     = 1673.0u"K"
+si_T_init = 300.0u"K"
+si_Lheat  = 2.8e5u"J/kg"
+si_Lv     = 7.45e6u"J/kg"
+si_Tv     = 3086.0u"K"
+si_M      = 0.0558u"kg/mol"
+si_K0     = 1.0e-10u"m^2"
+si_P      = 200.0u"W"
+si_d_spot = 0.5e-3u"m"
+si_v      = 8.0e-3u"m/s"
+si_δ      = 0.24e-3u"m"
+si_mdot   = 2.0u"g/minute"
+si_eta    = 0.7
+si_σ      = 0.015u"N/m"
+si_σT     = -1.5e-5u"N/m/K"
+q_max     = 0.04f0
+
+function set_powder!(Sh, flags, Nx, Ny, Nz, x_las, y_las, invw2S, S0, rmax, nskin)
     fill!(Sh, 0)
     x0 = max(2, floor(Int, x_las - rmax))
     x1 = min(Nx - 1, ceil(Int, x_las + rmax))
     y0 = max(2, floor(Int, y_las - rmax))
     y1 = min(Ny - 1, ceil(Int, y_las + rmax))
-    z1 = min(Hfill + 1, Nz - 1)
-    for z in min(zQmin, zSmin):z1, y in y0:y1, x in x0:x1
-        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+    @inbounds for y in y0:y1, x in x0:x1
         dx = Float32(x) - x_las
         dy = Float32(y) - y_las
-        r2 = dx * dx + dy * dy
-        z >= zQmin && (Qh[n] = Q0 * exp(-invw2 * r2))
-        z >= zSmin && (Sh[n] = S0 * exp(-invw2S * r2))
+        Sxy = S0 * exp(-invw2S * (dx * dx + dy * dy))
+        Sxy <= 0 && continue
+        ztop = 0
+        for z in (Nz - 1):-1:2
+            n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+            su = flags[n] & TYPE_SU
+            if su == TYPE_F || su == TYPE_I
+                ztop = z
+                break
+            end
+        end
+        ztop == 0 && continue
+        zlo = max(2, ztop - nskin + 1)
+        for z in zlo:ztop
+            n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+            su = flags[n] & TYPE_SU
+            if su == TYPE_F || su == TYPE_I
+                Sh[n] = Sxy
+            end
+        end
     end
     return nothing
 end
@@ -61,36 +107,11 @@ function track_metrics(fsA, flags, TA, uA, Nx, Ny, Nz, Hfill, x_las, y_las, U)
         depth += 1
     end
     u_sol = hypot(uA[nsolid, 1], uA[nsolid, 2], uA[nsolid, 3])
-    return nliq, depth, Float32(si_T(U, Tmax)), Float32(si_T(U, Tmin)), umax, u_sol, zI, xl
+    bead = max(0, zI - Hfill)
+    return nliq, depth, bead, Float32(si_T(U, Tmax)), Float32(si_T(U, Tmin)), umax, u_sol, zI, xl
 end
 
-# --- SI: 316L DED, fine mesh (Ny ≈ Nx/2) ---
-Nx, Ny, Nz = 192, 96, 56
-Hfill = 42
-L = Hfill - 2                           # pad thickness in cells
-
-si_H      = 0.72e-3u"m"                 # → Δx ≈ 18 µm
-si_ρ      = 8000u"kg/m^3"
-si_cp     = 500u"J/kg/K"
-si_k_s    = 15.0u"W/m/K"
-si_k_l    = 30.0u"W/m/K"
-si_Tm     = 1673.0u"K"                  # 316L ~ 1400 °C
-si_T_init = 300.0u"K"
-si_Lheat  = 2.8e5u"J/kg"
-si_Lv     = 7.45e6u"J/kg"               # vaporization; 0 → off
-si_Tv     = 3086.0u"K"                  # 316L boiling
-si_M      = 0.0558u"kg/mol"
-si_K0     = 1.0e-10u"m^2"
-si_P      = 2000.0u"W"
-si_d_spot = 0.5e-3u"m"                  # 1/e² diameter
-si_v      = 8.0e-3u"m/s"
-si_A      = 0.35
-si_δ      = 0.12e-3u"m"                 # physical absorption depth (not 3 cells)
-si_mdot   = 2.0u"g/minute"              # 10 g/min needs ~2 mm of gas; this slice has ~0.2 mm
-si_eta    = 0.7                         # catchment efficiency
-si_σ      = 0.015u"N/m"                 # reduced; 316L ~ 1.8 N/m
-si_σT     = -1.5e-5u"N/m/K"
-q_max     = 0.04f0
+n_layers >= 1 || throw(ArgumentError("n_layers must be ≥ 1"))
 
 α_l_si = si_k_l / (si_ρ * si_cp)
 α_s_si = si_k_s / (si_ρ * si_cp)
@@ -108,15 +129,23 @@ units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
 w_m    = 0.5 * ustrip(u"m", si_d_spot)
 I_peak = 2 * ustrip(u"W", si_P) / (π * w_m^2)
 δ_m    = ustrip(u"m", si_δ)
-Q_si   = si_A * I_peak / δ_m
+A0     = fresnel_absorptance(1.0f0, 3.27f0, 4.48f0)
+nskin  = max(3, round(Int, δ_m / m))
+Q_si   = A0 * I_peak / (nskin * m)
 Q_full = Float32(lbm_Q(units, Q_si * u"W/m^3"))
-scale  = Q_full > q_max ? Float32(q_max / Q_full) : 1.0f0
-Q0     = scale * Q_full
-P_used = scale * si_A * ustrip(u"W", si_P)
 mdot_kg_s = si_eta * ustrip(u"kg/s", uconvert(u"kg/s", si_mdot))
-# 1/e² Gaussian ∫exp(-2 r²/w²) dA = π w²/2; spread over absorption depth δ.
-S_peak = mdot_kg_s / (0.5 * π * w_m^2 * δ_m)   # kg/m³/s at the axis
+S_peak = mdot_kg_s / (0.5 * π * w_m^2 * δ_m)
 S0     = Float32(lbm_S(units, S_peak))
+
+# Gas headroom: expected layer height from captured powder on a ~spot-wide bead,
+# plus a fixed clearance so the launch plane stays in TYPE_G.
+v_m      = ustrip(u"m/s", si_v)
+ρ_m      = ustrip(u"kg/m^3", si_ρ)
+w_bead   = 2 * w_m
+h_layer  = mdot_kg_s / max(ρ_m * w_bead * v_m, 1e-30)
+n_z_layer = max(2, ceil(Int, h_layer / m))
+n_gas_top = 8
+Nz = Hfill + n_layers * n_z_layer + n_gas_top + 1
 
 model = Model(Nx, Ny, Nz, units;
               ν = si_ν_l,
@@ -137,33 +166,32 @@ Tm      = Float32(lbm_T(units, si_Tm))
 T_init  = Float32(lbm_T(units, si_T_init))
 w_cells = w_m / Float64(units.m)
 invw2   = w_cells > 0 ? 2.0f0 / Float32(w_cells^2) : 0.0f0
-invw2S  = invw2 / 1.44f0                    # powder slightly wider than the beam
+invw2S  = invw2 / 1.44f0
 v_lat   = Float32(ustrip(u"m/s", si_v) * units.s / units.m)
 y_las   = Float32(Ny + 1) / 2
 x0      = Float32(8 + 2 * w_cells)
 x1      = Float32(Nx - 7 - 2 * w_cells)
-nsteps  = max(2, round(Int, (x1 - x0) / max(v_lat, Float32(1e-8))))
-qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))  # ~1/4 cell
-every   = max(qevery, nsteps ÷ 40)
-nδ      = max(2, round(Int, δ_m / m))
-zQmin   = max(2, Hfill - nδ + 1)
-zSmin   = zQmin
+nsteps_pass  = max(2, round(Int, abs(x1 - x0) / max(v_lat, Float32(1e-8))))
+nsteps_dwell = si_dwell > 0u"s" ?
+    max(0, round(Int, ustrip(u"s", si_dwell) / Float64(units.s))) : 0
+nsteps_total = n_layers * nsteps_pass + max(0, n_layers - 1) * nsteps_dwell
+qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))
+# Frame spacing from one pass, not the whole job — otherwise n_layers=3
+# writes 3× fewer VTK/progress samples and the beam looks 3× faster.
+every   = max(qevery, max(1, nsteps_pass ÷ 40))
 rmax    = Float32(4 * w_cells * 1.2)
 σlat    = model.domains[1].σ
-if scale < 1
-    @warn "2 kW / 0.5 mm maps to Q_lat=$(Q_full); capped to $(Q0) (absorbed ≈ $(round(P_used; digits=1)) W)" Q_full Q0 scale P_used
-else
-    @info "using full 2 kW (Q_lat=$(Q_full) ≤ q_max=$(q_max))" Q_full
+if Q_full > q_max
+    @warn "surface peak Q_lat=$(Q_full) > q_max=$(q_max); raise skin/δ or lower P" Q_full nskin
 end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "DED 316L fine track" Nx Ny Nz m_um=(1e6*m) w_cells v_lat nsteps qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_eta S0 Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
+@info "DED 316L multilayer track" n_layers bidirectional si_dwell Nx Ny Nz m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top w_cells v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot S0 A0 nskin Q_full Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
 fsh  = ones(Float32, Nx * Ny * Nz)
-Qh   = zeros(Float32, Nx * Ny * Nz)
 Sh   = zeros(Float32, Nx * Ny * Nz)
 for z in 1:Nz, y in 1:Ny, x in 1:Nx
     n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
@@ -178,63 +206,100 @@ end
 copyto!(model.domains[1].flags.data, host)
 copyto!(model.domains[1].T.data, Th)
 copyto!(model.domains[1].fs.data, fsh)
-set_moving_gaussians!(Qh, Sh, Nx, Ny, Nz, Hfill, zQmin, zSmin,
-                      x0, y_las, invw2, invw2S, Q0, S0, rmax)
-copyto!(model.domains[1].Q.data, Qh)
-copyto!(model.domains[1].msrc.data, Sh)
 
 d = model.domains[1]
+set_powder!(Sh, host, Nx, Ny, Nz, x0, y_las, invw2S, S0, rmax, nskin)
+copyto!(d.msrc.data, Sh)
+
+model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
+                    x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
+                    nrays = 9, max_bounce = 6, every = qevery, skin = nskin)
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output_melt_pool")
 
-nchunks = nsteps ÷ every
-Ncell = Nx * Ny * Nz
-mlups_ema = NaN
-αema = 0.2
-prog = Progress(nchunks; dt=0.3, desc="DED fine ", showspeed=true)
-for i in 1:nchunks
-    t0 = time_ns()
-    with_logger(NullLogger()) do
-        ninner = every
-        nq = qevery
-        for j in 1:ninner
-            if (j - 1) % nq == 0
-                x_las = x0 + v_lat * Float32(Int(d.t))
-                set_moving_gaussians!(Qh, Sh, Nx, Ny, Nz, Hfill, zQmin, zSmin,
-                                      x_las, y_las, invw2, invw2S, Q0, S0, rmax)
-                copyto!(d.Q.data, Qh)
-                copyto!(d.msrc.data, Sh)
-            end
+function run_layers!(model, d, Sh, x0, x1, y_las, v_lat, n_layers, bidirectional,
+                     nsteps_pass, nsteps_dwell, nsteps_total, qevery, every,
+                     Nx, Ny, Nz, Hfill, invw2S, S0, rmax, nskin)
+    Ncell = Nx * Ny * Nz
+    xmin, xmax = min(x0, x1), max(x0, x1)
+    istep = 0
+    x_now = x0
+    mlups_ema = NaN
+    αema = 0.2
+    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="DED layers ", showspeed=true)
+
+    function report!(layer, x_las)
+        export!(model; dir="output_melt_pool")
+        nliq, depth, bead, Tmax_K, Tmin_K, umax, _, zI, xl = track_metrics(
+            Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
+            Nx, Ny, Nz, Hfill, x_las, y_las, model.units)
+        next!(prog; showvalues = [
+            (:layer, layer),
+            (:t, Int(d.t)),
+            (:t_si, round(si_t(model.units, Int(d.t)); digits=4)),
+            (:x_las, round(xl; digits=1)),
+            (:nliq, nliq),
+            (:depth, depth),
+            (:bead, bead),
+            (:Tmax_K, round(Tmax_K; digits=1)),
+            (:Tmin_K, round(Tmin_K; digits=1)),
+            (:umax, round(umax; digits=3)),
+            (:zI, zI),
+            (:MLUPS, round(mlups_ema; digits=1)),
+        ])
+        return nothing
+    end
+
+    function do_step!(layer, x_las, powder)
+        set_laser_position!(model.laser, x_las, y_las)
+        if powder && istep % qevery == 0
+            set_powder!(Sh, Array(d.flags.data), Nx, Ny, Nz,
+                        x_las, y_las, invw2S, S0, rmax, nskin)
+            copyto!(d.msrc.data, Sh)
+        end
+        t0 = time_ns()
+        with_logger(NullLogger()) do
             run!(model, 1)
         end
+        dt = (time_ns() - t0) * 1e-9
+        mlups = Ncell / max(dt, 1e-12) / 1e6
+        mlups_ema = isfinite(mlups_ema) ? αema * mlups + (1 - αema) * mlups_ema : mlups
+        istep += 1
+        if istep % every == 0 || istep == nsteps_total
+            report!(layer, x_las)
+        end
+        return nothing
     end
-    dt = (time_ns() - t0) * 1e-9
-    mlups = Ncell * every / dt / 1e6
-    global mlups_ema = isfinite(mlups_ema) ? αema * mlups + (1 - αema) * mlups_ema : mlups
-    export!(model; dir="output_melt_pool")
-    t_lat = Int(d.t)
-    x_now = x0 + v_lat * Float32(t_lat)
-    nliq, depth, Tmax_K, Tmin_K, umax, _, zI, xl = track_metrics(
-        Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
-        Nx, Ny, Nz, Hfill, x_now, y_las, model.units)
-    next!(prog; showvalues = [
-        (:t, t_lat),
-        (:t_si, round(si_t(model.units, t_lat); digits=4)),
-        (:x_las, round(xl; digits=1)),
-        (:nliq, nliq),
-        (:depth, depth),
-        (:Tmax_K, round(Tmax_K; digits=1)),
-        (:Tmin_K, round(Tmin_K; digits=1)),
-        (:umax, round(umax; digits=3)),
-        (:zI, zI),
-        (:MLUPS, round(mlups_ema; digits=1)),
-    ])
+
+    for layer in 1:n_layers
+        model.laser.enabled = true
+        backward = bidirectional && iseven(layer)
+        x_start = backward ? x1 : x0
+        sgn = backward ? -one(Float32) : one(Float32)
+        for k in 0:(nsteps_pass - 1)
+            x_now = clamp(x_start + sgn * v_lat * Float32(k), xmin, xmax)
+            do_step!(layer, x_now, true)
+        end
+        if layer < n_layers && nsteps_dwell > 0
+            model.laser.enabled = false
+            fill!(d.Q.data, 0)
+            fill!(Sh, 0)
+            copyto!(d.msrc.data, Sh)
+            for _ in 1:nsteps_dwell
+                do_step!(layer, x_now, false)
+            end
+        end
+    end
+    finish!(prog)
+    return x_now
 end
-finish!(prog)
+
+x_end = run_layers!(model, d, Sh, x0, x1, y_las, v_lat, n_layers, bidirectional,
+                    nsteps_pass, nsteps_dwell, nsteps_total, qevery, every,
+                    Nx, Ny, Nz, Hfill, invw2S, S0, rmax, nskin)
 
 LatticeBoltzmann.moments!(model)
-x_end = x0 + v_lat * Float32(nsteps)
-nliq, depth, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
+nliq, depth, bead, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
     Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
     Nx, Ny, Nz, Hfill, x_end, y_las, model.units)
-@info "DED fine report" nliq depth_cells=depth Tmax_K Tmin_K umax u_sol zI Hfill x_las=xl t_end=si_t(model.units, nsteps) P_used_W=P_used scale Q_full S0 mdot_kg_s
+@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth bead_cells=bead Tmax_K Tmin_K umax u_sol zI Hfill x_las=xl t_end=si_t(model.units, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full S0 mdot_kg_s

@@ -747,3 +747,62 @@ end
     @test M1 > M0 + 1
     @test hC > hE + 0.3f0
 end
+
+@testset "PLIC laser Fresnel deposit" begin
+    A0 = LatticeBoltzmann.fresnel_absorptance(1.0f0, 3.27f0, 4.48f0)
+    Ag = LatticeBoltzmann.fresnel_absorptance(0.0f0, 3.27f0, 4.48f0)
+    @test 0.30f0 < A0 < 0.40f0
+    @test Ag < 0.02f0
+    @test TEMPERATURE && SURFACE
+    Nx, Ny, Nz = 24, 16, 24
+    Hfill = 14
+    Tm = 1.0f0
+    si_H = 0.002
+    Lpad = Hfill - 2
+    m = si_H / Lpad
+    st = 0.1 * m^2 / 7.5e-6
+    units = Units(Lpad, 0.05, 1, si_H, 0.05 * m / st, 8000.0; T=Float32, K=1673.0f0, cp=500.0f0)
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0, T_avg=Tm,
+                  backend=CPU(), workgroup=64)
+    model.units = units
+    host = zeros(UInt8, Nx*Ny*Nz)
+    Th = fill(Tm, Nx*Ny*Nz)
+    fsh = zeros(Float32, Nx*Ny*Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z==1 || z==Nz || x==1 || x==Nx || y==1 || y==Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    las = Laser(units; P=200.0, w=2.0, x=Nx/2, y=Ny/2, z=Float32(Nz)-1.1f0,
+                nrays=9, max_bounce=4, skin=1)
+    model.laser = las
+    fill!(model.domains[1].Q.data, 0)
+    LatticeBoltzmann.deposit_laser!(model, model.domains[1])
+    QA = Array(model.domains[1].Q.data)
+    fl = Array(model.domains[1].flags.data)
+    QI = 0.0f0
+    QF = 0.0f0
+    QG = 0.0f0
+    for n in eachindex(QA)
+        su = fl[n] & TYPE_SU
+        su == TYPE_I && (QI += QA[n])
+        su == TYPE_F && (QF += QA[n])
+        su == TYPE_G && (QG += QA[n])
+    end
+    qfac = LatticeBoltzmann.laser_qfac(units)
+    Pabs = (QI + QF) / qfac
+    @info "laser deposit" QI QF QG A0 Pabs nray=length(las.Pray)
+    @test QI + QF > 0
+    @test isfinite(QI) && isfinite(QF)
+    @test QG == 0
+    @test QI > QF
+    @test 0.20 * las.P < Pabs < 1.05 * las.P
+    @test abs(Pabs - A0 * las.P) / las.P < 0.15
+end
