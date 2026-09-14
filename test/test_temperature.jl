@@ -190,3 +190,88 @@ end
     @test isapprox(T[nM], Tan; rtol=0.35)
     @test isfinite(T[nM])
 end
+
+@testset "Marangoni cavity: surface jet toward cold, σT sign flip" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 32, 4, 16
+    ν = 0.1f0
+    α = 0.2f0
+    T_hot, T_cold = 1.5f0, 0.5f0
+    ΔT = T_hot - T_cold
+    σ0 = 0.02f0
+    σT = -0.02f0
+    Hfill = 12
+    model = Model(Nx, Ny, Nz, ν; α = α, β = 0.0f0, fz = 0.0f0, σ = σ0, σT = σT,
+                  T_avg = 1.0f0, backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = ones(Float32, Nx * Ny * Nz)
+    xH, xC = 2, Nx - 1
+    Lx = Float32(xC - xH)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            if x == xH
+                host[n] = TYPE_T
+                Th[n] = T_hot
+            elseif x == xC
+                host[n] = TYPE_T
+                Th[n] = T_cold
+            else
+                host[n] = TYPE_F
+                Th[n] = T_hot + (T_cold - T_hot) * Float32(x - xH) / Lx
+            end
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 6000)
+    LatticeBoltzmann.moments!(model)
+    u = Array(model.domains[1].u.data)
+    flags = Array(model.domains[1].flags.data)
+    ux_s = Float32[]
+    ux_b = Float32[]
+    zB = 4
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        su = flags[n] & TYPE_SU
+        if su == TYPE_I && x > xH + 2 && x < xC - 2
+            push!(ux_s, u[n, 1])
+        elseif su == TYPE_F && z == zB && x > xH + 2 && x < xC - 2
+            push!(ux_b, u[n, 1])
+        end
+    end
+    @test !isempty(ux_s)
+    us = sum(ux_s) / length(ux_s)
+    ub = isempty(ux_b) ? 0.0f0 : sum(ux_b) / length(ux_b)
+    H = Float32(Hfill - 1)
+    u_est = abs(σT) * ΔT * H / (4 * ν * Lx)
+    # σT < 0: surface pulled to cold (+x)
+    @test us > 0.25f0 * u_est
+    @test us < 3 * u_est
+    @test ub < 0           # return flow
+    @test isfinite(us)
+
+    # sign flip
+    model2 = Model(Nx, Ny, Nz, ν; α = α, β = 0.0f0, fz = 0.0f0, σ = σ0, σT = -σT,
+                   T_avg = 1.0f0, backend=CPU(), workgroup=64)
+    copyto!(model2.domains[1].flags.data, host)
+    copyto!(model2.domains[1].T.data, Th)
+    LatticeBoltzmann.initialize!(model2)
+    run!(model2, 6000)
+    LatticeBoltzmann.moments!(model2)
+    u2 = Array(model2.domains[1].u.data)
+    flags2 = Array(model2.domains[1].flags.data)
+    ux_s2 = Float32[]
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if (flags2[n] & TYPE_SU) == TYPE_I && x > xH + 2 && x < xC - 2
+            push!(ux_s2, u2[n, 1])
+        end
+    end
+    us2 = sum(ux_s2) / length(ux_s2)
+    @test us2 < 0
+    @test us2 * us < 0
+end

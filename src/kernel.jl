@@ -252,6 +252,54 @@ end
     return Tnb, cnt
 end
 
+@inline function is_thermal_liquid(flagsn::UInt8)
+    return (flagsn & TYPE_BO) != TYPE_S && (flagsn & TYPE_SU) != TYPE_G
+end
+
+@inline function axis_deriv(Tfield, flags, n, srcp, srcm, ::Type{CType}) where {CType}
+    okp = is_thermal_liquid(flags[srcp])
+    okm = is_thermal_liquid(flags[srcm])
+    if okp && okm
+        return CType(0.5) * (Tfield[srcp] - Tfield[srcm])
+    elseif okp
+        return Tfield[srcp] - Tfield[n]
+    elseif okm
+        return Tfield[n] - Tfield[srcm]
+    else
+        return zero(CType)
+    end
+end
+
+# Marangoni on TYPE_I (one-cell interface): F = σT (∇T - n(n·∇T)), n = ∇ϕ/|∇ϕ|.
+@inline function marangoni_force(
+    Tfield, ϕ, flags, σT::CType, x::Int, y::Int, z::Int, n::Int,
+    Nx::Int, Ny::Int, Nz::Int, ::Type{CType}
+) where {CType}
+    xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+    yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+    zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+    dTx = axis_deriv(Tfield, flags, n, xp, xm, CType)
+    dTy = axis_deriv(Tfield, flags, n, yp, ym, CType)
+    dTz = axis_deriv(Tfield, flags, n, zp, zm, CType)
+    half = CType(0.5)
+    dϕx = half * (ϕ[xp] - ϕ[xm])
+    dϕy = half * (ϕ[yp] - ϕ[ym])
+    dϕz = half * (ϕ[zp] - ϕ[zm])
+    mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
+    if mag > eps(CType)
+        inv = one(CType) / mag
+        nx, ny, nz = dϕx * inv, dϕy * inv, dϕz * inv
+        ndT = nx * dTx + ny * dTy + nz * dTz
+        dTx -= nx * ndT
+        dTy -= ny * ndT
+        dTz -= nz * ndT
+    end
+    return σT * dTx, σT * dTy, σT * dTz
+end
+
 @inline function collide_temperature!(
     t_odd::Val{odd}, gi, Tfield, Qin, hT, flags, flagsn,
     ux::CType, uy::CType, uz::CType,
@@ -940,11 +988,11 @@ end
 
 @inline function stream_collide_surface_body!(
     t_odd::Val{odd},
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, σT::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -1005,6 +1053,10 @@ end
                 t_odd, gi, T, Qin, hT, flags, flagsn, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ω_T, β, T_avg, x, y, z, Nx, Ny, Nz, N, n, CType)
+            if (flagsn & TYPE_SU) == TYPE_I && σT != zero(CType)
+                mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
+                fxn += mx; fyn += my; fzn += mz
+            end
         end
         @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
@@ -1068,25 +1120,25 @@ end
 end
 
 @kernel function stream_collide_even_kernel!(
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, σT::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
-    flags, fi, ρ, u, F, mass, gi, T, Qin, hT,
+    flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     ω::CType, fx::CType, fy::CType, fz::CType,
-    ω_T::CType, β::CType, T_avg::CType,
+    ω_T::CType, β::CType, T_avg::CType, σT::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, w, c, ω, fx, fy, fz, ω_T, β, T_avg, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, N, Nx, Ny, Nz, Int(n))
 end
 
 end

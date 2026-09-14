@@ -23,6 +23,8 @@ mutable struct Domain{
     fz::CType # global force per volume z
 
     σ::CType
+    σT::CType  # dσ/dT; 0 → constant σ
+    Tσ::CType  # T_ref in σ(T) = σ + σT (T - Tσ)
 
     ρ::Memory{CType, Aρ}
     u::Memory{CType, Au}
@@ -52,6 +54,8 @@ end
 
 function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{CType}, ::Type{SType};
     σ::CType = zero(CType),
+    σT::CType = zero(CType),
+    Tσ::CType = one(CType),
     α::CType = zero(CType),
     β::CType = zero(CType),
     T_avg::CType = one(CType),
@@ -108,7 +112,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 Int(Ox), Int(Oy), Int(Oz),
                 CType(ν), N, ω,
                 CType(fx), CType(fy), CType(fz),
-                CType(σ),
+                CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex,
                 αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem,
@@ -120,7 +124,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 Int(Ox), Int(Oy), Int(Oz),
                 CType(ν), N, ω,
                 CType(fx), CType(fy), CType(fz),
-                CType(σ),
+                CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex,
                 UInt64(0)
@@ -133,7 +137,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 Int(Ox), Int(Oy), Int(Oz),
                 CType(ν), N, ω,
                 CType(fx), CType(fy), CType(fz),
-                CType(σ),
+                CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 αT, β, T_avg, ω_T, Tmem, gi, Qmem, hmem,
                 UInt64(0)
@@ -144,7 +148,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 Int(Ox), Int(Oy), Int(Oz),
                 CType(ν), N, ω,
                 CType(fx), CType(fy), CType(fz),
-                CType(σ),
+                CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 UInt64(0)
             )

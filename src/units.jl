@@ -52,6 +52,10 @@ lbm_g(U::Units, si_g)                  = si_g * U.s^2 / U.m # lattice gravity; f
 lbm_g(U::Units, g::Acceleration)       = lbm_g(U, ustrip(u"m/s^2", g))
 lbm_σ(U::Units, si_σ)                  = si_σ * U.s^2 / U.kg
 lbm_σ(U::Units, σ::Quantity)           = lbm_σ(U, ustrip(u"N/m", σ))
+# dσ/dT: N/(m·K) → lattice σ per lattice T
+lbm_σT(U::Units, si_σT)                = si_σT * U.K * U.s^2 / U.kg
+lbm_σT(U::Units, σT::Quantity)         = lbm_σT(U, ustrip(u"N/m/K", σT))
+si_σT(U::Units, σTlat)                 = σTlat * U.kg / (U.s^2 * U.K)
 lbm_Q(U::Units, si_Q, ρlat=1)          = si_Q / (si_ρ(U, ρlat) * U.cp * U.K / U.s)
 lbm_Q(U::Units, Q::Quantity, ρlat=1)   = lbm_Q(U, ustrip(u"W/m^3", Q), ρlat)
 lbm_q(U::Units, si_q, ρlat=1)          = si_q / (si_ρ(U, ρlat) * U.cp * U.K * U.m / U.s)

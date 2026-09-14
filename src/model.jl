@@ -68,6 +68,8 @@ function Model(
     ν = 1.0e-6,
     gx = 0.0f0, gy = 0.0f0, gz = 0.0f0,
     σ = 0.0f0,
+    σT = 0.0f0,
+    Tσ = nothing,
     α = 0.0f0,
     β = 0.0f0,
     T_avg = 1.0f0,
@@ -81,11 +83,14 @@ function Model(
     fy = CType(lbm_g(units, gy))
     fz = CType(lbm_g(units, gz))
     σ  = CType(lbm_σ(units, σ))
+    σT = CType(lbm_σT(units, σT))
+    Tσl = Tσ === nothing ? CType(T_avg) :
+          Tσ isa Quantity ? CType(lbm_T(units, Tσ)) : CType(Tσ)
     α  = CType(lbm_ν(units, α))
 
     # @info units
 
-    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, α=α, β=CType(β), T_avg=CType(T_avg), CType, SType, scheme, backend, workgroup)
+    model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, β=CType(β), T_avg=CType(T_avg), CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -94,6 +99,8 @@ function Model(
     Nx, Ny, Nz, ν;
     fx = 0.0f0, fy = 0.0f0, fz = 0.0f0,
     σ = 0.0f0,
+    σT = 0.0f0,
+    Tσ = nothing,
     α = 0.0f0,
     β = 0.0f0,
     T_avg = 1.0f0,
@@ -181,6 +188,8 @@ function Model(
             CType,
             SType;
             σ=CType(σ),
+            σT=CType(σT),
+            Tσ=Tσ === nothing ? CType(T_avg) : CType(Tσ),
             α=CType(α),
             β=CType(β),
             T_avg=CType(T_avg),
@@ -522,9 +531,9 @@ function step!(model::Model)
         @static if SURFACE
             s0 = t_odd ? model.cached_surface_0_odd! : model.cached_surface_0_even!
             s0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
-               domain.mass.data, domain.massex.data, domain.ϕ.data,
+               domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
                model.weights, model.velocities,
-               domain.fx, domain.fy, domain.fz, domain.σ,
+               domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
                Nd, Nx, Ny, Nz; ndrange = N)
         end
 
@@ -539,9 +548,10 @@ function step!(model::Model)
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
                    domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                   domain.ϕ.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
-                   domain.ω_T, domain.β, domain.T_avg,
+                   domain.ω_T, domain.β, domain.T_avg, domain.σT,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
@@ -621,10 +631,10 @@ end
 
 @inline function surface_0_body!(
     t_odd::Val{odd},
-    fi, ρ, u, flags, mass, massex, ϕ,
+    fi, ρ, u, flags, mass, massex, ϕ, T,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
-    fx::CType, fy::CType, fz::CType, σ::CType,
+    fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -690,7 +700,12 @@ end
     end
 
     ϕin = calculate_phi(ρn, massn, flagsn)
-    ρ_gas = gas_density_plic(σ, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
+    σn = σ
+    @static if TEMPERATURE
+        σn = σ + σT * (T[n] - Tσ)
+        σn = ifelse(σn > zero(CType), σn, zero(CType))
+    end
+    ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
     if eq
         uxg, uyg, uzg = ux, uy, uz
     else
@@ -700,6 +715,15 @@ end
             uzg = clamp(uz + fz / (CType(2) * ρn), -cs, cs)
         else
             uxg, uyg, uzg = ux, uy, uz
+        end
+    end
+    @static if TEMPERATURE
+        if σT != zero(CType)
+            mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
+            inv2ρ = one(CType) / (CType(2) * ρn)
+            uxg = clamp(uxg + mx * inv2ρ, -cs, cs)
+            uyg = clamp(uyg + my * inv2ρ, -cs, cs)
+            uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
         end
     end
     uug = CType(1.5) * (uxg*uxg + uyg*uyg + uzg*uzg)
@@ -738,23 +762,23 @@ end
 end
 
 @kernel function surface_0_even_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ),
+    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
-    fx::CType, fy::CType, fz::CType, σ::CType,
+    fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, w, c, fx, fy, fz, σ, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function surface_0_odd_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ),
+    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
-    fx::CType, fy::CType, fz::CType, σ::CType,
+    fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, w, c, fx, fy, fz, σ, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, w, c, fx, fy, fz, σ, σT, Tσ, N, Nx, Ny, Nz, Int(n))
 end
 
 end
