@@ -483,6 +483,19 @@ u(model::Model) = model.u
         expected = H0 + Q - rad - evap + powder - wall
         return (; H, H0, Q, rad, evap, wall, powder, expected, residual=H - expected)
     end
+    @static if SURFACE
+        metal_mass(model::Model) = mapreduce(metal_mass, +, model.domains)
+        reset_mass_budget!(model::Model) = (foreach(reset_mass_budget!, model.domains); model)
+        function mass_budget(model::Model)
+            parts = map(mass_budget, model.domains)
+            M = sum(p -> p.M, parts)
+            M0 = sum(p -> p.M0, parts)
+            evap = sum(p -> p.evap, parts)
+            powder = sum(p -> p.powder, parts)
+            expected = M0 + powder - evap
+            return (; M, M0, evap, powder, expected, residual=M - expected)
+        end
+    end
 end
 
 @static if SURFACE
@@ -731,6 +744,9 @@ function initialize!(model::Model)
     model.initialized = true
     @static if TEMPERATURE
         reset_energy_budget!(model)
+        @static if SURFACE
+            reset_mass_budget!(model)
+        end
     end
     @info "finished init"
 end
@@ -748,7 +764,7 @@ function step!(model::Model)
             if domain.τ_p > 0
                 powder_gas_kernel!(model.backend, model.workgroup)(
                     domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
-                    domain.τ_p, domain.T_p, domain.Eacc.data, Nd; ndrange = N)
+                    domain.τ_p, domain.T_p, domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
             end
         end
 
@@ -756,11 +772,11 @@ function step!(model::Model)
             s0 = t_odd ? model.cached_surface_0_odd! : model.cached_surface_0_even!
             s0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
-               domain.fs.data,
+               domain.fs.data, domain.gi.data,
                model.weights, model.velocities,
                domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
                domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
-               Nd, Nx, Ny, Nz; ndrange = N)
+               Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
         end
 
         @static if MOVING_BOUNDARIES
@@ -783,7 +799,7 @@ function step!(model::Model)
                    domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
-                   Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
+                   Nd, Nx, Ny, Nz, domain.Eacc.data, domain.Macc.data; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data,
@@ -868,12 +884,12 @@ end
 
 @inline function surface_0_body!(
     t_odd::Val{odd},
-    fi, ρ, u, flags, mass, massex, ϕ, T, fs,
+    fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
 ) where {odd, Q, CType}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
@@ -912,6 +928,11 @@ end
             end
         end
         mass[n] = massn
+        @static if TEMPERATURE
+            fillc = ϕ[n]
+            fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
+            reconstruct_g_boundaries!(t_odd, gi, T, flags, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc)
+        end
         return nothing
     end
 
@@ -1023,29 +1044,34 @@ end
             sup == TYPE_G, sum_ == TYPE_G, t_odd, N)
     end
     mass[n] = massn
+    @static if TEMPERATURE
+        fillc = ϕin
+        fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
+        reconstruct_g_boundaries!(t_odd, gi, T, flags, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc)
+    end
     return nothing
 end
 
 @kernel function surface_0_even_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs,
+    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs, gi,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc)
 end
 
 @kernel function surface_0_odd_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs,
+    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs, gi,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc)
 end
 
 end

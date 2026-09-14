@@ -224,6 +224,46 @@ end
     return nothing
 end
 
+# AA streams only +c, so a min-side TYPE_S never collides the wall–fluid link.
+# Reconstruct missing g only at TYPE_S|TYPE_T: Dirichlet ABB at T[wall].
+# Plain TYPE_S and TYPE_G keep the AA populations (adiabatic bounce-back).
+# Writing geq(T) into TYPE_G overwrites the streamed outgoing stored in the
+# gas cell and acts as a heat sink (kills recoil / evaporation).
+@inline function is_dirichlet_solid(fl::UInt8)
+    return ((fl & TYPE_S) != 0x00) & ((fl & TYPE_T) != 0x00)
+end
+
+@inline function reconstruct_g_boundaries!(
+    t_odd::Val{odd}, gi, T, flags,
+    x::Int, y::Int, z::Int, n::Int,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType},
+    Eacc, fillc::CType
+) where {odd, CType}
+    @inbounds for (i, cx, cy, cz) in ((2, 1, 0, 0), (4, 0, 1, 0), (6, 0, 0, 1))
+        srcp = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+        srcm = src_index(x, y, z, -cx, -cy, -cz, Nx, Ny, Nz)
+        dir_p = is_dirichlet_solid(flags[srcp])
+        dir_m = is_dirichlet_solid(flags[srcm])
+        (dir_p | dir_m) || continue
+        fp_in,  fm_in  = load_pair(gi, n, srcp, i, t_odd, N, CType)
+        fp_out, fm_out = load_outgoing_pair(gi, n, srcp, i, t_odd, N, CType)
+        rec_p = fp_out
+        rec_m = fm_out
+        if dir_p
+            geg = geq_T_axis(T[srcp], zero(CType))
+            rec_p = geg + geg - fp_out
+            acc_add!(Eacc, EACC_WALL, fillc * (fm_in - rec_p))
+        end
+        if dir_m
+            geg = geq_T_axis(T[srcm], zero(CType))
+            rec_m = geg + geg - fm_out
+            acc_add!(Eacc, EACC_WALL, fillc * (fp_in - rec_m))
+        end
+        store_reconstructed_pair!(gi, n, srcp, i, rec_p, rec_m, dir_p, dir_m, t_odd, N)
+    end
+    return nothing
+end
+
 @inline function thermal_conductivity(ω_T::CType) where {CType}
     return CType(0.25) * (one(CType) / ω_T - CType(0.5))
 end
@@ -1301,7 +1341,7 @@ end
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, Macc
 ) where {odd, Q, CType}
     flagsn = flags[n]
     if (flagsn & TYPE_BO) == TYPE_S || (flagsn & TYPE_SU) == TYPE_G
@@ -1365,6 +1405,7 @@ end
                 mp_src = msrc[n] * ρn
                 mpn = mp[n] + mp_src
                 acc_add!(Eacc, EACC_POWDER, mp_src * T_p)
+                acc_add!(Macc, MACC_POWDER, mp_src)
                 Tpred = T[n] + Qin[n]
                 if Tpred >= Ts
                     dm = mpn < ρn ? mpn : ρn
@@ -1375,6 +1416,7 @@ end
                 else
                     mpd = mpn * exp(-one(CType) / τ_p)
                     acc_add!(Eacc, EACC_POWDER, (mpd - mpn) * T_p)
+                    acc_add!(Macc, MACC_POWDER, mpd - mpn)
                     mpn = mpd
                 end
                 mp[n] = ifelse(mpn > CType(1e-12), mpn, zero(CType))
@@ -1385,6 +1427,7 @@ end
                 end
                 mass[n] += Sn * ρn
                 acc_add!(Eacc, EACC_POWDER, Sn * ρn * T_p)
+                acc_add!(Macc, MACC_POWDER, Sn * ρn)
             end
             fxn, fyn, fzn, mevap = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
@@ -1393,6 +1436,7 @@ end
             debit != zero(CType) && (Qin[n] += debit)
             if mevap > zero(CType)
                 mass[n] -= mevap * ρn
+                acc_add!(Macc, MACC_EVAP, mevap * ρn)
             end
             if (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
                 if σT != zero(CType)
@@ -1490,10 +1534,10 @@ end
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n), Eacc)
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -1504,15 +1548,15 @@ end
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n), Eacc)
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 # Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).
 @kernel function powder_gas_kernel!(
-    flags, mp, msrc, ρ, τ_p::CType, T_p::CType, Eacc, N::Int
+    flags, mp, msrc, ρ, τ_p::CType, T_p::CType, Eacc, Macc, N::Int
 ) where {CType}
     n = @index(Global)
     @inbounds begin
@@ -1524,8 +1568,10 @@ end
                 mp_src = msrc[n] * ρn
                 mpn = mp[n] + mp_src
                 acc_add!(Eacc, EACC_POWDER, mp_src * T_p)
+                acc_add!(Macc, MACC_POWDER, mp_src)
                 mpd = mpn * exp(-one(CType) / τ_p)
                 acc_add!(Eacc, EACC_POWDER, (mpd - mpn) * T_p)
+                acc_add!(Macc, MACC_POWDER, mpd - mpn)
                 mp[n] = ifelse(mpd > CType(1e-12), mpd, zero(CType))
             end
         end

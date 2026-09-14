@@ -6,6 +6,11 @@ const EACC_WALL = 4
 const EACC_POWDER = 5
 const EACC_N = 5
 
+# Metal-mass account matching energy: M = M0 + powder − evap + residual.
+const MACC_EVAP = 1
+const MACC_POWDER = 2
+const MACC_N = 2
+
 mutable struct Domain{
     CType<:AbstractFloat,
     SType<:AbstractFloat,
@@ -82,6 +87,11 @@ mutable struct Domain{
         Eacc::Memory{CType, Aρ}
         H0::CType
         E_powder::CType       # host: jet deposit × T_p
+        @static if SURFACE
+            Macc::Memory{CType, Aρ}
+            M0::CType
+            M_powder::CType   # host: jet deposit mass
+        end
     end
 
     t::UInt64
@@ -173,6 +183,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         fill!(fsmem.data, zero(CType))
         Eacc = Memory(AT{CType}(undef, EACC_N))
         fill!(Eacc.data, zero(CType))
+        @static if SURFACE
+            Macc = Memory(AT{CType}(undef, MACC_N))
+            fill!(Macc.data, zero(CType))
+        end
     end
 
     @static if SURFACE
@@ -188,6 +202,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 αT, αs, αl, CType(α_sT), CType(α_lT), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
+                Macc, zero(CType), zero(CType),
                 UInt64(0)
             )
         else
@@ -325,6 +340,73 @@ end
         expected = domain.H0 + Q - rad - evap + powder - wall
         residual = H - expected
         return (; H, H0=domain.H0, Q, rad, evap, wall, powder, expected, residual)
+    end
+
+    @static if SURFACE
+        # surface_3 stores massex as excess / N_liquid_neighbors.
+        @inline function _wrap_mass(x, dx, N)
+            ifelse(dx == 0, x,
+                ifelse(dx > 0, ifelse(x == N - 1, 0, x + 1),
+                               ifelse(x == 0, N - 1, x - 1)))
+        end
+
+        function _massex_recipients(flags, fsA, n::Int, Nx::Int, Ny::Int, Nz::Int)
+            n0 = n - 1
+            x = n0 % Nx
+            y = (n0 ÷ Nx) % Ny
+            z = n0 ÷ (Nx * Ny)
+            cnt = 0
+            @inbounds for i in 2:length(VELOCITIES[:D3Q19])
+                ci = VELOCITIES[:D3Q19][i]
+                j = _wrap_mass(x, ci[1], Nx) +
+                    _wrap_mass(y, ci[2], Ny) * Nx +
+                    _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
+                suj = flags[j] & (TYPE_SU | TYPE_S)
+                liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
+                liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)
+                cnt += Int(liquid)
+            end
+            return cnt
+        end
+
+        # Σ mass + mp + massex×recipients on non-solid cells.
+        function metal_mass(domain::Domain{CType}) where {CType}
+            flags = Array(domain.flags.data)
+            mA = Array(domain.mass.data)
+            mxA = Array(domain.massex.data)
+            mpA = Array(domain.mp.data)
+            fsA = Array(domain.fs.data)
+            Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+            s = 0.0
+            @inbounds for n in eachindex(flags)
+                (flags[n] & TYPE_S) != 0x00 && continue
+                s += Float64(mA[n]) + Float64(mpA[n])
+                mx = Float64(mxA[n])
+                if mx != 0
+                    cnt = _massex_recipients(flags, fsA, n, Nx, Ny, Nz)
+                    s += cnt > 0 ? mx * cnt : mx
+                end
+            end
+            return CType(s)
+        end
+
+        function reset_mass_budget!(domain::Domain{CType}) where {CType}
+            fill!(domain.Macc.data, zero(CType))
+            domain.M_powder = zero(CType)
+            domain.M0 = metal_mass(domain)
+            return domain
+        end
+
+        # M = M0 + powder − evap + residual (FSLBM/BC leak).
+        function mass_budget(domain::Domain{CType}) where {CType}
+            acc = Array(domain.Macc.data)
+            evap = acc[MACC_EVAP]
+            powder = acc[MACC_POWDER] + domain.M_powder
+            M = metal_mass(domain)
+            expected = domain.M0 + powder - evap
+            residual = M - expected
+            return (; M, M0=domain.M0, evap, powder, expected, residual)
+        end
     end
 end
 

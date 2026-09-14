@@ -47,9 +47,7 @@ end
     for z in 1:Nz, y in 1:Ny, x in 1:Nx
         n = lbm_n(x, y, z, Nx, Ny)
         if z==1 || z==Nz || x==1 || x==Nx || y==1 || y==Ny
-            host[n] = TYPE_S
-        elseif z == 2
-            host[n] = TYPE_F | TYPE_T
+            host[n] = TYPE_S | TYPE_T
         elseif z <= Hfill
             host[n] = TYPE_F
         end
@@ -68,6 +66,77 @@ end
     @test T[nbot] ≈ Tcold atol=0.02f0
     @test T[nedge] ≈ Tcold atol=0.02f0
     @test T[nwall] ≈ Tcold atol=0.02f0
+end
+
+@testset "plain TYPE_S does not impose Tm" begin
+    @test TEMPERATURE && SURFACE
+    Nx, Ny, Nz = 12, 12, 16
+    Hfill = 10
+    Tcold, Tm = 0.2f0, 1.0f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0, T_avg=Tm,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Tcold, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 80)
+    LatticeBoltzmann.moments!(model)
+    T = Array(model.domains[1].T.data)
+    fl = Array(model.domains[1].flags.data)
+    nbot = lbm_n(6, 6, 2, Nx, Ny)
+    nedge = lbm_n(2, 2, 2, Nx, Ny)
+    Tif = Float32[T[n] for n in eachindex(fl) if (fl[n] & TYPE_SU) == TYPE_I]
+    @info "plain TYPE_S" Tbot=T[nbot] Tedge=T[nedge] Tif_min=minimum(Tif) Tif_max=maximum(Tif)
+    @test T[nbot] ≈ Tcold atol=0.05f0
+    @test T[nedge] ≈ Tcold atol=0.08f0
+    @test minimum(Tif) > 0
+    @test maximum(Tif) < Tm
+end
+
+@testset "TYPE_S g bounce-back cools the pad; gas is adiabatic" begin
+    @test TEMPERATURE && SURFACE
+    Nx, Ny, Nz = 12, 8, 16
+    Hfill = 10
+    Tcold, Thot = 0.2f0, 1.0f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0, T_avg=Thot,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Thot, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S | TYPE_T
+            Th[n] = Tcold
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 80)
+    LatticeBoltzmann.moments!(model)
+    d = model.domains[1]
+    TA = Array(d.T.data)
+    fl = Array(d.flags.data)
+    nbot = lbm_n(6, 4, 2, Nx, Ny)
+    nmid = lbm_n(6, 4, 6, Nx, Ny)
+    Tif = Float32[TA[n] for n in eachindex(fl) if (fl[n] & TYPE_SU) == TYPE_I]
+    @info "TYPE_S BB" Tbot=TA[nbot] Tmid=TA[nmid] Tif_min=minimum(Tif) Tif_max=maximum(Tif)
+    @test TA[nbot] < Thot - 0.15f0
+    @test TA[nbot] > Tcold - 0.05f0
+    @test minimum(Tif) > 0
+    @test maximum(Tif) < Thot + 0.25f0
+    @test all(isfinite, TA)
 end
 
 @testset "TEMPERATURE Dirichlet conduction" begin
@@ -453,9 +522,7 @@ end
     for z in 1:Nz, y in 1:Ny, x in 1:Nx
         n = lbm_n(x, y, z, Nx, Ny)
         if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
-            host[n] = TYPE_S
-        elseif z == 2
-            host[n] = TYPE_F | TYPE_T
+            host[n] = TYPE_S | TYPE_T
         elseif z <= Hfill
             host[n] = TYPE_F
         end
@@ -517,6 +584,11 @@ end
     E1 = enthalpy(model)
     @info "closed energy Q=0" E0 E1
     @test isapprox(E1, E0; rtol=2.0f-5, atol=2.0f-4)
+    m = mass_budget(model)
+    @info "closed mass Q=0" m.M m.M0 m.residual
+    @test isapprox(m.M, m.M0; rtol=2.0f-5, atol=2.0f-4)
+    @test isapprox(m.residual, 0; atol=5.0f-4)
+    @test m.evap == 0 && m.powder == 0
 end
 
 @testset "closed energy: ΔH equals ΣQ" begin
@@ -592,11 +664,11 @@ end
     Th2 = fill(Tpad, Nx * Ny * Nz)
     for z in 1:Nz, y in 1:Ny, x in 1:Nx
         n = lbm_n(x, y, z, Nx, Ny)
-        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
-            host2[n] = TYPE_S
+        if z == 1
+            host2[n] = TYPE_S | TYPE_T
             Th2[n] = Tplate
-        elseif z == 2
-            host2[n] = TYPE_F | TYPE_T
+        elseif z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host2[n] = TYPE_S
             Th2[n] = Tplate
         elseif z <= Hfill
             host2[n] = TYPE_F
@@ -611,6 +683,30 @@ end
     @test w.wall > 0
     @test w.H < w.H0
     @test abs(w.residual) < abs(w.H - w.H0)
+end
+
+@testset "open mass: msrc matches ΔM and energy powder" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 8
+    Tm, Tp = 1.0f0, 0.4f0
+    S0 = 5.0f-4
+    nsteps = 40
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.0f0,
+                  T_avg=Tm, T_p=Tp, backend=CPU(), workgroup=64)
+    N = Nx * Ny * Nz
+    copyto!(model.domains[1].flags.data, fill(TYPE_F, N))
+    copyto!(model.domains[1].T.data, fill(Tm, N))
+    copyto!(model.domains[1].msrc.data, fill(S0, N))
+    LatticeBoltzmann.initialize!(model)
+    run!(model, nsteps)
+    m = mass_budget(model)
+    e = energy_budget(model)
+    @info "open mass msrc" m.M m.M0 m.powder m.evap m.residual e.powder
+    @test m.powder > 0
+    @test m.evap == 0
+    @test isapprox(m.M - m.M0, m.powder; atol=2.0f-3, rtol=2.0f-4)
+    @test isapprox(m.residual, 0; atol=2.0f-3)
+    @test isapprox(e.powder, Tp * m.powder; atol=2.0f-3, rtol=2.0f-4)
 end
 
 @testset "Enthalpy Stefan melting vs Neumann" begin
@@ -1026,6 +1122,9 @@ end
     @info "mass source bead" M0 M1 hC hE
     @test M1 > M0 + 1
     @test hC > hE + 0.3f0
+    mb = mass_budget(model)
+    @test mb.powder > 0
+    @test mb.M > mb.M0
 end
 
 @testset "unmelted powder decays; hot pool still captures" begin
@@ -1143,6 +1242,10 @@ end
     @info "powder jet" Mp M0 M1 nalive=count(model.powder_jet.alive)
     @test Mp > 0
     @test abs(M1 - M0) < 0.05f0
+    mb = mass_budget(model)
+    @test mb.powder > 0
+    @test isapprox(mb.M, mb.M0 + mb.powder - mb.evap; atol=0.05f0)
+    @test abs(mb.residual) < 0.05f0
 end
 
 @testset "PLIC laser Fresnel deposit" begin

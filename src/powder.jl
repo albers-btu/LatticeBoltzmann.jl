@@ -233,6 +233,7 @@ function advance_powder_jet!(model, domain)
     end
     @static if TEMPERATURE
         domain.E_powder += captured * domain.T_p
+        domain.M_powder += captured
     end
     copyto!(domain.mp.data, mp)
     τ_p > 0 || copyto!(domain.mass.data, mass)

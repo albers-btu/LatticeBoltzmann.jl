@@ -83,6 +83,8 @@ lbm_Λ(U::Units, L)                     = L / (U.cp * U.K)
 lbm_Λ(U::Units, L::Quantity)           = lbm_Λ(U, ustrip(u"J/kg", L))
 # Σ cell enthalpy (lattice T·cell) → J. One cell volume is m³.
 si_enthalpy(U::Units, Hlat, ρlat=1)    = si_ρ(U, ρlat) * U.cp * U.K * U.m^3 * Hlat
+# Σ lattice mass (ρ_lat × cell) → kg.
+si_mass(U::Units, Mlat, ρlat=1)        = si_ρ(U, ρlat) * U.m^3 * Mlat
 
 const R_GAS = 8.314462618          # J/mol/K
 const σ_SB  = 5.670374419e-8       # W/m²/K⁴

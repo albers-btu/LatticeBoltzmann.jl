@@ -184,15 +184,12 @@ Th   = fill(T_init, Nx * Ny * Nz)
 fsh  = ones(Float32, Nx * Ny * Nz)
 for z in 1:Nz, y in 1:Ny, x in 1:Nx
     n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
-    if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+    if z == 1
+        host[n] = TYPE_S | TYPE_T
+        Th[n] = T_init
+    elseif z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
         host[n] = TYPE_S
         Th[n] = T_init
-    elseif z == 2 && z <= Hfill
-        # cold Dirichlet plate: D3Q7 AA does not bounce the -z wall, so the
-        # pad bottom would otherwise drift toward Tm.
-        host[n] = TYPE_F | TYPE_T
-        Th[n] = T_init
-        fsh[n] = 1
     elseif z <= Hfill
         host[n] = TYPE_F
         Th[n] = T_init
@@ -231,6 +228,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
             Nx, Ny, Nz, Hfill, x_las, y_las, model.units)
         b = energy_budget(d)
+        m = mass_budget(d)
         U = model.units
         next!(prog; showvalues = [
             (:layer, layer),
@@ -247,6 +245,10 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             (:Qout_J, round(si_enthalpy(U, b.rad + b.evap + b.wall); digits=3)),
             (:pow_J, round(si_enthalpy(U, b.powder); digits=3)),
             (:res_J, round(si_enthalpy(U, b.residual); digits=3)),
+            (:M_g, round(1e3 * si_mass(U, m.M); digits=3)),
+            (:Mpow_g, round(1e3 * si_mass(U, m.powder); digits=3)),
+            (:Mevap_g, round(1e3 * si_mass(U, m.evap); digits=3)),
+            (:Mres_g, round(1e3 * si_mass(U, m.residual); digits=3)),
             (:umax, round(umax; digits=3)),
             (:zI, zI),
             (:MLUPS, round(mlups_ema; digits=1)),
@@ -303,5 +305,6 @@ nliq, depth, bead, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
     Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
     Nx, Ny, Nz, Hfill, x_end, y_las, model.units)
 b = energy_budget(d)
+m = mass_budget(d)
 U = model.units
-@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth bead_cells=bead Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) umax u_sol zI Hfill x_las=xl t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s
+@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth bead_cells=bead Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mpow_kg=si_mass(U, m.powder) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s

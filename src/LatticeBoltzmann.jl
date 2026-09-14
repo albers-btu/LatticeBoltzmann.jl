@@ -13,7 +13,7 @@ export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING
 
 include("units.jl")
 export Units
-export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, si_σT, si_S, si_enthalpy, lbm_ν, lbm_νT, lbm_g, lbm_σ, lbm_σT, lbm_u, lbm_T, lbm_Q, lbm_q, lbm_Λ, lbm_evap, lbm_S, lbm_s, lbm_rad, lbm_αT, σ_SB
+export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, si_σT, si_S, si_enthalpy, si_mass, lbm_ν, lbm_νT, lbm_g, lbm_σ, lbm_σT, lbm_u, lbm_T, lbm_Q, lbm_q, lbm_Λ, lbm_evap, lbm_S, lbm_s, lbm_rad, lbm_αT, σ_SB
 
 include("flags.jl")
 export TYPE_S, TYPE_E, TYPE_T, TYPE_F, TYPE_I, TYPE_G, TYPE_H, TYPE_MS
@@ -26,8 +26,9 @@ export attach
 include("domain.jl")
 export Domain
 export ρ, u, F, τ, msrc, mp
-export T, Q, htc, fs, thermal_k, thermal_k_s, thermal_k_l, enthalpy, heat_source, cell_enthalpy
+export T, Q, htc, fs, thermal_k, thermal_k_s, thermal_k_l, enthalpy, heat_source, cell_enthalpy, metal_mass
 export energy_budget, reset_energy_budget!
+export mass_budget, reset_mass_budget!
 export get_N
 export increment_time_step!
 
