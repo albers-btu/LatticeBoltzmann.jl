@@ -39,6 +39,7 @@ mutable struct Model{
 
     @static if SURFACE
         phi::MemoryContainer{CType, Aρ}
+        msrc::MemoryContainer{CType, Aρ}
         cached_surface_0_even!::Any
         cached_surface_0_odd!::Any
         cached_surface_1!::Any
@@ -283,6 +284,8 @@ function Model(
     @static if SURFACE
         buffers_ϕ = [ϕ(domains[d]) for d in 1:D]
         ϕc = attach(buffers_ϕ, Nx, Ny, Nz, Dx, Dy, Dz, "phi")
+        buffers_msrc = [msrc(domains[d]) for d in 1:D]
+        msrcc = attach(buffers_msrc, Nx, Ny, Nz, Dx, Dy, Dz, "msrc")
     end
 
     @static if SURFACE
@@ -295,7 +298,7 @@ function Model(
                 domains,
                 ρc, uc, Fc, fic, fc,
                 Tc, Qc, hc, fsc,
-                ϕc,
+                ϕc, msrcc,
                 cached_surface_0_even,
                 cached_surface_0_odd,
                 cached_surface_1,
@@ -323,7 +326,7 @@ function Model(
                 Dx, Dy, Dz,
                 domains,
                 ρc, uc, Fc, fic, fc,
-                ϕc,
+                ϕc, msrcc,
                 cached_surface_0_even,
                 cached_surface_0_odd,
                 cached_surface_1,
@@ -417,6 +420,7 @@ end
 
 @static if SURFACE
     σ(model::Model) = model.domains[1].σ
+    msrc(model::Model) = model.msrc
 end
 
 function warn_lattice_stability(
@@ -517,6 +521,7 @@ function export!(model::Model; dir::AbstractString="output")
         vtk["flags"] = flags3
         @static if SURFACE
             vtk["phi"] = reshape(Float32.(Array(domain.ϕ.data)), Nx, Ny, Nz)
+            vtk["S"] = reshape(Float32.(si_S.(Ref(U), Array(domain.msrc.data), ρ_host)), Nx, Ny, Nz)
         end
         @static if TEMPERATURE
             vtk["T"] = reshape(Float32.(si_T.(Ref(U), Array(domain.T.data))), Nx, Ny, Nz)
@@ -617,7 +622,7 @@ function step!(model::Model)
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
                    domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                   domain.ϕ.data, domain.fs.data,
+                   domain.ϕ.data, domain.fs.data, domain.msrc.data,
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,

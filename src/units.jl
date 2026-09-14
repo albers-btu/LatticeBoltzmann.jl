@@ -60,6 +60,13 @@ lbm_Q(U::Units, si_Q, ρlat=1)          = si_Q / (si_ρ(U, ρlat) * U.cp * U.K /
 lbm_Q(U::Units, Q::Quantity, ρlat=1)   = lbm_Q(U, ustrip(u"W/m^3", Q), ρlat)
 lbm_q(U::Units, si_q, ρlat=1)          = si_q / (si_ρ(U, ρlat) * U.cp * U.K * U.m / U.s)
 lbm_q(U::Units, q::Quantity, ρlat=1)   = lbm_q(U, ustrip(u"W/m^2", q), ρlat)
+# volumetric mass source kg/m³/s → lattice Δmass/(ρ Δt)
+lbm_S(U::Units, si_S, ρlat=1)          = si_S * U.s / si_ρ(U, ρlat)
+lbm_S(U::Units, S::Quantity, ρlat=1)   = lbm_S(U, ustrip(u"kg/m^3/s", S), ρlat)
+si_S(U::Units, Slat, ρlat=1)           = Slat * si_ρ(U, ρlat) / U.s
+# surface mass flux kg/m²/s → lattice Δmass/(ρ Δt) if deposited in one cell
+lbm_s(U::Units, si_s, ρlat=1)          = si_s * U.s / (si_ρ(U, ρlat) * U.m)
+lbm_s(U::Units, s::Quantity, ρlat=1)   = lbm_s(U, ustrip(u"kg/m^2/s", s), ρlat)
 # latent heat L [J/kg] → lattice Λ = L/(cp K) (temperature units)
 lbm_Λ(U::Units, L)                     = L / (U.cp * U.K)
 lbm_Λ(U::Units, L::Quantity)           = lbm_Λ(U, ustrip(u"J/kg", L))

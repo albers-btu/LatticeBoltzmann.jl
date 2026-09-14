@@ -36,6 +36,7 @@ mutable struct Domain{
         ϕ::Memory{CType, Aρ}
         mass::Memory{CType, Aρ}
         massex::Memory{CType, Aρ}
+        msrc::Memory{CType, Aρ}  # mass source Δmass/(ρ Δt); 0 → none
     end
 
     @static if TEMPERATURE
@@ -117,6 +118,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
 
         massex = Memory(AT{CType}(undef, N))
         fill!(massex.data, zero(CType))
+
+        msrc = Memory(AT{CType}(undef, N))
+        fill!(msrc.data, zero(CType))
     end
 
     @static if TEMPERATURE
@@ -147,7 +151,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                ϕ, mass, massex,
+                ϕ, mass, massex, msrc,
                 αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v,
                 UInt64(0)
@@ -160,7 +164,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                ϕ, mass, massex,
+                ϕ, mass, massex, msrc,
                 UInt64(0)
             )
         end
@@ -203,6 +207,7 @@ flags(domain::Domain) = domain.flags
     ϕ(domain::Domain) = domain.ϕ
     mass(domain::Domain) = domain.mass
     massex(domain::Domain) = domain.massex
+    msrc(domain::Domain) = domain.msrc
 end
 
 @static if TEMPERATURE

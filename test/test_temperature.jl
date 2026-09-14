@@ -685,3 +685,65 @@ end
     @test M0 > 10
     @test M1 < M0 - 0.5f0
 end
+
+@testset "mass source grows a bead" begin
+    @test SURFACE
+    Nx, Ny, Nz = 16, 8, 20
+    Hfill = 12
+    Tm = 1.0f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α = 0.2f0, β = 0.0f0, fz = 0.0f0, σ = 0.0f0,
+                  Λ = 0.0f0, T_avg = Tm, backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = fill(Tm, Nx * Ny * Nz)
+    fsh = zeros(Float32, Nx * Ny * Nz)
+    Sh = zeros(Float32, Nx * Ny * Nz)
+    xc, yc = Nx ÷ 2, Ny ÷ 2
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+            if z >= Hfill - 1
+                dx, dy = Float32(x - xc), Float32(y - yc)
+                Sh[n] = 0.008f0 * exp(-(dx * dx + dy * dy) / 8.0f0)
+            end
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    copyto!(model.domains[1].msrc.data, Sh)
+    LatticeBoltzmann.initialize!(model)
+    fl = Array(model.domains[1].flags.data)
+    Sh2 = Array(model.domains[1].msrc.data)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if (fl[n] & TYPE_SU) == TYPE_I
+            dx, dy = Float32(x - xc), Float32(y - yc)
+            Sh2[n] = 0.008f0 * exp(-(dx * dx + dy * dy) / 8.0f0)
+        end
+    end
+    copyto!(model.domains[1].msrc.data, Sh2)
+    M0 = sum(Array(model.domains[1].mass.data))
+    run!(model, 800)
+    LatticeBoltzmann.moments!(model)
+    M1 = sum(Array(model.domains[1].mass.data))
+    ϕA = Array(model.domains[1].ϕ.data)
+    fl = Array(model.domains[1].flags.data)
+    function fill_z(x, y)
+        for z in (Nz - 1):-1:2
+            n = lbm_n(x, y, z, Nx, Ny)
+            su = fl[n] & TYPE_SU
+            if su == TYPE_I || (su == TYPE_F && ϕA[n] > 0.05f0)
+                return Float32(z - 1) + ϕA[n]
+            end
+        end
+        return 0.0f0
+    end
+    hC = fill_z(xc, yc)
+    hE = fill_z(3, yc)
+    @info "mass source bead" M0 M1 hC hE
+    @test M1 > M0 + 1
+    @test hC > hE + 0.3f0
+end
