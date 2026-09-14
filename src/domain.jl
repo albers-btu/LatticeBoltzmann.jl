@@ -243,6 +243,53 @@ end
         CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))
     thermal_k_s(domain::Domain{CType}) where CType = CType(0.5) * domain.α_s
     thermal_k_l(domain::Domain{CType}) where CType = CType(0.5) * domain.α_l
+
+    # Σ ϕ (T + Λ(1-fs)) on metal, plus mp T_p. TYPE_S omitted.
+    function enthalpy(domain::Domain{CType}) where {CType}
+        flags = Array(domain.flags.data)
+        TA = Array(domain.T.data)
+        fsA = Array(domain.fs.data)
+        Λ = domain.Λ
+        @static if SURFACE
+            ϕA = Array(domain.ϕ.data)
+            mpA = Array(domain.mp.data)
+            Tp = domain.T_p
+        end
+        s = 0.0
+        @inbounds for n in eachindex(flags)
+            fl = flags[n]
+            (fl & TYPE_S) != 0x00 && continue
+            @static if SURFACE
+                su = fl & TYPE_SU
+                if su == TYPE_F || su == TYPE_I
+                    fill = ϕA[n]
+                    fill < zero(CType) && (fill = zero(CType))
+                    s += Float64(fill) * Float64(cell_enthalpy(TA[n], fsA[n], Λ))
+                end
+                s += Float64(mpA[n]) * Float64(Tp)
+            else
+                s += Float64(cell_enthalpy(TA[n], fsA[n], Λ))
+            end
+        end
+        return CType(s)
+    end
+
+    # Instantaneous Σ Q on cells that collide T (F/I, or non-solid).
+    function heat_source(domain::Domain{CType}) where {CType}
+        flags = Array(domain.flags.data)
+        QA = Array(domain.Q.data)
+        s = 0.0
+        @inbounds for n in eachindex(flags)
+            fl = flags[n]
+            (fl & TYPE_S) != 0x00 && continue
+            @static if SURFACE
+                su = fl & TYPE_SU
+                (su == TYPE_F || su == TYPE_I) || continue
+            end
+            s += Float64(QA[n])
+        end
+        return CType(s)
+    end
 end
 
 τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + CType(1) / CType(2)

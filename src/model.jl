@@ -468,6 +468,8 @@ u(model::Model) = model.u
     thermal_k(model::Model) = thermal_k(model.domains[1])
     thermal_k_s(model::Model) = thermal_k_s(model.domains[1])
     thermal_k_l(model::Model) = thermal_k_l(model.domains[1])
+    enthalpy(model::Model) = mapreduce(enthalpy, +, model.domains)
+    heat_source(model::Model) = mapreduce(heat_source, +, model.domains)
 end
 
 @static if SURFACE

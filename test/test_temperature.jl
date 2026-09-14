@@ -345,6 +345,9 @@ end
     T, fl = LatticeBoltzmann.invert_enthalpy(Tm - 0.1f0, Tm, Tm, Λ)
     @test fl == 0
     @test T ≈ Tm - 0.1f0
+    @test LatticeBoltzmann.cell_enthalpy(Tm - 0.1f0, 1.0f0, Λ) ≈ Tm - 0.1f0
+    @test LatticeBoltzmann.cell_enthalpy(Tm, 0.0f0, Λ) ≈ Tm + Λ
+    @test LatticeBoltzmann.cell_enthalpy(Tm, 0.6f0, Λ) ≈ Tm + Λ * 0.4f0
     T, fl = LatticeBoltzmann.invert_enthalpy(Tm + 0.3f0, Tm, Tm, Λ)
     @test T ≈ Tm
     @test fl ≈ 0.3f0 / Λ
@@ -480,6 +483,72 @@ end
     @test isapprox(mass1, mass0; rtol=0.02)
     @test Tmax < Tm
     @test all(isfinite, TA)
+end
+
+# Periodic TYPE_F box: wrap_coord, no walls, no gas. Closed for energy.
+function _periodic_T_box(Nx, Ny, Nz; ν=0.1f0, α=0.2f0, Λ=0.0f0, Qv=0.0f0,
+                         T0=1.0f0, amp=0.0f0, Tm=1.0f0)
+    model = Model(Nx, Ny, Nz, ν; α=α, fz=0, σ=0, Λ=Λ, Ts=Tm, Tl=Tm,
+                  T_avg=Tm, backend=CPU(), workgroup=64)
+    N = Nx * Ny * Nz
+    host = fill(TYPE_F, N)
+    Th = fill(T0, N)
+    fsh = ones(Float32, N)
+    Qh = fill(Qv, N)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        Th[n] = T0 + amp * sin(2.0f0 * Float32(π) * Float32(x) / Float32(Nx))
+        fsh[n] = LatticeBoltzmann.fs_from_T(Th[n], Tm, Tm)
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    copyto!(model.domains[1].Q.data, Qh)
+    LatticeBoltzmann.initialize!(model)
+    return model
+end
+
+@testset "closed energy: periodic box conserves H" begin
+    @test TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 8
+    model = _periodic_T_box(Nx, Ny, Nz; amp=0.2f0)
+    E0 = enthalpy(model)
+    run!(model, 80)
+    E1 = enthalpy(model)
+    @info "closed energy Q=0" E0 E1
+    @test isapprox(E1, E0; rtol=2.0f-5, atol=2.0f-4)
+end
+
+@testset "closed energy: ΔH equals ΣQ" begin
+    @test TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 8
+    Qv = 5.0f-4
+    nsteps = 40
+    model = _periodic_T_box(Nx, Ny, Nz; Qv=Qv, amp=0.1f0)
+    E0 = enthalpy(model)
+    Qin = heat_source(model)
+    @test Qin ≈ Qv * Nx * Ny * Nz
+    run!(model, nsteps)
+    E1 = enthalpy(model)
+    @info "closed energy Q" E0 E1 ΔH=(E1-E0) nQ=(nsteps * Qin)
+    @test isapprox(E1 - E0, nsteps * Qin; rtol=2.0f-4, atol=2.0f-3)
+end
+
+@testset "closed energy: latent heating still closes" begin
+    @test TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 8
+    Tm, Λ, Qv = 1.0f0, 0.4f0, 2.0f-3
+    nsteps = 50
+    model = _periodic_T_box(Nx, Ny, Nz; Λ=Λ, Qv=Qv, T0=0.95f0, amp=0.0f0, Tm=Tm)
+    E0 = enthalpy(model)
+    Qin = heat_source(model)
+    run!(model, nsteps)
+    E1 = enthalpy(model)
+    d = model.domains[1]
+    fsA = Array(d.fs.data)
+    @info "closed energy latent" E0 E1 ΔH=(E1-E0) nQ=(nsteps * Qin) fsmin=minimum(fsA)
+    @test isapprox(E1 - E0, nsteps * Qin; rtol=5.0f-4, atol=5.0f-3)
+    @test E1 > E0
 end
 
 @testset "Enthalpy Stefan melting vs Neumann" begin

@@ -319,6 +319,11 @@ end
     return (Tl - Tn) / Δ
 end
 
+# Specific enthalpy in lattice T: H = T + Λ f_l, f_l = 1 - fs.
+@inline function cell_enthalpy(Tn::CType, fsn::CType, Λ::CType) where {CType}
+    return Tn + Λ * (one(CType) - fsn)
+end
+
 # H = T + Λ f_l, Λ = L/cp in lattice T. Invert to (T, f_l).
 @inline function invert_enthalpy(H::CType, Ts::CType, Tl::CType, Λ::CType) where {CType}
     ΔTm = Tl - Ts

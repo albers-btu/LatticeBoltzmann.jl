@@ -81,6 +81,8 @@ lbm_s(U::Units, s::Quantity, ρlat=1)   = lbm_s(U, ustrip(u"kg/m^2/s", s), ρlat
 # latent heat L [J/kg] → lattice Λ = L/(cp K) (temperature units)
 lbm_Λ(U::Units, L)                     = L / (U.cp * U.K)
 lbm_Λ(U::Units, L::Quantity)           = lbm_Λ(U, ustrip(u"J/kg", L))
+# Σ cell enthalpy (lattice T·cell) → J. One cell volume is m³.
+si_enthalpy(U::Units, Hlat, ρlat=1)    = si_ρ(U, ρlat) * U.cp * U.K * U.m^3 * Hlat
 
 const R_GAS = 8.314462618          # J/mol/K
 const σ_SB  = 5.670374419e-8       # W/m²/K⁴
