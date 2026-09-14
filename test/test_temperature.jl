@@ -33,6 +33,43 @@ function neumann_lambda_two_phase(Ste_l::Float32, Ste_s::Float32, κs_over_κl::
     return λ
 end
 
+@testset "solid walls do not impose Tm" begin
+    @test TEMPERATURE && SURFACE
+    Nx, Ny, Nz = 12, 12, 16
+    Hfill = 10
+    Tcold = 0.2f0
+    Tm = 1.0f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.2f0, Ts=Tm, Tl=Tm,
+                  T_avg=Tm, backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx*Ny*Nz)
+    Th = fill(Tcold, Nx*Ny*Nz)
+    fsh = ones(Float32, Nx*Ny*Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z==1 || z==Nz || x==1 || x==Nx || y==1 || y==Ny
+            host[n] = TYPE_S
+        elseif z == 2
+            host[n] = TYPE_F | TYPE_T
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    LatticeBoltzmann.initialize!(model)
+    run!(model, 80)
+    LatticeBoltzmann.moments!(model)
+    T = Array(model.domains[1].T.data)
+    nbot = lbm_n(6, 6, 2, Nx, Ny)
+    nedge = lbm_n(2, 2, 2, Nx, Ny)
+    nwall = lbm_n(6, 6, 1, Nx, Ny)
+    @info "cold walls" Tbot=T[nbot] Tedge=T[nedge] Twall=T[nwall]
+    @test T[nbot] ≈ Tcold atol=0.02f0
+    @test T[nedge] ≈ Tcold atol=0.02f0
+    @test T[nwall] ≈ Tcold atol=0.02f0
+end
+
 @testset "TEMPERATURE Dirichlet conduction" begin
     @test TEMPERATURE
     Nx, Ny, Nz = 8, 8, 16
@@ -329,8 +366,57 @@ end
     @test LatticeBoltzmann.blend_phase(0.0f0, 0.4f0, 0.2f0) ≈ 0.2f0
     @test LatticeBoltzmann.blend_phase(1.0f0, 0.4f0, 0.2f0) ≈ 0.4f0
     @test LatticeBoltzmann.blend_phase(0.5f0, 0.4f0, 0.2f0) ≈ 0.3f0
+    @test LatticeBoltzmann.radiation_dT(2.0f0, 0.01f0, 1.0f0) ≈ 0.01f0 * (16.0f0 - 1.0f0)
+    @test LatticeBoltzmann.radiation_dT(1.0f0, 0.01f0, 1.0f0) == 0
+    @test LatticeBoltzmann.radiation_dT(2.0f0, 0.0f0, 1.0f0) == 0
+    Qr = LatticeBoltzmann.radiation_dT(1.2f0, 10.0f0, 1.0f0)
+    @test Qr ≈ 0.2f0 atol=1.0f-6
     ωT = LatticeBoltzmann.omega_T_from_alpha(0.2f0)
     @test isapprox(LatticeBoltzmann.thermal_conductivity(ωT), 0.1f0; rtol=1.0f-5)
+end
+
+@testset "surface radiation cools TYPE_I" begin
+    @test SURFACE && TEMPERATURE
+    Nx, Ny, Nz = 12, 8, 16
+    Hfill = 10
+    Tinf, Thot = 1.0f0, 1.8f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.0f0,
+                  T_avg=Tinf, C_rad=0.02f0, T_rad=Tinf,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx*Ny*Nz)
+    Th = fill(Thot, Nx*Ny*Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z==1 || z==Nz || x==1 || x==Nx || y==1 || y==Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    LatticeBoltzmann.initialize!(model)
+    fl = Array(model.domains[1].flags.data)
+    T0a = Array(model.domains[1].T.data)
+    s0 = 0.0f0; nI = 0
+    for n in eachindex(fl)
+        if (fl[n] & TYPE_SU) == TYPE_I
+            s0 += T0a[n]; nI += 1
+        end
+    end
+    @test nI > 0
+    T0 = s0 / nI
+    run!(model, 25)
+    LatticeBoltzmann.moments!(model)
+    T1a = Array(model.domains[1].T.data)
+    s1 = 0.0f0
+    for n in eachindex(fl)
+        (fl[n] & TYPE_SU) == TYPE_I && (s1 += T1a[n])
+    end
+    T1 = s1 / nI
+    @info "radiation TYPE_I" T0 T1 nI
+    @test T1 < T0 - 0.02f0
+    @test T1 > Tinf
 end
 
 @testset "Enthalpy Stefan melting vs Neumann" begin
@@ -922,4 +1008,34 @@ end
     @test QI > QF
     @test 0.20 * las.P < Pabs < 1.05 * las.P
     @test abs(Pabs - A0 * las.P) / las.P < 0.15
+end
+
+@testset "export VTK survives NaN/Inf and empty ρ" begin
+    Nx, Ny, Nz = 8, 8, 8
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0, T_avg=1.0f0,
+                  backend=CPU(), workgroup=64)
+    fill!(model.domains[1].flags.data, TYPE_F)
+    model.domains[1].flags.data[1] = TYPE_S
+    model.domains[1].T.data[2] = NaN32
+    model.domains[1].T.data[3] = Inf32
+    model.domains[1].ρ.data[4] = 0
+    model.domains[1].mp.data[4] = 1.0f0
+    model.domains[1].Q.data[5] = Inf32
+    mktempdir() do d
+        export!(model; dir=d)
+        @test isfile(joinpath(d, "lbm.pvd"))
+        @test isfile(joinpath(d, "lbm_00000000.vti"))
+        pvd = read(joinpath(d, "lbm.pvd"), String)
+        @test occursin("timestep=", pvd)
+        @test !occursin("nan", lowercase(pvd))
+        vti = read(joinpath(d, "lbm_00000000.vti"), String)
+        @test occursin("Scalars=\"T\"", vti) || occursin("Scalars='T'", vti)
+    end
+    ρ = ones(Float32, 8)
+    ρ[1] = 0
+    ρ[2] = NaN32
+    mp = Float32[1, 1, 0, 0, 0, 0, 0, 0]
+    B = LatticeBoltzmann._vtk_fillfrac(mp, ρ, 2, 2, 2)
+    @test all(isfinite, B)
+    @test B[1, 1, 1] == 0
 end

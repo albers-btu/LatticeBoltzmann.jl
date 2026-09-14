@@ -65,6 +65,8 @@ mutable struct Domain{
         C_hk::CType           # Hertz–Knudsen prefactor (lattice)
         p0v::CType            # p_atm (lattice)
         β_v::CType            # L_v/(R_sp K) Clausius–Clapeyron
+        C_rad::CType          # εσ K³ s/(ρ cp m); Q = C_rad (T^4-T_∞^4); 0 → off
+        T_rad::CType          # far-field T for radiation (lattice)
     end
 
     t::UInt64
@@ -90,6 +92,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     C_hk::CType = zero(CType),
     p0v::CType = zero(CType),
     β_v::CType = zero(CType),
+    C_rad::CType = zero(CType),
+    T_rad::CType = one(CType),
     τ_p::CType = zero(CType),
     T_p::CType = one(CType),
 ) where {CType, SType}
@@ -161,7 +165,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
                 αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
-                Λ_v, T_v, C_hk, p0v, β_v,
+                Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 UInt64(0)
             )
         else
@@ -187,7 +191,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 αT, αs, αl, νs, νl, β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
-                Λ_v, T_v, C_hk, p0v, β_v,
+                Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 UInt64(0)
             )
         else

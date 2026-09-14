@@ -89,6 +89,8 @@ function Model(
     T_v = nothing,
     M = 0.0558,
     p_atm = 101325.0,
+    emissivity = 0.0,
+    T_rad = nothing,
     powder_τ = 0.0,
     powder_T = nothing,
     laser = nothing,
@@ -128,6 +130,10 @@ function Model(
     τp = powder_τ isa Quantity ? CType(ustrip(u"s", powder_τ) / units.s) : CType(powder_τ)
     Tp = powder_T === nothing ? CType(T_avg) :
          powder_T isa Quantity ? CType(lbm_T(units, powder_T)) : CType(powder_T)
+    εr = emissivity isa Quantity ? ustrip(emissivity) : Float64(emissivity)
+    Crad = εr > 0 ? CType(lbm_rad(units, εr)) : zero(CType)
+    Trad = T_rad === nothing ? CType(T_avg) :
+           T_rad isa Quantity ? CType(lbm_T(units, T_rad)) : CType(T_rad)
 
     # @info units
 
@@ -135,6 +141,7 @@ function Model(
                   ν_s=νs, ν_l=νl, β=CType(β), T_avg=CType(T_avg),
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
+                  C_rad=Crad, T_rad=Trad,
                   τ_p=τp, T_p=Tp,
                   laser=laser, powder_jet=powder_jet, CType, SType, scheme, backend, workgroup)
     model.units = units
@@ -163,6 +170,8 @@ function Model(
     C_hk = 0.0f0,
     p0v = 0.0f0,
     β_v = 0.0f0,
+    C_rad = 0.0f0,
+    T_rad = nothing,
     τ_p = 0.0f0,
     T_p = nothing,
     laser = nothing,
@@ -269,6 +278,8 @@ function Model(
             C_hk=CType(C_hk),
             p0v=CType(p0v),
             β_v=CType(β_v),
+            C_rad=CType(C_rad),
+            T_rad=T_rad === nothing ? CType(T_avg) : CType(T_rad),
             τ_p=CType(τ_p),
             T_p=T_p === nothing ? CType(T_avg) : CType(T_p),
         )
@@ -496,6 +507,59 @@ function warn_lattice_stability(
     return nothing
 end
 
+# ParaView 6 / Qt6 `pqDoubleRangeWidget::valueToSliderPos` aborts if the
+# contour/color range is NaN, Inf, or min==max (divide by zero → NaN).
+@inline function _vtk_finite32(x, default=0.0f0)
+    y = Float32(x)
+    return isfinite(y) ? y : default
+end
+
+@inline function _vtk_clamp32(x, lo, hi)
+    y = _vtk_finite32(x)
+    return y < lo ? lo : (y > hi ? hi : y)
+end
+
+function _vtk_scalar(A, Nx, Ny, Nz, f=identity; lo=nothing, hi=nothing)
+    B = Array{Float32}(undef, Nx, Ny, Nz)
+    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        val = _vtk_finite32(f(A[n]))
+        lo !== nothing && val < lo && (val = lo)
+        hi !== nothing && val > hi && (val = hi)
+        B[x, y, z] = val
+    end
+    return B
+end
+
+# T for contours: 0 in gas so the array range is [0, Tmax], not a constant
+# 300 K (min==max crashes the isosurface slider) and not Inf.
+function _vtk_T(Tlat, flags, U, Nx, Ny, Nz)
+    B = Array{Float32}(undef, Nx, Ny, Nz)
+    Tlo = 0.0f0
+    Thi = 20000.0f0
+    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        if (flags[n] & TYPE_SU) == TYPE_G
+            B[x, y, z] = 0.0f0
+        else
+            B[x, y, z] = _vtk_clamp32(si_T(U, Tlat[n]), Tlo, Thi)
+        end
+    end
+    return B
+end
+
+function _vtk_fillfrac(num, den, Nx, Ny, Nz)
+    B = Array{Float32}(undef, Nx, Ny, Nz)
+    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        ρn = Float64(den[n])
+        mn = Float64(num[n])
+        v = (isfinite(mn) && isfinite(ρn) && ρn > 0) ? _vtk_finite32(mn / ρn) : 0.0f0
+        B[x, y, z] = v < 0.0f0 ? 0.0f0 : (v > 10.0f0 ? 10.0f0 : v)
+    end
+    return B
+end
+
 function export!(model::Model; dir::AbstractString="output")
     start_run_log!(dir)
     model.initialized || initialize!(model)
@@ -512,8 +576,9 @@ function export!(model::Model; dir::AbstractString="output")
     flags_host = Array(domain.flags.data)
 
     umax = maximum(@views hypot.(u_host[:, 1], u_host[:, 2], u_host[:, 3]))
-    if any(!isfinite, ρ_host) || any(!isfinite, u_host)
-        @warn "non-finite ρ/u at t=$t - simulation has likely diverged"
+    nbad = count(!isfinite, ρ_host) + count(!isfinite, u_host)
+    if nbad > 0
+        @warn "non-finite ρ/u at t=$t ($nbad values) — writing 0 in VTK" nbad
     elseif umax > 0.4f0
         @warn "max |u|=$umax at t=$t exceeds ≈0.4 (cs=$(1/sqrt(3))); unstable"
     elseif umax > 0.15f0
@@ -522,36 +587,53 @@ function export!(model::Model; dir::AbstractString="output")
 
     U = model.units
     dx = Float32(U.m)
-    t_si = si_t(U, t)
+    isfinite(dx) && dx > 0 || (dx = 1.0f0)
+    t_si = Float64(si_t(U, t))
+    isfinite(t_si) || (t_si = Float64(t))
 
-    xs = range(0f0, step=dx, length=Nx)
-    ys = range(0f0, step=dx, length=Ny)
-    zs = range(0f0, step=dx, length=Nz)
+    xs = range(0.0f0, step=dx, length=Nx)
+    ys = range(0.0f0, step=dx, length=Ny)
+    zs = range(0.0f0, step=dx, length=Nz)
 
-    ρ3     = reshape(Float32.(si_ρ.(Ref(U), ρ_host)), Nx, Ny, Nz)
-    p3     = reshape(Float32.(si_p.(Ref(U), ρ_host)), Nx, Ny, Nz)
-    ux     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 1))), Nx, Ny, Nz)
-    uy     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 2))), Nx, Ny, Nz)
-    uz     = reshape(Float32.(si_u.(Ref(U), view(u_host, :, 3))), Nx, Ny, Nz)
-    flags3 = reshape(flags_host, Nx, Ny, Nz)
+    ρ3 = _vtk_scalar(ρ_host, Nx, Ny, Nz, ρ -> si_ρ(U, ρ); lo=0.0f0, hi=1.0f7)
+    p3 = _vtk_scalar(ρ_host, Nx, Ny, Nz, ρ -> si_p(U, ρ); lo=-1.0f12, hi=1.0f12)
+    ux = _vtk_scalar(view(u_host, :, 1), Nx, Ny, Nz, u -> si_u(U, u); lo=-1.0f5, hi=1.0f5)
+    uy = _vtk_scalar(view(u_host, :, 2), Nx, Ny, Nz, u -> si_u(U, u); lo=-1.0f5, hi=1.0f5)
+    uz = _vtk_scalar(view(u_host, :, 3), Nx, Ny, Nz, u -> si_u(U, u); lo=-1.0f5, hi=1.0f5)
+    # Int32: Qt6 color bars have asserted on UInt8 ranges.
+    flags3 = reshape(Int32.(flags_host), Nx, Ny, Nz)
 
     pvd_path = joinpath(dir, "lbm")
-    pvd = paraview_collection(pvd_path; append = isfile(pvd_path * ".pvd"))
+    # t=0 starts a new collection so a re-run does not append duplicate
+    # timesteps into an old .pvd (non-monotonic time also trips Qt6).
+    pvd = paraview_collection(pvd_path; append = t > 0 && isfile(pvd_path * ".pvd"))
 
     vtk_grid(joinpath(dir, @sprintf("lbm_%08d", t)), xs, ys, zs) do vtk
+        # T/phi first and marked as active Scalars. ParaView 6 + Qt6 aborts in
+        # pqDoubleRangeWidget when Contour is applied to a constant field
+        # (rho, Q, S, mp are often min==max).
+        @static if TEMPERATURE
+            vtk["T"] = _vtk_T(Array(domain.T.data), flags_host, U, Nx, Ny, Nz)
+            vtk["fs"] = _vtk_scalar(Array(domain.fs.data), Nx, Ny, Nz; lo=0.0f0, hi=1.0f0)
+        end
+        @static if SURFACE
+            vtk["phi"] = _vtk_scalar(Array(domain.ϕ.data), Nx, Ny, Nz; lo=0.0f0, hi=2.0f0)
+        end
+        vtk["u"] = (ux, uy, uz)
         vtk["rho"] = ρ3
         vtk["p"] = p3
-        vtk["u"] = (ux, uy, uz)
         vtk["flags"] = flags3
         @static if SURFACE
-            vtk["phi"] = reshape(Float32.(Array(domain.ϕ.data)), Nx, Ny, Nz)
-            vtk["S"] = reshape(Float32.(si_S.(Ref(U), Array(domain.msrc.data), ρ_host)), Nx, Ny, Nz)
-            vtk["mp"] = reshape(Float32.(Array(domain.mp.data) ./ max.(ρ_host, Float32(eps(Float32)))), Nx, Ny, Nz)
+            vtk["mp"] = _vtk_fillfrac(Array(domain.mp.data), ρ_host, Nx, Ny, Nz)
+            vtk["S"] = _vtk_scalar(Array(domain.msrc.data), Nx, Ny, Nz, S -> si_S(U, S, 1); lo=-1.0f6, hi=1.0f6)
         end
         @static if TEMPERATURE
-            vtk["T"] = reshape(Float32.(si_T.(Ref(U), Array(domain.T.data))), Nx, Ny, Nz)
-            vtk["Q"] = reshape(Float32.(si_Q.(Ref(U), Array(domain.Q.data), ρ_host)), Nx, Ny, Nz)
-            vtk["fs"] = reshape(Float32.(Array(domain.fs.data)), Nx, Ny, Nz)
+            vtk["Q"] = _vtk_scalar(Array(domain.Q.data), Nx, Ny, Nz, Qlat -> si_Q(U, Qlat, 1); lo=-1.0f15, hi=1.0f15)
+            vtk[VTKPointData()] = ("Scalars" => "T", "Vectors" => "u")
+        elseif SURFACE
+            vtk[VTKPointData()] = ("Scalars" => "phi", "Vectors" => "u")
+        else
+            vtk[VTKPointData()] = ("Vectors" => "u",)
         end
         pvd[t_si] = vtk
     end
@@ -664,7 +746,7 @@ function step!(model::Model)
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
-                   domain.τ_p, domain.T_p,
+                   domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
                    Nd, Nx, Ny, Nz; ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
@@ -677,6 +759,7 @@ function step!(model::Model)
                    domain.Λ, domain.Ts, domain.Tl, domain.K0,
                    domain.α_s, domain.α_l, domain.ν_s, domain.ν_l,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
+                   domain.C_rad, domain.T_rad,
                    Nd, Nx, Ny, Nz; ndrange = N)
         end
 

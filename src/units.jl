@@ -71,7 +71,16 @@ lbm_s(U::Units, s::Quantity, ρlat=1)   = lbm_s(U, ustrip(u"kg/m^2/s", s), ρlat
 lbm_Λ(U::Units, L)                     = L / (U.cp * U.K)
 lbm_Λ(U::Units, L::Quantity)           = lbm_Λ(U, ustrip(u"J/kg", L))
 
-const R_GAS = 8.314462618  # J/mol/K
+const R_GAS = 8.314462618          # J/mol/K
+const σ_SB  = 5.670374419e-8       # W/m²/K⁴
+
+# Q_lat = C_rad (T_lat^4 - T_∞^4) for a one-cell surface, q = ε σ T^4.
+function lbm_rad(U::Units{T}, ε, ρlat=1) where {T}
+    εf = ε isa Quantity ? ustrip(ε) : Float64(ε)
+    C = εf * σ_SB * Float64(U.K)^3 * Float64(U.s) /
+        (Float64(si_ρ(U, ρlat)) * Float64(U.cp) * Float64(U.m))
+    return T(C)
+end
 
 # Hertz–Knudsen / Clausius–Clapeyron lattice scalars.
 # Λ_v = L_v/(cp K), β_v = L_v/(R_sp K), p0_lat, C_hk for ṁ_lat = C_hk p_lat/√T.

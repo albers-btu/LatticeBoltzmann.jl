@@ -4,6 +4,11 @@
 # symmetric in y. Set `n_layers` to retrace the bead.
 # Evaporation cooling, mass loss, and recoil are on (latent_v, T_v).
 #
+# ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
+# isosurface slider. Open lbm.pvd, colour by T (or phi), then Contour.
+# Type the isosurface in the text box (e.g. T=1673, or phi=0.5 for the
+# free surface). Do not drag the slider if the range looks empty.
+#
 #   SURFACE = true, TEMPERATURE = true, VOLUME_FORCE = true
 using LatticeBoltzmann
 using Printf
@@ -138,6 +143,7 @@ model = Model(Nx, Ny, Nz, units;
               Ts = si_Tm, Tl = si_Tm, K0 = si_K0,
               latent_v = si_Lv, T_v = si_Tv, M = si_M,
               T_avg = Float32(lbm_T(units, si_Tm)),
+              emissivity = 0.4, T_rad = si_T_init,
               powder_τ = si_powder_τ, powder_T = si_T_init,
               backend = CUDABackend())
 
@@ -175,6 +181,13 @@ for z in 1:Nz, y in 1:Ny, x in 1:Nx
     n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
     if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
         host[n] = TYPE_S
+        Th[n] = T_init
+    elseif z == 2 && z <= Hfill
+        # cold Dirichlet plate: D3Q7 AA does not bounce the -z wall, so the
+        # pad bottom would otherwise drift toward Tm.
+        host[n] = TYPE_F | TYPE_T
+        Th[n] = T_init
+        fsh[n] = 1
     elseif z <= Hfill
         host[n] = TYPE_F
         Th[n] = T_init

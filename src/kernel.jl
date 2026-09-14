@@ -212,6 +212,17 @@ end
     return CType(0.5) * Tn * ucomp + CType(0.125) * (Tn - one(CType))
 end
 
+# TYPE_S never collides. Uninitialized gi=0 is T=1 (lattice Tm). Keep geq(T[n],0)
+# on solids so bounce-back is Dirichlet at the stored wall temperature.
+@inline function store_geq_local!(gi, n, Tn::CType, N::Int) where {CType}
+    gi[f_index(n, 1, N)] = eltype(gi)(geq_T_rest(Tn))
+    gax = geq_T_axis(Tn, zero(CType))
+    @inbounds for i in 2:7
+        gi[f_index(n, i, N)] = eltype(gi)(gax)
+    end
+    return nothing
+end
+
 @inline function thermal_conductivity(ω_T::CType) where {CType}
     return CType(0.25) * (one(CType) / ω_T - CType(0.5))
 end
@@ -398,6 +409,18 @@ end
     return Qe, mdot
 end
 
+# Net emission q = εσ(T^4-T_∞^4) as lattice dT/step in one interface cell.
+# C_rad = 0 → off. Capped so T cannot cross T_inf in one collide.
+@inline function radiation_dT(Tn::CType, C_rad::CType, T_inf::CType) where {CType}
+    C_rad <= zero(CType) && return zero(CType)
+    T2 = Tn * Tn
+    I2 = T_inf * T_inf
+    Qr = C_rad * (T2 * T2 - I2 * I2)
+    Δ = Tn - T_inf
+    (Qr > zero(CType) && Δ > zero(CType)) || return zero(CType)
+    return ifelse(Qr > Δ, Δ, Qr)
+end
+
 # Anisimov recoil: F = p_r n, p_r = 0.54 p_sat, n = ∇ϕ/|∇ϕ| (into liquid).
 # Λ_v = 0 → off. |F| capped so Guo Δu stays O(0.1).
 @inline function recoil_force(
@@ -433,6 +456,7 @@ end
     fx::CType, fy::CType, fz::CType,
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
     x::Int, y::Int, z::Int, Nx::Int, Ny::Int, Nz::Int, N::Int, n::Int,
     ::Type{CType}
 ) where {odd, CType}
@@ -496,13 +520,20 @@ end
     end
 
     @static if SURFACE
-        if !dirichlet && !use_flux && Λ_v > zero(CType) &&
-           (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
+        if !dirichlet && !use_flux && (flagsn & TYPE_SU) == TYPE_I
             Te = Tfield[n]
-            Qe, mevap = evaporative_flux(Te, Λ_v, T_v, C_hk, p0v, β_v)
-            Qn -= Qe
-            Tfield[n] = Te - Qe
-            write_geq && (Tn = Tfield[n])
+            if Λ_v > zero(CType) && !is_solid_fraction(fs[n])
+                Qe, mevap = evaporative_flux(Te, Λ_v, T_v, C_hk, p0v, β_v)
+                Qn -= Qe
+                Te -= Qe
+            end
+            if C_rad > zero(CType)
+                Qr = radiation_dT(Te, C_rad, T_rad)
+                Qn -= Qr
+                Te -= Qr
+            end
+            Tfield[n] = Te
+            write_geq && (Tn = Te)
         end
     end
 
@@ -589,6 +620,9 @@ end
                 u[n, 1] = zero(CType)
                 u[n, 2] = zero(CType)
                 u[n, 3] = zero(CType)
+            end
+            @static if TEMPERATURE
+                store_geq_local!(gi, n, T[n], N)
             end
         else
             uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
@@ -749,6 +783,9 @@ end
         else
             u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
         end
+        @static if TEMPERATURE
+            store_geq_local!(gi, n, T[n], N)
+        end
     elseif (flagsn & TYPE_SU) == TYPE_G
         u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
         ϕn = zero(CType)
@@ -804,6 +841,7 @@ end # SURFACE
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -867,7 +905,7 @@ end # SURFACE
                 fxn, fyn, fzn, _ = collide_temperature!(
                     t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                     fxn, fyn, fzn, fx, fy, fz,
-                    ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
+                    ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType)
             end
             @static if TEMPERATURE
                 νc = blend_phase(fs[n], ν_s, ν_l)
@@ -932,6 +970,7 @@ end
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
     flagsn = flags[n]
@@ -1033,7 +1072,7 @@ end
             fxn, fyn, fzn, _ = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
-                ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
+                ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType)
         end
         @static if TEMPERATURE
             νc = blend_phase(fs[n], ν_s, ν_l)
@@ -1172,10 +1211,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -1186,10 +1226,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n))
 end
 
 end
@@ -1205,7 +1246,7 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    τ_p::CType, T_p::CType,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -1287,7 +1328,7 @@ end
             fxn, fyn, fzn, mevap = collide_temperature!(
                 t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
-                ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, x, y, z, Nx, Ny, Nz, N, n, CType)
+                ωTn, β, T_avg, Λ, Ts, Tl, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType)
             debit != zero(CType) && (Qin[n] += debit)
             if mevap > zero(CType)
                 mass[n] -= mevap * ρn
@@ -1387,11 +1428,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    τ_p::CType, T_p::CType,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -1401,11 +1442,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, ν_s::CType, ν_l::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    τ_p::CType, T_p::CType,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, ν_s, ν_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, N, Nx, Ny, Nz, Int(n))
 end
 
 # Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).
