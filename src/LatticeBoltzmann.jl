@@ -27,6 +27,7 @@ include("domain.jl")
 export Domain
 export ρ, u, F, τ, msrc, mp
 export T, Q, htc, fs, thermal_k, thermal_k_s, thermal_k_l, enthalpy, heat_source, cell_enthalpy, metal_mass
+export dissolved_D
 export energy_budget, reset_energy_budget!
 export mass_budget, reset_mass_budget!
 export get_N
@@ -51,6 +52,7 @@ include("model.jl")
 include("bubble.jl")
 export BubbleTracker, update_bubbles!, bubble_records, set_bubble_n!
 export young_laplace_p, bubble_radius, P_ATM_LAT
+export epstein_plesset_R2
 export Model
 export get_D
 export run!, export!

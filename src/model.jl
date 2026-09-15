@@ -103,6 +103,8 @@ function Model(
     laser = nothing,
     powder_jet = nothing,
     bubbles = nothing,
+    α_c = 0.0,
+    k_H = 0.0,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -117,6 +119,8 @@ function Model(
     Tσl = Tσ === nothing ? CType(T_avg) :
           Tσ isa Quantity ? CType(lbm_T(units, Tσ)) : CType(Tσ)
     α  = CType(lbm_ν(units, α))
+    αc = α_c isa Quantity ? CType(lbm_ν(units, α_c)) :
+         (α_c == 0 ? zero(CType) : CType(lbm_ν(units, α_c)))
     αs = α_s === nothing ? α : CType(lbm_ν(units, α_s))
     αl = α_l === nothing ? α : CType(lbm_ν(units, α_l))
     νs = ν_s === nothing ? ν : CType(lbm_ν(units, ν_s))
@@ -158,7 +162,9 @@ function Model(
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
                   C_rad=Crad, T_rad=Trad,
                   τ_p=τp, T_p=Tp,
-                  laser=laser, powder_jet=powder_jet, bubbles=bubbles, CType, SType, scheme, backend, workgroup)
+                  laser=laser, powder_jet=powder_jet, bubbles=bubbles,
+                  α_c=αc, k_H=CType(k_H),
+                  CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -198,6 +204,8 @@ function Model(
     laser = nothing,
     powder_jet = nothing,
     bubbles = nothing,
+    α_c = 0.0f0,
+    k_H = 0.0f0,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -310,6 +318,8 @@ function Model(
             T_rad=T_rad === nothing ? CType(T_avg) : CType(T_rad),
             τ_p=CType(τ_p),
             T_p=T_p === nothing ? CType(T_avg) : CType(T_p),
+            α_c=CType(α_c),
+            k_H=CType(k_H),
         )
     end
 
@@ -591,6 +601,32 @@ function _vtk_scalar(A, Nx, Ny, Nz, f=identity; lo=nothing, hi=nothing)
     return B
 end
 
+# TYPE_S is stored as ϕ=0, so a 0.5 contour would also trace the box. Paint
+# walls as liquid (1) if they touch F/I, else gas (0), so only the free
+# surface isosurfaces.
+function _vtk_phi(phi, flags, Nx, Ny, Nz)
+    B = Array{Float32}(undef, Nx, Ny, Nz)
+    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        fl = flags[n]
+        if (fl & TYPE_S) != 0x00
+            liquid = false
+            for (cx, cy, cz) in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+                j = src_index(x - 1, y - 1, z - 1, cx, cy, cz, Nx, Ny, Nz)
+                su = flags[j] & TYPE_SU
+                if su == TYPE_F || su == TYPE_I
+                    liquid = true
+                    break
+                end
+            end
+            B[x, y, z] = liquid ? 1.0f0 : 0.0f0
+        else
+            B[x, y, z] = _vtk_clamp32(phi[n], 0.0f0, 2.0f0)
+        end
+    end
+    return B
+end
+
 # T for contours: 0 in gas so the array range is [0, Tmax], not a constant
 # 300 K (min==max crashes the isosurface slider) and not Inf.
 function _vtk_T(Tlat, flags, U, Nx, Ny, Nz)
@@ -677,7 +713,9 @@ function export!(model::Model; dir::AbstractString="output")
             vtk["fs"] = _vtk_scalar(Array(domain.fs.data), Nx, Ny, Nz; lo=0.0f0, hi=1.0f0)
         end
         @static if SURFACE
-            vtk["phi"] = _vtk_scalar(Array(domain.ϕ.data), Nx, Ny, Nz; lo=0.0f0, hi=2.0f0)
+            vtk["phi"] = _vtk_phi(Array(domain.ϕ.data), flags_host, Nx, Ny, Nz)
+            vtk["c"] = _vtk_scalar(Array(domain.c.data), Nx, Ny, Nz; lo=0.0f0, hi=10.0f0)
+            vtk["pgas"] = _vtk_scalar(Array(domain.p_gas.data), Nx, Ny, Nz; lo=0.0f0, hi=2.0f0)
         end
         vtk["u"] = (ux, uy, uz)
         vtk["rho"] = ρ3
@@ -759,8 +797,10 @@ function initialize!(model::Model)
     model.initialized = true
     @static if SURFACE
         for domain in model.domains
+            initialize_dissolved!(model, domain)
             update_bubbles!(model, domain)
         end
+        KernelAbstractions.synchronize(model.backend)
     end
     @static if TEMPERATURE
         reset_energy_budget!(model)
@@ -850,6 +890,7 @@ function step!(model::Model)
                 domain.ρ.data, domain.flags.data, domain.mass.data,
                 domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                 Nd, Nx, Ny, Nz; ndrange = N)
+            advance_dissolved_gas!(model, domain, t_odd)
         end
 
         increment_time_step!(domain, 1)

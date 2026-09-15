@@ -1984,3 +1984,80 @@ end
 end
 
 end
+
+# Dissolved gas: FTCS diffusion + upwind advection, Henry c = k_H p on TYPE_I.
+# nflux = ϕ (c* − c_H) / k_H is the lattice amount added to the bubble.
+# ci[:,1] (index n) holds the diffused c* between the two kernels.
+@static if SURFACE && TEMPERATURE
+
+@inline function _liquid_c(c, flags, j, c0::CType) where {CType}
+    fl = flags[j]
+    ((fl & TYPE_BO) == TYPE_S || (fl & TYPE_SU) == TYPE_G) ? c0 : CType(c[j])
+end
+
+@kernel function dissolved_diffuse_kernel!(
+    cstar, @Const(c), @Const(flags), @Const(u), D::CType, Nx::Int, Ny::Int, Nz::Int
+) where {CType}
+    n = @index(Global)
+    @inbounds begin
+        flagsn = flags[n]
+        su = flagsn & TYPE_SU
+        if (flagsn & TYPE_BO) == TYPE_S || su == TYPE_G
+            cstar[n] = c[n]
+        else
+            n0 = n - 1
+            x = n0 % Nx
+            y = (n0 ÷ Nx) % Ny
+            z = n0 ÷ (Nx * Ny)
+            c0 = CType(c[n])
+            xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+            xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+            yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+            ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+            zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+            zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+            cxp = _liquid_c(c, flags, xp, c0)
+            cxm = _liquid_c(c, flags, xm, c0)
+            cyp = _liquid_c(c, flags, yp, c0)
+            cym = _liquid_c(c, flags, ym, c0)
+            czp = _liquid_c(c, flags, zp, c0)
+            czm = _liquid_c(c, flags, zm, c0)
+            lap = cxp + cxm + cyp + cym + czp + czm - CType(6) * c0
+            ux = u[n, 1]; uy = u[n, 2]; uz = u[n, 3]
+            adv = ux * (ux > 0 ? c0 - cxm : cxp - c0) +
+                  uy * (uy > 0 ? c0 - cym : cyp - c0) +
+                  uz * (uz > 0 ? c0 - czm : czp - c0)
+            cstar[n] = c0 + D * lap - adv
+        end
+    end
+end
+
+@kernel function dissolved_henry_kernel!(
+    c, nflux, @Const(cstar), @Const(flags), @Const(ϕ), @Const(pgas), k_H::CType
+) where {CType}
+    n = @index(Global)
+    @inbounds begin
+        flagsn = flags[n]
+        su = flagsn & TYPE_SU
+        if (flagsn & TYPE_BO) == TYPE_S || su == TYPE_G
+            nflux[n] = zero(CType)
+        else
+            cs = CType(cstar[n])
+            henry = (k_H > zero(CType)) & (su == TYPE_I)
+            if henry
+                cH = k_H * pgas[n]
+                cH = ifelse(cH > CType(1e-8), cH, CType(1e-8))
+                fillc = ϕ[n]
+                fillc = ifelse(fillc > zero(CType),
+                    ifelse(fillc < one(CType), fillc, one(CType)), zero(CType))
+                nflux[n] = fillc * (cs - cH) / k_H
+                c[n] = cH
+            else
+                nflux[n] = zero(CType)
+                c[n] = cs
+            end
+        end
+    end
+end
+
+end

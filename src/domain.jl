@@ -54,6 +54,12 @@ mutable struct Domain{
         τ_p::CType               # powder lifetime (lattice steps); 0 → msrc→mass
         T_p::CType               # powder temperature (lattice)
         p_gas::Memory{CType, Aρ} # lattice gas pressure for reconstruction; p_atm=1/3
+        c::Memory{CType, Aρ}     # dissolved gas (D3Q7; c = 1+Σg)
+        ci::Memory{SType, Afi}
+        nflux::Memory{CType, Aρ} # Henry Δn this step (n-units)
+        bid::Memory{CType, Aρ}   # enclosed bubble id on G/I; 0 = none
+        ω_c::CType               # D3Q7 ω for dissolved; 0 → off
+        k_H::CType               # Henry c = k_H p; 0 → no interface exchange
     end
 
     @static if TEMPERATURE
@@ -130,6 +136,8 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     T_rad::CType = one(CType),
     τ_p::CType = zero(CType),
     T_p::CType = one(CType),
+    α_c::CType = zero(CType),
+    k_H::CType = zero(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
 
@@ -170,6 +178,18 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
 
         p_gas = Memory(AT{CType}(undef, N))
         fill!(p_gas.data, CType(1) / CType(3))
+
+        cmem = Memory(AT{CType}(undef, N))
+        fill!(cmem.data, one(CType))
+        cimem = Memory(AT{SType}(undef, N * 7))
+        fill!(cimem.data, zero(SType))
+        nflux = Memory(AT{CType}(undef, N))
+        fill!(nflux.data, zero(CType))
+        bid = Memory(AT{CType}(undef, N))
+        fill!(bid.data, zero(CType))
+        ω_c = α_c > zero(CType) ?
+            one(CType) / (CType(2) * α_c + CType(1) / CType(2)) : zero(CType)
+        kH = CType(k_H)
     end
 
     @static if TEMPERATURE
@@ -207,6 +227,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p), p_gas,
+                cmem, cimem, nflux, bid, ω_c, kH,
                 αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
@@ -223,6 +244,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp,
                 CType(τ_p), CType(T_p), p_gas,
+                cmem, cimem, nflux, bid, ω_c, kH,
                 UInt64(0)
             )
         end
@@ -269,6 +291,10 @@ flags(domain::Domain) = domain.flags
     msrc(domain::Domain) = domain.msrc
     mp(domain::Domain) = domain.mp
     p_gas(domain::Domain) = domain.p_gas
+    c(domain::Domain) = domain.c
+    dissolved_D(domain::Domain{CType}) where CType =
+        domain.ω_c > zero(CType) ?
+            CType(0.25) * (one(CType) / domain.ω_c - CType(0.5)) : zero(CType)
 end
 
 @static if TEMPERATURE

@@ -36,6 +36,13 @@ BubbleTracker(; kwargs...) = BubbleTracker{Float32}(; kwargs...)
 young_laplace_p(σ, R, p_atm=P_ATM_LAT) = p_atm + 2 * σ / max(R, eps(typeof(σ)))
 bubble_radius(V) = (3 * max(V, 0) / (4 * π))^(1 / 3)
 
+# Quasi-static EP with constant p (σ=0 or R ≫ 2σ/p). c is T-like, c_s = k_H p.
+# R²(t) = R0² + 2 D (c∞/k_H − p) / p · t
+function epstein_plesset_R2(R0, t, D, c∞, k_H, p=P_ATM_LAT)
+    cs = k_H * p
+    return R0 * R0 + 2 * D * (c∞ - cs) / p * t
+end
+
 @inline function _uf_find!(parent, i::Int)
     r = i
     @inbounds while parent[r] != r
@@ -106,7 +113,7 @@ function _component_cells(parent, which, ncomp::Int)
     return cells
 end
 
-function update_bubbles!(B::BubbleTracker{T}, flags, ϕ, p_gas, Nx::Int, Ny::Int, Nz::Int) where {T}
+function update_bubbles!(B::BubbleTracker{T}, flags, ϕ, p_gas, bid, Nx::Int, Ny::Int, Nz::Int) where {T}
     B.enabled || return B
     N = Nx * Ny * Nz
     length(B.label) == N || (B.label = zeros(Int32, N))
@@ -115,7 +122,13 @@ function update_bubbles!(B::BubbleTracker{T}, flags, ϕ, p_gas, Nx::Int, Ny::Int
     fill!(B.label, zero(Int32))
 
     parent, ncomp, which, is_atm = label_gas_components(flags, Nx, Ny, Nz)
-    ncomp == 0 && (B.nb = 0; empty!(B.n_mol); empty!(B.vol); empty!(B.p); return B)
+    if ncomp == 0
+        B.nb = 0
+        empty!(B.n_mol); empty!(B.vol); empty!(B.p)
+        fill!(p_gas, B.p_atm)
+        fill!(bid, zero(eltype(bid)))
+        return B
+    end
     cells = _component_cells(parent, which, ncomp)
 
     bub_ids = Int[]
@@ -175,16 +188,20 @@ function update_bubbles!(B::BubbleTracker{T}, flags, ϕ, p_gas, Nx::Int, Ny::Int
     B.vol = volg
     B.p = p
     B.nb = nb
-    _write_p_gas!(B, flags, p_gas, Nx, Ny, Nz)
+    _write_p_gas!(B, flags, p_gas, bid, Nx, Ny, Nz)
     return B
 end
 
-function _write_p_gas!(B::BubbleTracker{T}, flags, p_gas, Nx::Int, Ny::Int, Nz::Int) where {T}
+function _write_p_gas!(B::BubbleTracker{T}, flags, p_gas, bid, Nx::Int, Ny::Int, Nz::Int) where {T}
     N = Nx * Ny * Nz
     pg = fill(B.p_atm, N)
+    bd = zeros(T, N)
     @inbounds for n in 1:N
         k = Int(B.label[n])
-        1 <= k <= B.nb && (pg[n] = B.p[k])
+        if 1 <= k <= B.nb
+            pg[n] = B.p[k]
+            bd[n] = T(k)
+        end
     end
     @inbounds for n in 1:N
         (flags[n] & TYPE_SU) == TYPE_I || continue
@@ -193,19 +210,31 @@ function _write_p_gas!(B::BubbleTracker{T}, flags, p_gas, Nx::Int, Ny::Int, Nz::
         y = (n0 ÷ Nx) % Ny
         z = n0 ÷ (Nx * Ny)
         pmax = zero(T)
+        id = 0
         hit = false
+        many = false
         for cz in -1:1, cy in -1:1, cx in -1:1
             (cx == 0 && cy == 0 && cz == 0) && continue
             j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
             k = Int(B.label[j])
             if 1 <= k <= B.nb
-                hit = true
-                pmax = max(pmax, B.p[k])
+                if !hit
+                    id = k
+                    pmax = B.p[k]
+                    hit = true
+                elseif k != id
+                    many = true
+                    pmax = max(pmax, B.p[k])
+                end
             end
         end
-        hit && (pg[n] = pmax)
+        if hit
+            pg[n] = pmax
+            many || (bd[n] = T(id))
+        end
     end
     copyto!(p_gas, pg)
+    copyto!(bid, bd)
     return nothing
 end
 
@@ -218,12 +247,32 @@ function bubble_records(B::BubbleTracker{T}) where {T}
     return recs
 end
 
-function set_bubble_n!(B::BubbleTracker{T}, id::Integer, n, flags, p_gas, Nx, Ny, Nz) where {T}
+function set_bubble_n!(B::BubbleTracker{T}, id::Integer, n, flags, p_gas, bid, Nx, Ny, Nz) where {T}
     (1 <= id <= B.nb) || throw(ArgumentError("bubble id $id is not in 1:$(B.nb)"))
     B.n_mol[id] = T(n)
     Vp = max(B.vol[id], T(1e-6))
     B.p[id] = clamp(B.n_mol[id] * B.T_gas / Vp, B.p_atm / T(20), T(20) * B.p_atm)
-    _write_p_gas!(B, flags, p_gas, Nx, Ny, Nz)
+    _write_p_gas!(B, flags, p_gas, bid, Nx, Ny, Nz)
+    return B
+end
+
+function apply_dissolved_flux!(B::BubbleTracker{T}, nflux, bid, flags, p_gas, Nx, Ny, Nz) where {T}
+    B.nb == 0 && return B
+    nf = Array(nflux)
+    bd = Array(bid)
+    acc = zeros(T, B.nb)
+    @inbounds for i in eachindex(nf)
+        k = round(Int, bd[i])
+        1 <= k <= B.nb || continue
+        acc[k] += T(nf[i])
+    end
+    @inbounds for k in 1:B.nb
+        B.n_mol[k] = max(B.n_mol[k] + acc[k], zero(T))
+        Vp = max(B.vol[k], T(1e-6))
+        B.p[k] = clamp(B.n_mol[k] * B.T_gas / Vp, B.p_atm / T(20), T(20) * B.p_atm)
+    end
+    fill!(nflux, zero(eltype(nflux)))
+    _write_p_gas!(B, flags, p_gas, bid, Nx, Ny, Nz)
     return B
 end
 
@@ -237,7 +286,7 @@ function update_bubbles!(model::Model, domain::Domain)
     flags = Array(domain.flags.data)
     ϕA = Array(domain.ϕ.data)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    update_bubbles!(B, flags, ϕA, domain.p_gas.data, Nx, Ny, Nz)
+    update_bubbles!(B, flags, ϕA, domain.p_gas.data, domain.bid.data, Nx, Ny, Nz)
     return B
 end
 
@@ -259,6 +308,31 @@ function set_bubble_n!(model::Model, id::Integer, n)
     domain = model.domains[1]
     flags = Array(domain.flags.data)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    set_bubble_n!(B, id, n, flags, domain.p_gas.data, Nx, Ny, Nz)
+    set_bubble_n!(B, id, n, flags, domain.p_gas.data, domain.bid.data, Nx, Ny, Nz)
     return B
+end
+
+function initialize_dissolved!(model::Model, domain::Domain)
+    return nothing
+end
+
+function advance_dissolved_gas!(model::Model, domain::Domain, _t_odd::Bool)
+    domain.ω_c > 0 || return nothing
+    N = get_N(domain)
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    D = dissolved_D(domain)
+    dissolved_diffuse_kernel!(model.backend, model.workgroup)(
+        domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,
+        D, Nx, Ny, Nz; ndrange = N)
+    dissolved_henry_kernel!(model.backend, model.workgroup)(
+        domain.c.data, domain.nflux.data, domain.ci.data, domain.flags.data,
+        domain.ϕ.data, domain.p_gas.data, domain.k_H; ndrange = N)
+    KernelAbstractions.synchronize(model.backend)
+    B = model.bubbles
+    if B isa BubbleTracker && B.enabled && domain.k_H > 0
+        flags = Array(domain.flags.data)
+        apply_dissolved_flux!(B, domain.nflux.data, domain.bid.data, flags,
+                              domain.p_gas.data, Nx, Ny, Nz)
+    end
+    return nothing
 end
