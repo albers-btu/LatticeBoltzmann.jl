@@ -24,6 +24,7 @@ start_run_log!("output_melt_pool")
 n_layers      = 1          # passes over the same bead (1 = single track)
 bidirectional = true       # even layers scan x1 → x0; false = always x0 → x1
 si_dwell      = 0.0u"s"    # laser + powder off between layers; 0 → none
+si_powder_delay = 0.05u"s" # laser-only lead-in each layer; 0 → powder from step 1
 jet_along     = :back      # :back = trailing (behind the travel), :front = leading
 
 # --- user: box / resolution (SI; Δx does not change the box or the spot) ---
@@ -178,7 +179,12 @@ x1    = Float32(clamp(Nx + 1 - n_end, 3 * Nx / 4, Nx - 3))
 nsteps_pass  = max(2, round(Int, abs(x1 - x0) / max(v_lat, Float32(1e-8))))
 nsteps_dwell = si_dwell > 0u"s" ?
     max(0, round(Int, ustrip(u"s", si_dwell) / Float64(units.s))) : 0
+nsteps_powder_delay = si_powder_delay > 0u"s" ?
+    max(0, round(Int, ustrip(u"s", si_powder_delay) / Float64(units.s))) : 0
 nsteps_total = n_layers * nsteps_pass + max(0, n_layers - 1) * nsteps_dwell
+if nsteps_powder_delay >= nsteps_pass
+    @warn "si_powder_delay ≥ pass duration; powder never starts this pass" si_powder_delay nsteps_powder_delay nsteps_pass
+end
 qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))
 # Frame spacing from one pass, not the whole job — otherwise n_layers=3
 # writes 3× fewer VTK/progress samples and the beam looks 3× faster.
@@ -194,7 +200,7 @@ end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "DED 316L multilayer track" n_layers bidirectional si_dwell Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_mm=(1e3*w_m) w_cells scan_mm=(1e3*m*abs(x1-x0)) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet A0 nskin Q_full h_lat γ_s=model.domains[1].γ_s γ_l=model.domains[1].γ_l τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
+@info "DED 316L multilayer track" n_layers bidirectional si_dwell si_powder_delay nsteps_powder_delay Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_mm=(1e3*w_m) w_cells scan_mm=(1e3*m*abs(x1-x0)) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet A0 nskin Q_full h_lat γ_s=model.domains[1].γ_s γ_l=model.domains[1].γ_l τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
@@ -226,14 +232,14 @@ model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     nrays = 11, max_bounce = 8, every = qevery, skin = nskin)
 model.powder_jet = PowderJet(units; mdot = si_eta * si_mdot, w = 0.6 * si_d_spot,
                              v = si_v_jet, x = x0, y = y_las, z = z_noz,
-                             nparcels = 16)
+                             nparcels = 16, enabled = nsteps_powder_delay == 0)
 place_powder_jet!(model.powder_jet, x0, y_las, z_noz, z_aim, 1.0f0, dx_noz, jet_along, Nx)
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output_melt_pool")
 
 function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
-                     nsteps_pass, nsteps_dwell, nsteps_total, qevery, every,
-                     Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz, jet_along)
+                     nsteps_pass, nsteps_dwell, nsteps_powder_delay, nsteps_total,
+                     qevery, every, Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz, jet_along)
     Ncell = Nx * Ny * Nz
     xmin, xmax = min(x0, x1), max(x0, x1)
     istep = 0
@@ -271,6 +277,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             (:Mres_g, round(1e3 * si_mass(U, m.residual); digits=3)),
             (:umax, round(umax; digits=3)),
             (:zI, zI),
+            (:powder, model.powder_jet.enabled),
             (:MLUPS, round(mlups_ema; digits=1)),
         ])
         return nothing
@@ -302,7 +309,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
         sgn = backward ? -one(Float32) : one(Float32)
         for k in 0:(nsteps_pass - 1)
             x_now = clamp(x_start + sgn * v_lat * Float32(k), xmin, xmax)
-            do_step!(layer, x_now, true, sgn)
+            do_step!(layer, x_now, k >= nsteps_powder_delay, sgn)
         end
         if layer < n_layers && nsteps_dwell > 0
             model.laser.enabled = false
@@ -317,8 +324,8 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
 end
 
 x_end = run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
-                    nsteps_pass, nsteps_dwell, nsteps_total, qevery, every,
-                    Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz, jet_along)
+                    nsteps_pass, nsteps_dwell, nsteps_powder_delay, nsteps_total,
+                    qevery, every, Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz, jet_along)
 
 LatticeBoltzmann.moments!(model)
 nliq, depth, bead, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
