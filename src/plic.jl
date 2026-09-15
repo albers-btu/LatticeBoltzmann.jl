@@ -200,9 +200,13 @@ end
     return clamp(K, -one(T), one(T))
 end
 
-@inline function gas_density_plic(σ::T, ϕ, ϕ0::T, x, y, z, Nx, Ny, Nz) where {T}
-    σ == zero(T) && return one(T)
+# ρ_gas = 3 p_id − 6 σ κ. p_id = 1/3 is atmosphere (ρ=1). Enclosed bubbles
+# pass n T / V. σ = 0 → ρ_gas = 3 p_id.
+@inline function gas_density_plic(σ::T, ϕ, ϕ0::T, x, y, z, Nx, Ny, Nz,
+                                  p_id::T = T(1) / T(3)) where {T}
+    ρ0 = T(3) * p_id
+    σ == zero(T) && return ρ0
     phij = gather_phi_d3q27(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
     κ = calculate_curvature(phij)
-    return one(T) - T(6) * σ * κ
+    return ρ0 - T(6) * σ * κ
 end

@@ -48,6 +48,9 @@ include("powder.jl")
 export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 
 include("model.jl")
+include("bubble.jl")
+export BubbleTracker, update_bubbles!, bubble_records, set_bubble_n!
+export young_laplace_p, bubble_radius, P_ATM_LAT
 export Model
 export get_D
 export run!, export!

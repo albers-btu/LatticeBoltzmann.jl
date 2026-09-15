@@ -65,6 +65,7 @@ mutable struct Model{
     units::Units{CType}
     laser::Any
     powder_jet::Any
+    bubbles::Any
 end
 
 function Model(
@@ -101,6 +102,7 @@ function Model(
     powder_T = nothing,
     laser = nothing,
     powder_jet = nothing,
+    bubbles = nothing,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -156,7 +158,7 @@ function Model(
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
                   C_rad=Crad, T_rad=Trad,
                   τ_p=τp, T_p=Tp,
-                  laser=laser, powder_jet=powder_jet, CType, SType, scheme, backend, workgroup)
+                  laser=laser, powder_jet=powder_jet, bubbles=bubbles, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -195,6 +197,7 @@ function Model(
     T_p = nothing,
     laser = nothing,
     powder_jet = nothing,
+    bubbles = nothing,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -371,6 +374,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                bubbles,
             )
         else
             Model(
@@ -401,6 +405,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                bubbles,
             )
         end
     else
@@ -427,6 +432,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                bubbles,
             )
         else
             Model(
@@ -450,6 +456,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                bubbles,
             )
         end
     end
@@ -750,6 +757,11 @@ function initialize!(model::Model)
 
     KernelAbstractions.synchronize(model.backend)
     model.initialized = true
+    @static if SURFACE
+        for domain in model.domains
+            update_bubbles!(model, domain)
+        end
+    end
     @static if TEMPERATURE
         reset_energy_budget!(model)
         @static if SURFACE
@@ -785,7 +797,7 @@ function step!(model::Model)
                domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
                domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
                Nd, Nx, Ny, Nz, domain.Eacc.data,
-               domain.h.data, domain.Q.data, domain.ω_T; ndrange = N)
+               domain.h.data, domain.Q.data, domain.ω_T, domain.p_gas.data; ndrange = N)
         end
 
         @static if MOVING_BOUNDARIES
@@ -843,6 +855,11 @@ function step!(model::Model)
         increment_time_step!(domain, 1)
     end
     KernelAbstractions.synchronize(model.backend)
+    @static if SURFACE
+        for domain in model.domains
+            update_bubbles!(model, domain)
+        end
+    end
 end
 
 @inline last_collide_odd(domain::Domain) = Int(domain.t) == 0 ? false : isodd(Int(domain.t) - 1)
@@ -900,7 +917,7 @@ end
     c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType, pgas
 ) where {odd, Q, CType}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
@@ -964,7 +981,7 @@ end
         ρn = ρn > zero(CType) ? ρn : one(CType)
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
         uxg = zero(CType); uyg = zero(CType); uzg = zero(CType)
-        ρ_gas = one(CType)
+        ρ_gas = CType(3) * pgas[n]
         ϕin = calculate_phi(ρn, massn, flagsn)
     elseif eq
         ρn, ux, uy, uz = prescribed_hydro(ρ[n], u[n, 1], u[n, 2], u[n, 3], fx, fy, fz)
@@ -974,7 +991,7 @@ end
             σn = σ + σT * (T[n] - Tσ)
             σn = ifelse(σn > zero(CType), σn, zero(CType))
         end
-        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
+        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz, pgas[n])
         uxg, uyg, uzg = ux, uy, uz
     else
         ρn = fn1
@@ -997,7 +1014,7 @@ end
             σn = σ + σT * (T[n] - Tσ)
             σn = ifelse(σn > zero(CType), σn, zero(CType))
         end
-        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
+        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz, pgas[n])
         @static if VOLUME_FORCE
             uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
             uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)
@@ -1068,10 +1085,10 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType, @Const(pgas)
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, pgas)
 end
 
 @kernel function surface_0_odd_kernel!(
@@ -1079,10 +1096,10 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType, @Const(pgas)
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, pgas)
 end
 
 end

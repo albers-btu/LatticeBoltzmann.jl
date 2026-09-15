@@ -53,6 +53,7 @@ mutable struct Domain{
         mp::Memory{CType, Aρ}    # unmelted powder mass (same units as mass)
         τ_p::CType               # powder lifetime (lattice steps); 0 → msrc→mass
         T_p::CType               # powder temperature (lattice)
+        p_gas::Memory{CType, Aρ} # lattice gas pressure for reconstruction; p_atm=1/3
     end
 
     @static if TEMPERATURE
@@ -166,6 +167,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
 
         mp = Memory(AT{CType}(undef, N))
         fill!(mp.data, zero(CType))
+
+        p_gas = Memory(AT{CType}(undef, N))
+        fill!(p_gas.data, CType(1) / CType(3))
     end
 
     @static if TEMPERATURE
@@ -202,7 +206,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
+                ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p), p_gas,
                 αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
@@ -218,7 +222,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp,
-                CType(τ_p), CType(T_p),
+                CType(τ_p), CType(T_p), p_gas,
                 UInt64(0)
             )
         end
@@ -264,6 +268,7 @@ flags(domain::Domain) = domain.flags
     massex(domain::Domain) = domain.massex
     msrc(domain::Domain) = domain.msrc
     mp(domain::Domain) = domain.mp
+    p_gas(domain::Domain) = domain.p_gas
 end
 
 @static if TEMPERATURE
