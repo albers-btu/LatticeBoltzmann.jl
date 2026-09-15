@@ -898,7 +898,15 @@ function step!(model::Model)
     KernelAbstractions.synchronize(model.backend)
     @static if SURFACE
         for domain in model.domains
+            cores = nucleate_bubbles!(model, domain)
             update_bubbles!(model, domain)
+            B = model.bubbles
+            if B isa BubbleTracker && !isempty(cores)
+                flags = Array(domain.flags.data)
+                _seed_new_nuclei!(
+                    B, cores, flags, domain.p_gas.data, domain.bid.data,
+                    domain.σ, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
+            end
         end
     end
 end
