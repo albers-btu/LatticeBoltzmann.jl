@@ -563,7 +563,8 @@ end
 end
 
 # Anisimov recoil: F = p_r n, p_r = 0.54 p_sat, n = ∇ϕ/|∇ϕ| (into liquid).
-# Λ_v = 0 → off. |F| capped so Guo Δu stays O(0.1).
+# Λ_v = 0 → off. |F| capped so Guo Δu stays O(0.1). A 0.5 cap is Ma~0.4 per
+# step and a stationary keyhole jets; 0.12 keeps a dimple without blow-up.
 @inline function recoil_force(
     Tfield, ϕ, n::Int, x::Int, y::Int, z::Int,
     Nx::Int, Ny::Int, Nz::Int,
@@ -572,7 +573,7 @@ end
     Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
     Tn = Tfield[n]
     pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
-    pr = ifelse(pr > CType(0.5), CType(0.5), pr)
+    pr = ifelse(pr > CType(0.05), CType(0.05), pr)
     pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
     xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
     xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
@@ -676,15 +677,20 @@ end
     end
 
     @static if SURFACE
-        if !dirichlet && !use_flux && (flagsn & TYPE_SU) == TYPE_I
+        su = flagsn & TYPE_SU
+        if !dirichlet && !use_flux && (su == TYPE_I || su == TYPE_F)
             Te = Tfield[n]
             if Λ_v > zero(CType) && !is_solid_fraction(fs[n])
-                Qe, mevap = evaporative_flux(Te, Λ_v, T_v, C_hk, p0v, β_v)
+                Qe, mdot = evaporative_flux(Te, Λ_v, T_v, C_hk, p0v, β_v)
                 Qn -= Qe
                 Te -= Qe
                 acc_add!(Eacc, EACC_EVAP, fillc * Qe)
+                # Mass leaves only at the free surface (HK). Bulk T>Tv is a
+                # boiling energy sink so subsurface laser Q cannot run away;
+                # vapor in the bulk is nucleation.
+                su == TYPE_I && (mevap = mdot)
             end
-            if C_rad > zero(CType)
+            if su == TYPE_I && C_rad > zero(CType)
                 Qr = radiation_dT(Te, C_rad, T_rad)
                 Qn -= Qr
                 Te -= Qr

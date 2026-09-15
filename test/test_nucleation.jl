@@ -82,7 +82,8 @@ end
     flags = Array(model.domains[1].flags.data)
     B = model.bubbles
     LatticeBoltzmann._seed_new_nuclei!(
-        B, cores, flags, model.domains[1].p_gas.data, model.domains[1].bid.data,
+        B, cores, flags, Array(model.domains[1].ϕ.data),
+        model.domains[1].p_gas.data, model.domains[1].bid.data,
         model.domains[1].σ, 20, 20, 20)
     recs = bubble_records(model)
     @test !isempty(recs)
@@ -101,4 +102,37 @@ end
     end
     @test model.bubbles.nucleation.n_planted >= 1
     @test model.bubbles.nb >= 1
+end
+
+@testset "free-surface pad does not nucleate on the floor" begin
+    @test SURFACE
+    Nx, Ny, Nz = 24, 24, 28
+    Hfill = 16
+    nuc = Nucleation{Float32}(; d_min=6, R=1, c_star=1.05f0, p_cell=1,
+                              n_max=8, n_over=1.2f0, every=1, n_total_max=16)
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, α_c=0.2f0, k_H=3.0f0, fz=0, σ=0,
+                  backend=CPU(), workgroup=64,
+                  bubbles=BubbleTracker{Float32}(; nucleation=nuc))
+    host = zeros(UInt8, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n_n(x, y, z, Nx, Ny)
+        if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        else
+            host[n] = TYPE_G
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    fill!(model.domains[1].c.data, 1.4f0)
+    LatticeBoltzmann.initialize!(model)
+    cores = nucleate_bubbles!(model, model.domains[1]; force=true)
+    update_bubbles!(model)
+    @test !isempty(cores)
+    zs = [((n - 1) ÷ (Nx * Ny)) + 1 for n in cores]
+    zbar = sum(zs) / length(zs)
+    @info "pad nucleation z" zs zbar Hfill
+    @test minimum(zs) > 4
+    @test zbar > Hfill / 2
 end

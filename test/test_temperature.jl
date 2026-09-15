@@ -1051,6 +1051,8 @@ end
     @test isfinite(Tmax_I)
     @test Tmax_I > Tm
     @test Tmax_I < Tv + 0.40f0
+    @test isfinite(Tmax_F)
+    @test Tmax_F < Tv + 0.40f0
 end
 
 @testset "recoil dimples free surface under a hot spot" begin

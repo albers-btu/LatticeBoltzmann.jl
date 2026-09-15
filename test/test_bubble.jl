@@ -145,8 +145,8 @@ end
         run!(model_lo, 8)
     end
     recl = bubble_records(model_lo)
-    @test length(recl) == 1
-    Vl = recl[1].V
+    @test !isempty(recl)
+    Vl = sum(r -> r.V, recl)
 
     @info "pV bubble hydro" V0h Vh V0l Vl
     @test Vh > V0h * 1.05f0

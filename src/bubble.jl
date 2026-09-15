@@ -23,6 +23,10 @@ mutable struct Nucleation{T<:AbstractFloat}
     n_planted::Int
 end
 
+# LBfoam Π = k_Π (d_max − d) between two different bubble interfaces.
+# Subtracted from p before ρ_gas = 3p − 6σκ. k_Π = 0 → off.
+# Paper: d_max = 4, k_Π ≈ 0.08 holds a lamella; 0 coalesces on contact.
+
 function Nucleation{T}(;
     enabled = true,
     every = 20,
@@ -54,6 +58,8 @@ mutable struct BubbleTracker{T<:AbstractFloat}
     label::Vector{Int32} # per-cell enclosed id; 0 = not a bubble
     nb::Int
     nucleation::Any
+    k_Π::T
+    d_max::T
 end
 
 function BubbleTracker{T}(;
@@ -62,11 +68,13 @@ function BubbleTracker{T}(;
     T_gas = one(T),
     p_atm = T(1) / T(3),
     nucleation = nothing,
+    k_Π = zero(T),
+    d_max = T(4),
 ) where {T<:AbstractFloat}
     every < 1 && throw(ArgumentError("every must be ≥ 1"))
     return BubbleTracker{T}(
         enabled, Int(every), T(T_gas), T(p_atm),
-        T[], T[], T[], Int32[], 0, nucleation,
+        T[], T[], T[], Int32[], 0, nucleation, T(k_Π), T(d_max),
     )
 end
 BubbleTracker(; kwargs...) = BubbleTracker{Float32}(; kwargs...)
@@ -115,8 +123,9 @@ function label_gas_components(flags, Nx::Int, Ny::Int, Nz::Int)
         x = n0 % Nx
         y = (n0 ÷ Nx) % Ny
         z = n0 ÷ (Nx * Ny)
-        for cz in -1:1, cy in -1:1, cx in -1:1
-            (cx == 0 && cy == 0 && cz == 0) && continue
+        # Face-connected (LBfoam flood-fill). 26-connect merges through corners
+        # and eats one-cell films before disjoining pressure can act.
+        for (cx, cy, cz) in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
             j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
             parent[j] == 0 && continue
             _uf_union!(parent, n, j)
@@ -226,11 +235,11 @@ function update_bubbles!(B::BubbleTracker{T}, flags, ϕ, p_gas, bid, Nx::Int, Ny
     B.vol = volg
     B.p = p
     B.nb = nb
-    _write_p_gas!(B, flags, p_gas, bid, Nx, Ny, Nz)
+    _write_p_gas!(B, flags, ϕ, p_gas, bid, Nx, Ny, Nz)
     return B
 end
 
-function _write_p_gas!(B::BubbleTracker{T}, flags, p_gas, bid, Nx::Int, Ny::Int, Nz::Int) where {T}
+function _write_p_gas!(B::BubbleTracker{T}, flags, ϕ, p_gas, bid, Nx::Int, Ny::Int, Nz::Int) where {T}
     N = Nx * Ny * Nz
     pg = fill(B.p_atm, N)
     bd = zeros(T, N)
@@ -268,11 +277,74 @@ function _write_p_gas!(B::BubbleTracker{T}, flags, p_gas, bid, Nx::Int, Ny::Int,
         end
         if hit
             pg[n] = pmax
-            many || (bd[n] = T(id))
+            bd[n] = T(id)
         end
+    end
+    if B.k_Π > zero(T)
+        _apply_disjoining!(B, flags, ϕ, pg, bd, Nx, Ny, Nz)
     end
     copyto!(p_gas, pg)
     copyto!(bid, bd)
+    return nothing
+end
+
+# Distance to another bubble's I/G in the liquid half-space (along ∇ϕ).
+# LBfoam uses a normal ray + PLIC; for d_max ≲ 4 a forward stencil is equivalent
+# and does not miss thin films.
+function _film_distance(flags, bid, ϕ, Nx, Ny, Nz, n, my_id, d_max::T) where {T}
+    n0 = n - 1
+    x = n0 % Nx
+    y = (n0 ÷ Nx) % Ny
+    z = n0 ÷ (Nx * Ny)
+    r = max(1, ceil(Int, d_max))
+    dmin = T(-1)
+    @inbounds for dz in (-r):r, dy in (-r):r, dx in (-r):r
+        (dx == 0 && dy == 0 && dz == 0) && continue
+        dist = sqrt(T(dx * dx + dy * dy + dz * dz))
+        dist > d_max && continue
+        ix, iy, iz = x + 1 + dx, y + 1 + dy, z + 1 + dz
+        (1 <= ix <= Nx && 1 <= iy <= Ny && 1 <= iz <= Nz) || continue
+        j = _cell_n(ix, iy, iz, Nx, Ny)
+        fl = flags[j]
+        (fl & TYPE_S) != 0x00 && continue
+        su = fl & TYPE_SU
+        idj = Int(round(bid[j]))
+        ((su == TYPE_I || su == TYPE_G) && idj > 0 && idj != my_id) || continue
+        dmin = dmin < zero(T) ? dist : min(dmin, dist)
+    end
+    return dmin
+end
+
+function _apply_disjoining!(B::BubbleTracker{T}, flags, ϕ, pg, bd, Nx, Ny, Nz) where {T}
+    kΠ = B.k_Π
+    dmax = B.d_max
+    kΠ <= zero(T) && return nothing
+    N = Nx * Ny * Nz
+    @inbounds for n in 1:N
+        (flags[n] & TYPE_SU) == TYPE_I || continue
+        my_id = Int(round(bd[n]))
+        if my_id < 1 || my_id > B.nb
+            n0 = n - 1
+            x = n0 % Nx
+            y = (n0 ÷ Nx) % Ny
+            z = n0 ÷ (Nx * Ny)
+            for cz in -1:1, cy in -1:1, cx in -1:1
+                (cx == 0 && cy == 0 && cz == 0) && continue
+                j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+                k = Int(B.label[j])
+                k < 1 && (k = Int(round(bd[j])))
+                if 1 <= k <= B.nb
+                    my_id = k
+                    break
+                end
+            end
+        end
+        (1 <= my_id <= B.nb) || continue
+        d = _film_distance(flags, bd, ϕ, Nx, Ny, Nz, n, my_id, dmax)
+        d < zero(T) && continue
+        Π = kΠ * max(dmax - d, zero(T))
+        pg[n] = max(pg[n] - Π, B.p_atm / T(20))
+    end
     return nothing
 end
 
@@ -285,16 +357,16 @@ function bubble_records(B::BubbleTracker{T}) where {T}
     return recs
 end
 
-function set_bubble_n!(B::BubbleTracker{T}, id::Integer, n, flags, p_gas, bid, Nx, Ny, Nz) where {T}
+function set_bubble_n!(B::BubbleTracker{T}, id::Integer, n, flags, ϕ, p_gas, bid, Nx, Ny, Nz) where {T}
     (1 <= id <= B.nb) || throw(ArgumentError("bubble id $id is not in 1:$(B.nb)"))
     B.n_mol[id] = T(n)
     Vp = max(B.vol[id], T(1e-6))
     B.p[id] = clamp(B.n_mol[id] * B.T_gas / Vp, B.p_atm / T(20), T(20) * B.p_atm)
-    _write_p_gas!(B, flags, p_gas, bid, Nx, Ny, Nz)
+    _write_p_gas!(B, flags, ϕ, p_gas, bid, Nx, Ny, Nz)
     return B
 end
 
-function apply_dissolved_flux!(B::BubbleTracker{T}, nflux, bid, flags, p_gas, Nx, Ny, Nz) where {T}
+function apply_dissolved_flux!(B::BubbleTracker{T}, nflux, bid, flags, ϕ, p_gas, Nx, Ny, Nz) where {T}
     B.nb == 0 && return B
     nf = Array(nflux)
     bd = Array(bid)
@@ -310,7 +382,7 @@ function apply_dissolved_flux!(B::BubbleTracker{T}, nflux, bid, flags, p_gas, Nx
         B.p[k] = clamp(B.n_mol[k] * B.T_gas / Vp, B.p_atm / T(20), T(20) * B.p_atm)
     end
     fill!(nflux, zero(eltype(nflux)))
-    _write_p_gas!(B, flags, p_gas, bid, Nx, Ny, Nz)
+    _write_p_gas!(B, flags, ϕ, p_gas, bid, Nx, Ny, Nz)
     return B
 end
 
@@ -340,13 +412,79 @@ function bubble_records(model::Model)
     return bubble_records(model.bubbles)
 end
 
+# LBfoam-bucket diagnostics: enclosed porosity, free-surface height, freeze.
+function foam_metrics(model::Model)
+    domain = model.domains[1]
+    flags = Array(domain.flags.data)
+    ϕA = Array(domain.ϕ.data)
+    fsA = Array(domain.fs.data)
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    nF = 0
+    nI = 0
+    nG = 0
+    n_frozen = 0
+    Vmet = 0.0
+    hsum = 0.0
+    hcnt = 0
+    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        su = flags[n] & TYPE_SU
+        if su == TYPE_F
+            nF += 1
+            Vmet += Float64(ϕA[n])
+            is_solid_fraction(fsA[n]) && (n_frozen += 1)
+        elseif su == TYPE_I
+            nI += 1
+            Vmet += Float64(ϕA[n])
+            is_solid_fraction(fsA[n]) && (n_frozen += 1)
+        elseif su == TYPE_G
+            nG += 1
+        end
+    end
+    @inbounds for y in 2:(Ny - 1), x in 2:(Nx - 1)
+        ztop = 0.0
+        for z in (Nz - 1):-1:2
+            n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+            su = flags[n] & TYPE_SU
+            if su == TYPE_I || (su == TYPE_F && ϕA[n] > 0.05f0)
+                ztop = Float64(z - 1) + Float64(ϕA[n])
+                break
+            end
+        end
+        if ztop > 0
+            hsum += ztop
+            hcnt += 1
+        end
+    end
+    B = model.bubbles
+    recs = B isa BubbleTracker ? bubble_records(B) : NamedTuple[]
+    Vbub = B isa BubbleTracker ? sum(Float64, B.vol; init=0.0) : 0.0
+    n_gas = B isa BubbleTracker ? sum(Float64, B.n_mol; init=0.0) : 0.0
+    por = (Vmet + Vbub) > 0 ? Vbub / (Vmet + Vbub) : 0.0
+    inv = agent_inventory(domain)
+    return (;
+        nF, nI, nG, n_frozen,
+        nb = length(recs),
+        V_metal = Vmet,
+        V_bubble = Vbub,
+        porosity = por,
+        fill_z = hcnt > 0 ? hsum / hcnt : 0.0,
+        n_gas,
+        n_planted = (B isa BubbleTracker && B.nucleation isa Nucleation) ?
+            B.nucleation.n_planted : 0,
+        a = inv.a, a_res = inv.res, dissolved = inv.dissolved,
+        agent_total = inv.total,
+    )
+end
+
 function set_bubble_n!(model::Model, id::Integer, n)
     B = model.bubbles
     B isa BubbleTracker || throw(ArgumentError("model.bubbles is not a BubbleTracker"))
     domain = model.domains[1]
     flags = Array(domain.flags.data)
+    ϕA = Array(domain.ϕ.data)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    set_bubble_n!(B, id, n, flags, domain.p_gas.data, domain.bid.data, Nx, Ny, Nz)
+    set_bubble_n!(B, id, n, flags, ϕA, domain.p_gas.data, domain.bid.data, Nx, Ny, Nz)
     return B
 end
 
@@ -381,7 +519,8 @@ function advance_dissolved_gas!(model::Model, domain::Domain, _t_odd::Bool)
     B = model.bubbles
     if B isa BubbleTracker && B.enabled && domain.k_H > 0
         flags = Array(domain.flags.data)
-        apply_dissolved_flux!(B, domain.nflux.data, domain.bid.data, flags,
+        ϕA = Array(domain.ϕ.data)
+        apply_dissolved_flux!(B, domain.nflux.data, domain.bid.data, flags, ϕA,
                               domain.p_gas.data, Nx, Ny, Nz)
     end
     return nothing
@@ -391,17 +530,21 @@ end
     return x + (y - 1) * Nx + (z - 1) * Nx * Ny
 end
 
-function _cube_is_fluid(flags, Nx, Ny, Nz, cx, cy, cz, R)
+function _cube_is_fluid(flags, fs, Nx, Ny, Nz, cx, cy, cz, R)
     @inbounds for dz in (-R):R, dy in (-R):R, dx in (-R):R
         x, y, z = cx + dx, cy + dy, cz + dz
         (1 < x < Nx && 1 < y < Ny && 1 < z < Nz) || return false
         n = _cell_n(x, y, z, Nx, Ny)
         (flags[n] & TYPE_SU) == TYPE_F || return false
+        is_solid_fraction(fs[n]) && return false
     end
     return true
 end
 
-function _too_close(flags, Nx, Ny, Nz, cx, cy, cz, d_min)
+# Only enclosed bubbles (and nuclei planted this pass) occupy space.
+# Atmosphere TYPE_G and the free-surface TYPE_I must not push nuclei to the
+# bottom of the pad. Walls do occupy, so a liquid pad cannot nucleate on the floor.
+function _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, cx, cy, cz, d_min)
     r = max(1, ceil(Int, d_min))
     d2 = d_min * d_min
     @inbounds for dz in (-r):r, dy in (-r):r, dx in (-r):r
@@ -409,8 +552,19 @@ function _too_close(flags, Nx, Ny, Nz, cx, cy, cz, d_min)
         x, y, z = cx + dx, cy + dy, cz + dz
         (1 <= x <= Nx && 1 <= y <= Ny && 1 <= z <= Nz) || continue
         n = _cell_n(x, y, z, Nx, Ny)
-        su = flags[n] & TYPE_SU
-        (su == TYPE_G || su == TYPE_I) && return true
+        fl = flags[n]
+        (fl & TYPE_BO) == TYPE_S && return true
+        su = fl & TYPE_SU
+        if su == TYPE_G
+            if parent[n] != 0
+                r0 = _uf_find!(parent, n)
+                is_atm[which[r0]] && continue
+            end
+            return true
+        elseif su == TYPE_I
+            id = bid === nothing ? 0 : Int(round(bid[n]))
+            id > 0 && return true
+        end
     end
     return false
 end
@@ -456,7 +610,8 @@ end
 # Returns linear indices of planted G cores.
 function nucleate_bubbles!(
     Nuc::Nucleation{T}, flags, c, ϕ, mass, ρ, u, fs, fi, gi, Tfield,
-    w, vel, N, Nx, Ny, Nz, t_odd, nb_now::Int, ::Type{CType},
+    w, vel, N, Nx, Ny, Nz, t_odd, nb_now::Int, ::Type{CType};
+    bid = nothing,
 ) where {T, CType}
     Nuc.enabled || return Int[]
     nb_now >= Nuc.n_total_max && return Int[]
@@ -465,14 +620,19 @@ function nucleate_bubbles!(
     # (not TYPE_S) and convert to TYPE_I.
     lo, hi_x, hi_y, hi_z = 3 + R, Nx - 2 - R, Ny - 2 - R, Nz - 2 - R
     hi_x < lo && return Int[]
+    parent, ncomp, which, is_atm = label_gas_components(flags, Nx, Ny, Nz)
     cands = Tuple{Int,Int,Int}[]
     @inbounds for z in lo:hi_z, y in lo:hi_y, x in lo:hi_x
         n = _cell_n(x, y, z, Nx, Ny)
         (flags[n] & TYPE_SU) == TYPE_F || continue
+        is_solid_fraction(fs[n]) && continue
         Nuc.c_star > 0 && c[n] <= Nuc.c_star && continue
         Nuc.p_cell < 1 && rand(T) > Nuc.p_cell && continue
-        _cube_is_fluid(flags, Nx, Ny, Nz, x, y, z, R) || continue
-        _too_close(flags, Nx, Ny, Nz, x, y, z, Nuc.d_min) && continue
+        # R+1 liquid shell: a 3³ nucleus in a 3-cell film opens the free
+        # surface and the laser keyhole blows. Homogeneous nucleation needs
+        # bulk liquid around the embryo.
+        _cube_is_fluid(flags, fs, Nx, Ny, Nz, x, y, z, R + 1) || continue
+        _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, x, y, z, Nuc.d_min) && continue
         push!(cands, (x, y, z))
     end
     isempty(cands) && return Int[]
@@ -484,8 +644,8 @@ function nucleate_bubbles!(
     ncap = min(Nuc.n_max, Nuc.n_total_max - nb_now)
     @inbounds for (x, y, z) in cands
         length(planted) >= ncap && break
-        _too_close(flags, Nx, Ny, Nz, x, y, z, Nuc.d_min) && continue
-        _cube_is_fluid(flags, Nx, Ny, Nz, x, y, z, R) || continue
+        _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, x, y, z, Nuc.d_min) && continue
+        _cube_is_fluid(flags, fs, Nx, Ny, Nz, x, y, z, R + 1) || continue
         core = _plant_nucleus!(
             flags, ϕ, mass, ρ, u, fs, fi, gi, Tfield,
             w, vel, N, Nx, Ny, Nz, x, y, z, R, t_odd, CType)
@@ -519,7 +679,8 @@ function nucleate_bubbles!(model::Model, domain::Domain; force::Bool=false)
     CType = eltype(ρA)
     cores = nucleate_bubbles!(
         Nuc, flags, cA, ϕA, massA, ρA, uA, fsA, fiA, giA, TA,
-        model.weights, model.velocities, Nd, Nx, Ny, Nz, t_odd, B.nb, CType)
+        model.weights, model.velocities, Nd, Nx, Ny, Nz, t_odd, B.nb, CType;
+        bid = Array(domain.bid.data))
     isempty(cores) && return cores
     copyto!(domain.flags.data, flags)
     copyto!(domain.ϕ.data, ϕA)
@@ -531,7 +692,7 @@ function nucleate_bubbles!(model::Model, domain::Domain; force::Bool=false)
     return cores
 end
 
-function _seed_new_nuclei!(B::BubbleTracker{T}, cores, flags, p_gas, bid, σ, Nx, Ny, Nz) where {T}
+function _seed_new_nuclei!(B::BubbleTracker{T}, cores, flags, ϕ, p_gas, bid, σ, Nx, Ny, Nz) where {T}
     (B.nucleation isa Nucleation && !isempty(cores)) || return B
     n_over = B.nucleation.n_over
     @inbounds for n in cores
@@ -539,7 +700,7 @@ function _seed_new_nuclei!(B::BubbleTracker{T}, cores, flags, p_gas, bid, σ, Nx
         1 <= k <= B.nb || continue
         Rnuc = T(bubble_radius(Float64(B.vol[k])))
         peq = young_laplace_p(T(σ), max(Rnuc, T(0.5)), B.p_atm)
-        set_bubble_n!(B, k, n_over * peq * B.vol[k], flags, p_gas, bid, Nx, Ny, Nz)
+        set_bubble_n!(B, k, n_over * peq * B.vol[k], flags, ϕ, p_gas, bid, Nx, Ny, Nz)
     end
     return B
 end

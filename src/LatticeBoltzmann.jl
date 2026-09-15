@@ -51,7 +51,7 @@ export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 include("model.jl")
 include("bubble.jl")
 export BubbleTracker, update_bubbles!, bubble_records, set_bubble_n!
-export Nucleation, nucleate_bubbles!
+export Nucleation, nucleate_bubbles!, foam_metrics
 export young_laplace_p, bubble_radius, P_ATM_LAT
 export epstein_plesset_R2
 export Model

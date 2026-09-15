@@ -168,7 +168,7 @@ function Model(
                   τ_p=τp, T_p=Tp,
                   laser=laser, powder_jet=powder_jet, bubbles=bubbles,
                   α_c=αc, k_H=CType(k_H),
-                  k_a=(k_a isa Quantity ? CType(ustrip(u"1/s", k_a) * units.s) : CType(k_a * units.s)),
+                  k_a=(k_a isa Quantity ? CType(ustrip(u"s^-1", k_a) * units.s) : CType(k_a * units.s)),
                   E_a=(E_a isa Quantity ? CType(ustrip(u"K", E_a) / units.K) : CType(E_a / units.K)),
                   Y_a=CType(Y_a), a_fs_max=CType(a_fs_max),
                   CType, SType, scheme, backend, workgroup)
@@ -921,8 +921,9 @@ function step!(model::Model)
             B = model.bubbles
             if B isa BubbleTracker && !isempty(cores)
                 flags = Array(domain.flags.data)
+                ϕA = Array(domain.ϕ.data)
                 _seed_new_nuclei!(
-                    B, cores, flags, domain.p_gas.data, domain.bid.data,
+                    B, cores, flags, ϕA, domain.p_gas.data, domain.bid.data,
                     domain.σ, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
             end
         end

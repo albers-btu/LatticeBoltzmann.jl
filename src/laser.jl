@@ -258,7 +258,11 @@ end
 
 function deposit_laser!(model, domain)
     L = model.laser
-    (L === nothing || !L.enabled || L.P <= 0) && return nothing
+    L === nothing && return nothing
+    if !L.enabled || L.P <= 0
+        fill!(domain.Q.data, zero(eltype(domain.Q.data)))
+        return nothing
+    end
     t = Int(domain.t)
     L.every > 1 && (t % L.every != 0) && t != 0 && return nothing
     Q = domain.Q.data
