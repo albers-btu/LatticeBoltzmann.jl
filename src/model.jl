@@ -105,6 +105,10 @@ function Model(
     bubbles = nothing,
     α_c = 0.0,
     k_H = 0.0,
+    k_a = 0.0,
+    E_a = 0.0,
+    Y_a = 1.0,
+    a_fs_max = 1.0,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -164,6 +168,9 @@ function Model(
                   τ_p=τp, T_p=Tp,
                   laser=laser, powder_jet=powder_jet, bubbles=bubbles,
                   α_c=αc, k_H=CType(k_H),
+                  k_a=(k_a isa Quantity ? CType(ustrip(u"1/s", k_a) * units.s) : CType(k_a * units.s)),
+                  E_a=(E_a isa Quantity ? CType(ustrip(u"K", E_a) / units.K) : CType(E_a / units.K)),
+                  Y_a=CType(Y_a), a_fs_max=CType(a_fs_max),
                   CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
@@ -206,6 +213,10 @@ function Model(
     bubbles = nothing,
     α_c = 0.0f0,
     k_H = 0.0f0,
+    k_a = 0.0f0,
+    E_a = 0.0f0,
+    Y_a = 1.0f0,
+    a_fs_max = 1.0f0,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -320,6 +331,10 @@ function Model(
             T_p=T_p === nothing ? CType(T_avg) : CType(T_p),
             α_c=CType(α_c),
             k_H=CType(k_H),
+            k_a=CType(k_a),
+            E_a=CType(E_a),
+            Y_a=CType(Y_a),
+            a_fs_max=CType(a_fs_max),
         )
     end
 
@@ -716,6 +731,8 @@ function export!(model::Model; dir::AbstractString="output")
             vtk["phi"] = _vtk_phi(Array(domain.ϕ.data), flags_host, Nx, Ny, Nz)
             vtk["c"] = _vtk_scalar(Array(domain.c.data), Nx, Ny, Nz; lo=0.0f0, hi=10.0f0)
             vtk["pgas"] = _vtk_scalar(Array(domain.p_gas.data), Nx, Ny, Nz; lo=0.0f0, hi=2.0f0)
+            vtk["a"] = _vtk_scalar(Array(domain.a.data), Nx, Ny, Nz; lo=0.0f0, hi=1.0f6)
+            vtk["a_res"] = _vtk_scalar(Array(domain.a_res.data), Nx, Ny, Nz; lo=0.0f0, hi=1.0f6)
         end
         vtk["u"] = (ux, uy, uz)
         vtk["rho"] = ρ3
@@ -890,6 +907,7 @@ function step!(model::Model)
                 domain.ρ.data, domain.flags.data, domain.mass.data,
                 domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                 Nd, Nx, Ny, Nz; ndrange = N)
+            advance_blowing_agent!(model, domain)
             advance_dissolved_gas!(model, domain, t_odd)
         end
 

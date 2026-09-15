@@ -22,6 +22,7 @@ mutable struct PowderJet{T<:AbstractFloat}
     pvz::Vector{T}
     pm::Vector{T}        # lattice mass (units of ρ×cell)
     alive::Vector{Bool}
+    agent_frac::T        # fraction of deposited mass written to a (n-units)
 end
 
 @inline function _jet_basis(dx::T, dy::T, dz::T) where {T}
@@ -52,6 +53,7 @@ function PowderJet{T}(;
     nparcels = 16,
     nmax = 2048,
     enabled = true,
+    agent_frac = zero(T),
 ) where {T<:AbstractFloat}
     d = SVector{3,T}(T(dir[1]), T(dir[2]), T(dir[3]))
     nrm = sqrt(d[1]*d[1] + d[2]*d[2] + d[3]*d[3])
@@ -63,7 +65,7 @@ function PowderJet{T}(;
         Int(nparcels), nmax,
         zeros(T, nmax), zeros(T, nmax), zeros(T, nmax),
         zeros(T, nmax), zeros(T, nmax), zeros(T, nmax),
-        zeros(T, nmax), fill(false, nmax),
+        zeros(T, nmax), fill(false, nmax), T(agent_frac),
     )
 end
 
@@ -73,12 +75,14 @@ function PowderJet(U::Units{T};
     dir = (0, 0, -1),
     nparcels = 16, nmax = 2048,
     enabled = true,
+    agent_frac = 0,
 ) where {T}
     md = mdot isa Quantity ? T(ustrip(u"kg/s", uconvert(u"kg/s", mdot))) : T(mdot)
     wl = w isa Quantity ? T(ustrip(u"m", w) / U.m) : T(w)
     vl = v isa Quantity ? T(ustrip(u"m/s", v) * U.s / U.m) : T(v)
     return PowderJet{T}(; mdot=md, w=wl, v=vl, x=T(x), y=T(y), z=T(z), dir=dir,
-                        nparcels=nparcels, nmax=nmax, enabled=enabled)
+                        nparcels=nparcels, nmax=nmax, enabled=enabled,
+                        agent_frac=T(agent_frac))
 end
 
 function set_powder_jet_position!(J::PowderJet{T}, x, y, z=J.z) where {T}
@@ -128,7 +132,7 @@ function _spawn_parcels!(J::PowderJet{T}, m_each::T) where {T}
     return nothing
 end
 
-@inline function _deposit_parcel!(mp, mass, flags, n::Int, pmass, τ_p)
+@inline function _deposit_parcel!(mp, mass, flags, n::Int, pmass, τ_p, a, fa)
     if τ_p > 0
         @inbounds mp[n] += pmass
         return pmass
@@ -136,7 +140,8 @@ end
         @inbounds begin
             su = flags[n] & TYPE_SU
             if su == TYPE_I || su == TYPE_F
-                mass[n] += pmass
+                mass[n] += (one(pmass) - fa) * pmass
+                a[n] += fa * pmass
                 return pmass
             end
         end
@@ -146,7 +151,7 @@ end
 
 # DDA along dir for at most dist_max cells. Hits I/F → deposit; S/OOB → die.
 @inline function _walk_parcel!(
-    mp, mass, flags, ϕ, τ_p,
+    mp, mass, flags, ϕ, τ_p, a, fa,
     o0x::T, o0y::T, o0z::T, dirx::T, diry::T, dirz::T,
     dist_max::T, pmass::T, Nx::Int, Ny::Int, Nz::Int,
 ) where {T}
@@ -173,11 +178,11 @@ end
             hit, t, _nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
                                    T(ix), T(iy), T(iz))
             if hit && t > zero(T) && t <= remaining + T(0.5)
-                dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+                dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p, a, fa)
                 return ox, oy, oz, false, dm
             end
         elseif su == TYPE_F
-            dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+            dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p, a, fa)
             return ox, oy, oz, false, dm
         end
         tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
@@ -207,6 +212,8 @@ function advance_powder_jet!(model, domain)
     ϕ = Array(domain.ϕ.data)
     mp = Array(domain.mp.data)
     mass = Array(domain.mass.data)
+    aA = Array(domain.a.data)
+    fa = T(J.agent_frac)
     if J.enabled && J.mdot > 0 && J.nparcels > 0
         m_step = T(J.mdot * U.s / U.kg)
         _spawn_parcels!(J, m_step / T(J.nparcels))
@@ -223,7 +230,7 @@ function advance_powder_jet!(model, domain)
         end
         dirx /= nd; diry /= nd; dirz /= nd
         ox, oy, oz, live, dm = _walk_parcel!(
-            mp, mass, flags, ϕ, τ_p,
+            mp, mass, flags, ϕ, τ_p, aA, fa,
             J.px[i], J.py[i], J.pz[i], dirx, diry, dirz,
             J.v, J.pm[i], Nx, Ny, Nz,
         )
@@ -237,5 +244,6 @@ function advance_powder_jet!(model, domain)
     end
     copyto!(domain.mp.data, mp)
     τ_p > 0 || copyto!(domain.mass.data, mass)
+    fa > 0 && copyto!(domain.a.data, aA)
     return nothing
 end

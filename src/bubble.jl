@@ -354,6 +354,18 @@ function initialize_dissolved!(model::Model, domain::Domain)
     return nothing
 end
 
+function advance_blowing_agent!(model::Model, domain::Domain)
+    domain.k_a > 0 || return nothing
+    N = get_N(domain)
+    blowing_agent_kernel!(model.backend, model.workgroup)(
+        domain.a.data, domain.a_res.data, domain.c.data,
+        domain.flags.data, domain.ϕ.data, domain.fs.data, domain.T.data,
+        domain.k_a, domain.E_a, domain.Y_a, domain.k_H, domain.a_fs_max;
+        ndrange = N)
+    KernelAbstractions.synchronize(model.backend)
+    return nothing
+end
+
 function advance_dissolved_gas!(model::Model, domain::Domain, _t_odd::Bool)
     domain.ω_c > 0 || return nothing
     N = get_N(domain)

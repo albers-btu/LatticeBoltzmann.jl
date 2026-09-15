@@ -15,6 +15,7 @@ using Test, StaticArrays, CUDA
 	include("test_bubble.jl")
 	include("test_dissolved.jl")
 	include("test_nucleation.jl")
+	include("test_blowing_agent.jl")
 
 	model = Model(64, 64, 64, 1.0; backend=CUDABackend())
 	#model = Model(64, 64, 64, 1.0)

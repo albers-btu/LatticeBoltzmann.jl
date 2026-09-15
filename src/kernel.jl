@@ -2060,4 +2060,41 @@ end
     end
 end
 
+# First-order Arrhenius: a → dissolved c. da = a (1 − e^{−k}), k = k_a e^{−E_a/T}.
+@kernel function blowing_agent_kernel!(
+    a, a_res, c, @Const(flags), @Const(ϕ), @Const(fs), @Const(T),
+    k_a::CType, E_a::CType, Y_a::CType, k_H::CType, fs_max::CType
+) where {CType}
+    n = @index(Global)
+    @inbounds begin
+        flagsn = flags[n]
+        su = flagsn & TYPE_SU
+        if (flagsn & TYPE_BO) == TYPE_S || su == TYPE_G
+            nothing
+        elseif fs[n] >= fs_max
+            nothing
+        else
+            an = a[n]
+            if an > CType(1e-20)
+                Tn = T[n]
+                Tn = ifelse(Tn > CType(1e-6), Tn, CType(1e-6))
+                k = k_a * exp(-E_a / Tn)
+                k = ifelse(k > zero(CType), k, zero(CType))
+                decay = exp(-k)
+                da = an * (one(CType) - decay)
+                a[n] = an - da
+                a_res[n] += da
+                fillc = ϕ[n]
+                fillc = ifelse(fillc > CType(1e-6), fillc, one(CType))
+                dn = Y_a * da
+                if k_H > zero(CType)
+                    c[n] += dn * k_H / fillc
+                else
+                    c[n] += dn
+                end
+            end
+        end
+    end
+end
+
 end

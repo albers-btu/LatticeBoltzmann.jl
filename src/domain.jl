@@ -60,6 +60,12 @@ mutable struct Domain{
         bid::Memory{CType, Aρ}   # enclosed bubble id on G/I; 0 = none
         ω_c::CType               # D3Q7 ω for dissolved; 0 → off
         k_H::CType               # Henry c = k_H p; 0 → no interface exchange
+        a::Memory{CType, Aρ}     # blowing-agent amount (n-units)
+        a_res::Memory{CType, Aρ} # decomposed residue (same units)
+        k_a::CType               # Arrhenius k0 [1/step]; 0 → off
+        E_a::CType               # activation in lattice T (E/K)
+        Y_a::CType               # yield: Δn_dissolved = Y_a (−Δa)
+        a_fs_max::CType          # decompose only if fs < this; 1 → solid too
     end
 
     @static if TEMPERATURE
@@ -138,6 +144,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     T_p::CType = one(CType),
     α_c::CType = zero(CType),
     k_H::CType = zero(CType),
+    k_a::CType = zero(CType),
+    E_a::CType = zero(CType),
+    Y_a::CType = one(CType),
+    a_fs_max::CType = one(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
 
@@ -190,6 +200,14 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         ω_c = α_c > zero(CType) ?
             one(CType) / (CType(2) * α_c + CType(1) / CType(2)) : zero(CType)
         kH = CType(k_H)
+        amem = Memory(AT{CType}(undef, N))
+        fill!(amem.data, zero(CType))
+        ares = Memory(AT{CType}(undef, N))
+        fill!(ares.data, zero(CType))
+        ka = CType(k_a)
+        Ea = CType(E_a)
+        Ya = CType(Y_a)
+        afs = CType(a_fs_max)
     end
 
     @static if TEMPERATURE
@@ -227,7 +245,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p), p_gas,
-                cmem, cimem, nflux, bid, ω_c, kH,
+                cmem, cimem, nflux, bid, ω_c, kH, amem, ares, ka, Ea, Ya, afs,
                 αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
@@ -244,7 +262,7 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp,
                 CType(τ_p), CType(T_p), p_gas,
-                cmem, cimem, nflux, bid, ω_c, kH,
+                cmem, cimem, nflux, bid, ω_c, kH, amem, ares, ka, Ea, Ya, afs,
                 UInt64(0)
             )
         end
@@ -295,6 +313,32 @@ flags(domain::Domain) = domain.flags
     dissolved_D(domain::Domain{CType}) where CType =
         domain.ω_c > zero(CType) ?
             CType(0.25) * (one(CType) / domain.ω_c - CType(0.5)) : zero(CType)
+    agent(domain::Domain) = domain.a
+    agent_res(domain::Domain) = domain.a_res
+    arrhenius_k(k_a, E_a, T) = k_a * exp(-E_a / max(T, eps(typeof(T))))
+    function agent_inventory(domain::Domain{CType}) where {CType}
+        flags = Array(domain.flags.data)
+        aA = Array(domain.a.data)
+        rA = Array(domain.a_res.data)
+        cA = Array(domain.c.data)
+        ϕA = Array(domain.ϕ.data)
+        kH = domain.k_H
+        Sa = 0.0
+        Sr = 0.0
+        Sn = 0.0
+        @inbounds for n in eachindex(flags)
+            su = flags[n] & TYPE_SU
+            (su == TYPE_F || su == TYPE_I) || continue
+            Sa += Float64(aA[n])
+            Sr += Float64(rA[n])
+            ϕn = Float64(ϕA[n])
+            ϕn = ϕn < 0 ? 0.0 : (ϕn > 1 ? 1.0 : ϕn)
+            if kH > 0
+                Sn += ϕn * (Float64(cA[n]) - 1) / Float64(kH)
+            end
+        end
+        return (; a=CType(Sa), res=CType(Sr), dissolved=CType(Sn), total=CType(Sa + Sr))
+    end
 end
 
 @static if TEMPERATURE
