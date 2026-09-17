@@ -54,8 +54,8 @@ mutable struct Domain{
         τ_p::CType               # powder lifetime (lattice steps); 0 → msrc→mass
         T_p::CType               # powder temperature (lattice)
         p_gas::Memory{CType, Aρ} # lattice gas pressure for reconstruction; p_atm=1/3
-        c::Memory{CType, Aρ}     # dissolved gas (D3Q7; c = 1+Σg)
-        ci::Memory{SType, Afi}
+        c::Memory{CType, Aρ}     # dissolved gas (D3Q7; c = Σg)
+        ci::Memory{SType, Afi}   # D3Q7 populations for c
         nflux::Memory{CType, Aρ} # Henry Δn this step (n-units)
         bid::Memory{CType, Aρ}   # enclosed bubble id on G/I; 0 = none
         ω_c::CType               # D3Q7 ω for dissolved; 0 → off

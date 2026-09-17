@@ -13,7 +13,7 @@ export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING
 
 include("units.jl")
 export Units
-export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, si_σT, si_S, si_enthalpy, si_mass, si_h, lbm_ν, lbm_νT, lbm_g, lbm_σ, lbm_σT, lbm_u, lbm_T, lbm_Q, lbm_q, lbm_h, lbm_γ, lbm_Λ, lbm_evap, lbm_S, lbm_s, lbm_rad, lbm_αT, σ_SB
+export si_x, si_t, si_u, si_ρ, si_p, si_T, si_Q, si_q, si_σT, si_S, si_enthalpy, si_mass, si_h, lbm_ν, lbm_νT, lbm_g, lbm_σ, lbm_σT, lbm_p, lbm_u, lbm_T, lbm_Q, lbm_q, lbm_h, lbm_γ, lbm_Λ, lbm_evap, lbm_S, lbm_s, lbm_rad, lbm_αT, capillary_s, σ_LAT_MAX, σ_SB
 
 include("flags.jl")
 export TYPE_S, TYPE_E, TYPE_T, TYPE_F, TYPE_I, TYPE_G, TYPE_H, TYPE_MS
@@ -51,9 +51,10 @@ export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 include("model.jl")
 include("bubble.jl")
 export BubbleTracker, update_bubbles!, bubble_records, set_bubble_n!
-export Nucleation, nucleate_bubbles!, foam_metrics
+export Nucleation, nucleate_bubbles!, foam_metrics, liquid_column_depth
 export young_laplace_p, bubble_radius, P_ATM_LAT
 export epstein_plesset_R2
+export poisson_disk_3d, paint_spherical_nuclei!, equilibrate_nuclei_n!, settle_nuclei!
 export Model
 export get_D
 export run!, export!

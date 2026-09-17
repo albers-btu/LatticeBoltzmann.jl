@@ -1,7 +1,9 @@
 # Enclosed TYPE_G bubbles: p V = n T_gas (lattice). Atmosphere is TYPE_G
-# connected to the top lid; those cells keep p_atm (ρ_gas = 1 at σ = 0).
-# Reconstruction uses ρ_gas = 3 p − 6 σ κ with p = n T / V on enclosed
-# components. Coalescence/split conserves n by carrying n/V on gas cells.
+# connected to the top lid; those cells keep p_atm = ρ/3 (FSLBM gauge so a
+# flat free surface does not accelerate). Kinetic 1 atm is lbm_p(101325 Pa)
+# and is used for HK/recoil, not for this gauge. Reconstruction uses
+# ρ_gas = 3 p − 6 σ κ with p = n T / V on enclosed components.
+# Coalescence/split conserves n by carrying n/V on gas cells.
 #
 # Off by default (p_gas stays p_atm). Körner / LBfoam closed-bubble model.
 
@@ -288,31 +290,46 @@ function _write_p_gas!(B::BubbleTracker{T}, flags, ϕ, p_gas, bid, Nx::Int, Ny::
     return nothing
 end
 
-# Distance to another bubble's I/G in the liquid half-space (along ∇ϕ).
-# LBfoam uses a normal ray + PLIC; for d_max ≲ 4 a forward stencil is equivalent
-# and does not miss thin films.
+# LBfoam Appendix A: march along −n (liquid half-space) up to d_max and
+# return PLIC-corrected distance to another bubble's I/G. −1 if none.
 function _film_distance(flags, bid, ϕ, Nx, Ny, Nz, n, my_id, d_max::T) where {T}
     n0 = n - 1
-    x = n0 % Nx
-    y = (n0 ÷ Nx) % Ny
-    z = n0 ÷ (Nx * Ny)
-    r = max(1, ceil(Int, d_max))
-    dmin = T(-1)
-    @inbounds for dz in (-r):r, dy in (-r):r, dx in (-r):r
-        (dx == 0 && dy == 0 && dz == 0) && continue
-        dist = sqrt(T(dx * dx + dy * dy + dz * dz))
-        dist > d_max && continue
-        ix, iy, iz = x + 1 + dx, y + 1 + dy, z + 1 + dz
-        (1 <= ix <= Nx && 1 <= iy <= Ny && 1 <= iz <= Nz) || continue
-        j = _cell_n(ix, iy, iz, Nx, Ny)
+    ix = n0 % Nx + 1
+    iy = (n0 ÷ Nx) % Ny + 1
+    iz = n0 ÷ (Nx * Ny) + 1
+    ϕ0 = T(ϕ[n])
+    phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+    nϕ = calculate_normal_py(phij)
+    n2 = nϕ[1] * nϕ[1] + nϕ[2] * nϕ[2] + nϕ[3] * nϕ[3]
+    n2 <= eps(T) && return T(-1)
+    dirx, diry, dirz = -nϕ[1], -nϕ[2], -nϕ[3]
+    dstar = abs(plic_cube(ϕ0, nϕ))
+    ox = T(ix) + dirx * T(0.51)
+    oy = T(iy) + diry * T(0.51)
+    oz = T(iz) + dirz * T(0.51)
+    max_step = max(1, ceil(Int, d_max) + 3)
+    @inbounds for s in 1:max_step
+        jx = round(Int, ox)
+        jy = round(Int, oy)
+        jz = round(Int, oz)
+        (1 <= jx <= Nx && 1 <= jy <= Ny && 1 <= jz <= Nz) || return T(-1)
+        j = _cell_n(jx, jy, jz, Nx, Ny)
         fl = flags[j]
-        (fl & TYPE_S) != 0x00 && continue
+        (fl & TYPE_BO) == TYPE_S && return T(-1)
         su = fl & TYPE_SU
         idj = Int(round(bid[j]))
-        ((su == TYPE_I || su == TYPE_G) && idj > 0 && idj != my_id) || continue
-        dmin = dmin < zero(T) ? dist : min(dmin, dist)
+        if (su == TYPE_I || su == TYPE_G) && idj > 0 && idj != my_id
+            walked = T(s)
+            ϕh = T(ϕ[j])
+            dprime = walked - max(one(T) - ϕh, zero(T))
+            return max(dprime - dstar, zero(T))
+        end
+        ox += dirx
+        oy += diry
+        oz += dirz
+        hypot(ox - T(ix), oy - T(iy), oz - T(iz)) > d_max + T(1.5) && return T(-1)
     end
-    return dmin
+    return T(-1)
 end
 
 function _apply_disjoining!(B::BubbleTracker{T}, flags, ϕ, pg, bd, Nx, Ny, Nz) where {T}
@@ -489,6 +506,26 @@ function set_bubble_n!(model::Model, id::Integer, n)
 end
 
 function initialize_dissolved!(model::Model, domain::Domain)
+    domain.ω_c > 0 || return nothing
+    N = get_N(domain)
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    initialize_dissolved_kernel!(model.backend, model.workgroup)(
+        domain.ci.data, domain.c.data, domain.u.data, N, Nx, Ny, Nz; ndrange = N)
+    KernelAbstractions.synchronize(model.backend)
+    return nothing
+end
+
+function snap_interface_henry!(model::Model, domain::Domain)
+    domain.ω_c > 0 && domain.k_H > 0 || return nothing
+    cA = Array(domain.c.data)
+    fl = Array(domain.flags.data)
+    pg = Array(domain.p_gas.data)
+    @inbounds for n in eachindex(cA)
+        (fl[n] & TYPE_SU) == TYPE_I || continue
+        cA[n] = domain.k_H * pg[n]
+    end
+    copyto!(domain.c.data, cA)
+    initialize_dissolved!(model, domain)
     return nothing
 end
 
@@ -504,17 +541,15 @@ function advance_blowing_agent!(model::Model, domain::Domain)
     return nothing
 end
 
-function advance_dissolved_gas!(model::Model, domain::Domain, _t_odd::Bool)
+function advance_dissolved_gas!(model::Model, domain::Domain, t_odd::Bool)
     domain.ω_c > 0 || return nothing
     N = get_N(domain)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    D = dissolved_D(domain)
-    dissolved_diffuse_kernel!(model.backend, model.workgroup)(
-        domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,
-        D, Nx, Ny, Nz; ndrange = N)
-    dissolved_henry_kernel!(model.backend, model.workgroup)(
-        domain.c.data, domain.nflux.data, domain.ci.data, domain.flags.data,
-        domain.ϕ.data, domain.p_gas.data, domain.k_H; ndrange = N)
+    kern = t_odd ? dissolved_odd_kernel! : dissolved_even_kernel!
+    kern(model.backend, model.workgroup)(
+        domain.ci.data, domain.c.data, domain.nflux.data,
+        domain.flags.data, domain.u.data, domain.p_gas.data, domain.ϕ.data,
+        domain.k_H, domain.ω_c, N, Nx, Ny, Nz; ndrange = N)
     KernelAbstractions.synchronize(model.backend)
     B = model.bubbles
     if B isa BubbleTracker && B.enabled && domain.k_H > 0
@@ -530,6 +565,29 @@ end
     return x + (y - 1) * Nx + (z - 1) * Nx * Ny
 end
 
+# Longest run of liquid metal (TYPE_F or TYPE_I, fs < 1) in column (x,y).
+# A 3³ embryo needs ≳ 12 cells of melt under the spot.
+function liquid_column_depth(flags, fs, Nx::Int, Ny::Int, Nz::Int, x::Int, y::Int)
+    best = 0
+    run = 0
+    @inbounds for z in 2:(Nz - 1)
+        n = _cell_n(x, y, z, Nx, Ny)
+        su = flags[n] & TYPE_SU
+        if (su == TYPE_F || su == TYPE_I) && !is_solid_fraction(fs[n])
+            run += 1
+            best = max(best, run)
+        else
+            run = 0
+        end
+    end
+    return best
+end
+function liquid_column_depth(model::Model, x::Int, y::Int)
+    d = model.domains[1]
+    return liquid_column_depth(Array(d.flags.data), Array(d.fs.data),
+                               Int(d.Nx), Int(d.Ny), Int(d.Nz), x, y)
+end
+
 function _cube_is_fluid(flags, fs, Nx, Ny, Nz, cx, cy, cz, R)
     @inbounds for dz in (-R):R, dy in (-R):R, dx in (-R):R
         x, y, z = cx + dx, cy + dy, cz + dz
@@ -541,14 +599,15 @@ function _cube_is_fluid(flags, fs, Nx, Ny, Nz, cx, cy, cz, R)
     return true
 end
 
-# Only enclosed bubbles (and nuclei planted this pass) occupy space.
-# Atmosphere TYPE_G and the free-surface TYPE_I must not push nuclei to the
-# bottom of the pad. Walls do occupy, so a liquid pad cannot nucleate on the floor.
+# Enclosed bubbles occupy the Poisson ball d_min. Atmosphere / free-surface I
+# are not a 3D obstacle (that pushed nuclei to the floor). Walls occupy d_min.
+# Lid clearance is `_free_surface_clearance` (liquid column to the interface).
 function _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, cx, cy, cz, d_min)
     r = max(1, ceil(Int, d_min))
     d2 = d_min * d_min
     @inbounds for dz in (-r):r, dy in (-r):r, dx in (-r):r
-        dx * dx + dy * dy + dz * dz > d2 && continue
+        dist2 = dx * dx + dy * dy + dz * dz
+        dist2 > d2 && continue
         x, y, z = cx + dx, cy + dy, cz + dz
         (1 <= x <= Nx && 1 <= y <= Ny && 1 <= z <= Nz) || continue
         n = _cell_n(x, y, z, Nx, Ny)
@@ -567,6 +626,25 @@ function _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, cx, cy, cz, d
         end
     end
     return false
+end
+
+# Liquid TYPE_F cells toward +z until the free surface. Closed boxes (wall
+# above, no I/G) return true. need=R+2 → two liquid cells of film under the lid.
+function _free_surface_clearance(flags, fs, Nx, Ny, Nz, x, y, z, need)
+    up = 0
+    @inbounds for zz in (z + 1):(Nz - 1)
+        n = _cell_n(x, y, zz, Nx, Ny)
+        su = flags[n] & TYPE_SU
+        if su == TYPE_I || su == TYPE_G
+            return up >= need
+        end
+        if su == TYPE_F && !is_solid_fraction(fs[n])
+            up += 1
+            continue
+        end
+        return true
+    end
+    return true
 end
 
 function _plant_nucleus!(
@@ -621,6 +699,7 @@ function nucleate_bubbles!(
     lo, hi_x, hi_y, hi_z = 3 + R, Nx - 2 - R, Ny - 2 - R, Nz - 2 - R
     hi_x < lo && return Int[]
     parent, ncomp, which, is_atm = label_gas_components(flags, Nx, Ny, Nz)
+    need_up = R + 3   # 3 liquid cells of film above a 3³ embryo (R=1)
     cands = Tuple{Int,Int,Int}[]
     @inbounds for z in lo:hi_z, y in lo:hi_y, x in lo:hi_x
         n = _cell_n(x, y, z, Nx, Ny)
@@ -628,10 +707,8 @@ function nucleate_bubbles!(
         is_solid_fraction(fs[n]) && continue
         Nuc.c_star > 0 && c[n] <= Nuc.c_star && continue
         Nuc.p_cell < 1 && rand(T) > Nuc.p_cell && continue
-        # R+1 liquid shell: a 3³ nucleus in a 3-cell film opens the free
-        # surface and the laser keyhole blows. Homogeneous nucleation needs
-        # bulk liquid around the embryo.
-        _cube_is_fluid(flags, fs, Nx, Ny, Nz, x, y, z, R + 1) || continue
+        _cube_is_fluid(flags, fs, Nx, Ny, Nz, x, y, z, R) || continue
+        _free_surface_clearance(flags, fs, Nx, Ny, Nz, x, y, z, need_up) || continue
         _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, x, y, z, Nuc.d_min) && continue
         push!(cands, (x, y, z))
     end
@@ -645,7 +722,8 @@ function nucleate_bubbles!(
     @inbounds for (x, y, z) in cands
         length(planted) >= ncap && break
         _too_close(flags, parent, which, is_atm, bid, Nx, Ny, Nz, x, y, z, Nuc.d_min) && continue
-        _cube_is_fluid(flags, fs, Nx, Ny, Nz, x, y, z, R + 1) || continue
+        _cube_is_fluid(flags, fs, Nx, Ny, Nz, x, y, z, R) || continue
+        _free_surface_clearance(flags, fs, Nx, Ny, Nz, x, y, z, need_up) || continue
         core = _plant_nucleus!(
             flags, ϕ, mass, ρ, u, fs, fi, gi, Tfield,
             w, vel, N, Nx, Ny, Nz, x, y, z, R, t_odd, CType)
@@ -703,5 +781,123 @@ function _seed_new_nuclei!(B::BubbleTracker{T}, cores, flags, ϕ, p_gas, bid, σ
         set_bubble_n!(B, k, n_over * peq * B.vol[k], flags, ϕ, p_gas, bid, Nx, Ny, Nz)
     end
     return B
+end
+
+# Poisson-disk centres for LBfoam-style initial nuclei (Bridson).
+function poisson_disk_3d(n::Int, d_min, xlim, ylim, zlim; max_tries::Int=200_000)
+    pts = NTuple{3,Float32}[]
+    d2 = Float32(d_min) * Float32(d_min)
+    tries = 0
+    while length(pts) < n && tries < max_tries
+        tries += 1
+        p = (Float32(xlim[1] + rand() * (xlim[2] - xlim[1])),
+             Float32(ylim[1] + rand() * (ylim[2] - ylim[1])),
+             Float32(zlim[1] + rand() * (zlim[2] - zlim[1])))
+        ok = true
+        @inbounds for q in pts
+            dx, dy, dz = p[1] - q[1], p[2] - q[2], p[3] - q[3]
+            if dx * dx + dy * dy + dz * dz < d2
+                ok = false
+                break
+            end
+        end
+        ok && push!(pts, p)
+    end
+    length(pts) == n || error("poisson_disk_3d placed $(length(pts))/$n sites")
+    return pts
+end
+
+# Paint nuclei into `flags`. Walls stay TYPE_S.
+# `Hfill`: z ≤ Hfill is liquid (F) except nuclei; above is atmosphere (G).
+# Omit Hfill for a closed liquid box (all interior F except nuclei).
+# `shell=false` (default): all r ≤ R is G; FSLBM converts the outer layer
+# at initialize (quieter than a painted I coat). `shell=true`: G for r ≤ R−1
+# and a D3Q19 TYPE_I coat so no G–F link in the hydro stencil.
+function paint_spherical_nuclei!(flags, Nx, Ny, Nz, centers, R;
+                                 Hfill::Union{Int,Nothing}=nothing, shell::Bool=false)
+    Rc = shell ? max(Float32(R) - one(Float32), zero(Float32)) : Float32(R)
+    Rc2 = Rc * Rc
+    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = _cell_n(x, y, z, Nx, Ny)
+        if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
+            flags[n] = TYPE_S
+            continue
+        end
+        inn = false
+        for (xc, yc, zc) in centers
+            dx, dy, dz = Float32(x) - Float32(xc), Float32(y) - Float32(yc), Float32(z) - Float32(zc)
+            if dx * dx + dy * dy + dz * dz <= Rc2
+                inn = true
+                break
+            end
+        end
+        if inn
+            flags[n] = TYPE_G
+        elseif Hfill === nothing || z <= Hfill
+            flags[n] = TYPE_F
+        else
+            flags[n] = TYPE_G
+        end
+    end
+    if shell
+        toI = Int[]
+        @inbounds for z in 2:(Nz - 1), y in 2:(Ny - 1), x in 2:(Nx - 1)
+            n = _cell_n(x, y, z, Nx, Ny)
+            flags[n] == TYPE_F || continue
+            hit = false
+            for dz in -1:1, dy in -1:1, dx in -1:1
+                (dx == 0 && dy == 0 && dz == 0) && continue
+                (dx != 0 && dy != 0 && dz != 0) && continue
+                j = _cell_n(x + dx, y + dy, z + dz, Nx, Ny)
+                if flags[j] == TYPE_G
+                    hit = true
+                    break
+                end
+            end
+            hit && push!(toI, n)
+        end
+        @inbounds for n in toI
+            flags[n] = TYPE_I
+        end
+    end
+    return flags
+end
+
+# After initialize!, set each enclosed bubble to n = n_over (p_atm + 2σ/R) V.
+function equilibrate_nuclei_n!(model::Model; n_over=1)
+    B = model.bubbles
+    B isa BubbleTracker || return B
+    d = model.domains[1]
+    σ = d.σ
+    flags = Array(d.flags.data)
+    ϕA = Array(d.ϕ.data)
+    Nx, Ny, Nz = Int(d.Nx), Int(d.Ny), Int(d.Nz)
+    @inbounds for k in 1:B.nb
+        R = bubble_radius(Float64(B.vol[k]))
+        peq = young_laplace_p(σ, max(Float32(R), 0.5f0), B.p_atm)
+        set_bubble_n!(B, k, Float32(n_over) * peq * B.vol[k],
+                      flags, ϕA, d.p_gas.data, d.bid.data, Nx, Ny, Nz)
+    end
+    return B
+end
+
+# σ = 0, k_H = 0 hydro settle, then restore σ / Henry and Laplace-load n.
+# Voxel I shells quiet down before CSF and growth. nsteps = 0 skips the run.
+function settle_nuclei!(model::Model; nsteps::Int=80, σ=nothing, n_over=1)
+    B = model.bubbles
+    B isa BubbleTracker || return B
+    nsteps < 0 && throw(ArgumentError("nsteps must be ≥ 0"))
+    d = model.domains[1]
+    σ_on = σ === nothing ? d.σ : eltype(d.σ)(σ)
+    kH_on = d.k_H
+    d.σ = zero(d.σ)
+    d.k_H = zero(d.k_H)
+    equilibrate_nuclei_n!(model; n_over)
+    nsteps > 0 && run!(model, nsteps)
+    d.σ = σ_on
+    d.k_H = kH_on
+    equilibrate_nuclei_n!(model; n_over)
+    snap_interface_henry!(model, d)
+    return model
 end
 

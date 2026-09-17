@@ -1,7 +1,7 @@
 # DED-style 316L melt track. 2 kW, 0.5 mm 1/e² spot. SI box is independent of
-# Δx: change `si_dx` only to refine. Heat: PLIC + Fresnel (multi-bounce).
-# Powder: ballistic Gaussian jet from behind or ahead of the spot along x.
-# Set `n_layers` to retrace. Evaporation cooling, mass loss, and recoil are on.
+# Δx: change `si_dx` only to refine. Δt from SI σ via capillary_s (σ_lat ≈ 0.03).
+# Powder: ballistic Gaussian jet; `si_agent_frac` is the blowing-agent loading.
+# Foam (nucleation / pV=nT / disjoining) is on. Evaporation + recoil on.
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
@@ -62,8 +62,12 @@ si_mdot   = 2.0u"g/minute"
 si_eta    = 0.7
 si_powder_τ = 0.05u"s"                  # unmelted powder lifetime; 0 → instant metal
 si_v_jet  = 8.0u"m/s"                   # parcel speed in the jet
-si_σ      = 0.015u"N/m"
-si_σT     = -1.5e-5u"N/m/K"
+si_σ      = 1.5u"N/m"                   # 316L-like; Δt from capillary_s
+si_σT     = -4.0e-4u"N/m/K"
+si_g      = 9.81u"m/s^2"
+si_k_a    = 2.0e5u"s^-1"                # blowing-agent mix in the jet
+si_E_a    = 6.7e3u"K"
+si_agent_frac = 0.04                    # mass fraction written to a
 q_max     = 0.04f0
 
 # sgn = +1 when the laser travels +x. Trailing nozzle sits behind that motion.
@@ -113,20 +117,16 @@ n_layers >= 1 || throw(ArgumentError("n_layers must be ≥ 1"))
 si_ν_l = ustrip(u"m^2/s", α_l_si) * u"m^2/s"
 si_ν_s = 0.5 * si_ν_l
 si_ν_lT = -2.0e-9u"m^2/s/K"              # liquid thins with T; ν_sT = 0
-lbm_α_true = 0.1
 # Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx so the
-# SI box and the SI spot stay put when you refine.
+# SI box and the SI spot stay put when you refine. Δt from SI σ (CSF).
 L     = max(4, round(Int, ustrip(u"m", si_H) / ustrip(u"m", si_dx)))
 m     = ustrip(u"m", si_H) / L
 Nx    = max(16, round(Int, ustrip(u"m", si_Lx) / m))
 Ny    = max(16, round(Int, ustrip(u"m", si_Ly) / m))
 Hfill = L + 2
-s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
-lbm_u = 0.05
-si_u = (lbm_u * m / s) * u"m/s"
-
-units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
+units = Units(si_H, si_ρ, si_σ; x=L, σ_lat=0.03, u=0.05, ρ=1, T=Float32,
               K=ustrip(u"K", si_Tm), cp=si_cp)
+s = units.s
 
 w_m    = 0.5 * ustrip(u"m", si_d_spot)
 I_peak = 2 * ustrip(u"W", si_P) / (π * w_m^2)
@@ -156,15 +156,22 @@ model = Model(Nx, Ny, Nz, units;
               ν_l = si_ν_l,
               k_sT = si_k_sT, k_lT = si_k_lT, cp_sT = si_cp_sT, cp_lT = si_cp_lT,
               ν_lT = si_ν_lT,
-              β = 0.0f0, gz = 0.0f0,
+              β = 0.0f0, gz = -si_g,
               σ = si_σ, σT = si_σT, Tσ = si_Tm,
+              α_c = α_l_si, k_H = 3.0f0,
+              k_a = si_k_a, E_a = si_E_a, Y_a = 1, a_fs_max = 0.5,
               latent = si_Lheat,
               Ts = si_Tm, Tl = si_Tm, K0 = si_K0,
               latent_v = si_Lv, T_v = si_Tv, M = si_M,
               T_avg = Float32(lbm_T(units, si_Tm)),
               emissivity = 0.4, T_rad = si_T_init,
               powder_τ = si_powder_τ, powder_T = si_T_init,
-              backend = CUDABackend())
+              backend = CUDABackend(),
+              bubbles = BubbleTracker{Float32}(;
+                  nucleation=Nucleation{Float32}(; d_min=10, R=1, c_star=1.02f0,
+                                                 n_max=3, n_over=1.12f0, every=40,
+                                                 n_total_max=32),
+                  k_Π=0.08f0, d_max=4))
 
 Tm      = Float32(lbm_T(units, si_Tm))
 T_init  = Float32(lbm_T(units, si_T_init))
@@ -197,10 +204,10 @@ h_lat   = Float32(lbm_h(units, si_h_sub))
 if Q_full > q_max
     @warn "surface peak Q_lat=$(Q_full) > q_max=$(q_max); raise skin/δ or lower P" Q_full nskin
 end
-if σlat > 0.05f0
-    @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
+if σlat > σ_LAT_MAX
+    @warn "lattice σ=$(σlat) ≳ $(σ_LAT_MAX); reduce Δt (capillary_s), not SI σ" σlat
 end
-@info "DED 316L multilayer track" n_layers bidirectional si_dwell si_powder_delay nsteps_powder_delay Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_mm=(1e3*w_m) w_cells scan_mm=(1e3*m*abs(x1-x0)) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet A0 nskin Q_full h_lat γ_s=model.domains[1].γ_s γ_l=model.domains[1].γ_l τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
+@info "DED 316L multilayer track" n_layers bidirectional si_dwell si_powder_delay nsteps_powder_delay Nx Ny Nz Hfill m_um=(1e6*m) s_us=(1e6*s) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_mm=(1e3*w_m) w_cells scan_mm=(1e3*m*abs(x1-x0)) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet si_σ σlat fz=model.domains[1].fz p0v=model.domains[1].p0v A0 nskin Q_full h_lat γ_s=model.domains[1].γ_s γ_l=model.domains[1].γ_l τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init si_agent_frac
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
@@ -232,7 +239,8 @@ model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     nrays = 11, max_bounce = 8, every = qevery, skin = nskin)
 model.powder_jet = PowderJet(units; mdot = si_eta * si_mdot, w = 0.6 * si_d_spot,
                              v = si_v_jet, x = x0, y = y_las, z = z_noz,
-                             nparcels = 16, enabled = nsteps_powder_delay == 0)
+                             nparcels = 16, enabled = nsteps_powder_delay == 0,
+                             agent_frac = si_agent_frac)
 place_powder_jet!(model.powder_jet, x0, y_las, z_noz, z_aim, 1.0f0, dx_noz, jet_along, Nx)
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output_melt_pool")
@@ -255,6 +263,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             Nx, Ny, Nz, Hfill, x_las, y_las, model.units)
         b = energy_budget(d)
         m = mass_budget(d)
+        fm = foam_metrics(model)
         U = model.units
         next!(prog; showvalues = [
             (:layer, layer),
@@ -276,6 +285,8 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             (:Mevap_g, round(1e3 * si_mass(U, m.evap); digits=3)),
             (:Mres_g, round(1e3 * si_mass(U, m.residual); digits=3)),
             (:umax, round(umax; digits=3)),
+            (:nb, fm.nb),
+            (:a, round(fm.a; digits=2)),
             (:zI, zI),
             (:powder, model.powder_jet.enabled),
             (:MLUPS, round(mlups_ema; digits=1)),

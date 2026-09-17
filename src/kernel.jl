@@ -563,8 +563,9 @@ end
 end
 
 # Anisimov recoil: F = p_r n, p_r = 0.54 p_sat, n = ∇ϕ/|∇ϕ| (into liquid).
-# Λ_v = 0 → off. |F| capped so Guo Δu stays O(0.1). A 0.5 cap is Ma~0.4 per
-# step and a stationary keyhole jets; 0.12 keeps a dimple without blow-up.
+# Λ_v = 0 → off. p_sat uses kinetic lbm_p so Δp sits on the same scale as
+# Young–Laplace 2σ/R. Cap so Guo Δu stays O(0.1) if a lattice-only test
+# feeds an O(1) p0.
 @inline function recoil_force(
     Tfield, ϕ, n::Int, x::Int, y::Int, z::Int,
     Nx::Int, Ny::Int, Nz::Int,
@@ -573,7 +574,7 @@ end
     Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
     Tn = Tfield[n]
     pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
-    pr = ifelse(pr > CType(0.05), CType(0.05), pr)
+    pr = ifelse(pr > CType(0.10), CType(0.10), pr)
     pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
     xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
     xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
@@ -957,7 +958,7 @@ end
         u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
         ϕn = zero(CType)
     else
-        if (flagsn & TYPE_SU) == TYPE_I && (ϕn < 0 || ϕn > 1)
+        if (flagsn & TYPE_SU) == TYPE_I && (ϕn <= 0 || ϕn > 1)
             ϕn = CType(0.5)
         elseif (flagsn & TYPE_SU) == TYPE_F
             ϕn = one(CType)
@@ -1996,73 +1997,141 @@ end
 # ci[:,1] (index n) holds the diffused c* between the two kernels.
 @static if SURFACE && TEMPERATURE
 
-@inline function _liquid_c(c, flags, j, c0::CType) where {CType}
-    fl = flags[j]
-    ((fl & TYPE_BO) == TYPE_S || (fl & TYPE_SU) == TYPE_G) ? c0 : CType(c[j])
+# D3Q7 dissolved gas. Absolute g_i, c = Σg (not Peng T=1+Σg).
+# w0=1/4, w_axis=1/8, c_s²=1/4. geq = w c (1 + e·u / c_s²).
+# Unknown pops from TYPE_G: anti-bounce-back at c_H = k_H p (LBfoam eq. 29).
+# TYPE_S: bounce-back (no flux). nflux is Δc into the bubble; /k_H → n.
+@inline function cgeq_rest(cn::CType) where {CType}
+    return CType(0.25) * cn
+end
+@inline function cgeq_axis(cn::CType, ucomp::CType) where {CType}
+    return CType(0.125) * cn + CType(0.5) * cn * ucomp
 end
 
-@kernel function dissolved_diffuse_kernel!(
-    cstar, @Const(c), @Const(flags), @Const(u), D::CType, Nx::Int, Ny::Int, Nz::Int
+@inline function store_cgeq!(
+    ci, n, x, y, z, cn, ux, uy, uz, N, Nx, Ny, Nz, t_odd::Val{odd}, ::Type{CType}
+) where {odd, CType}
+    ci[f_index(n, 1, N)] = eltype(ci)(cgeq_rest(cn))
+    srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    store_pair!(ci, n, srcx, 2, cgeq_axis(cn, ux), cgeq_axis(cn, -ux), t_odd, N)
+    store_pair!(ci, n, srcy, 4, cgeq_axis(cn, uy), cgeq_axis(cn, -uy), t_odd, N)
+    store_pair!(ci, n, srcz, 6, cgeq_axis(cn, uz), cgeq_axis(cn, -uz), t_odd, N)
+    return nothing
+end
+
+@inline function _reconstruct_c_axis(
+    gpx::CType, gmx::CType, flp, flm, cH::CType, do_henry::Bool
 ) where {CType}
-    n = @index(Global)
-    @inbounds begin
-        flagsn = flags[n]
-        su = flagsn & TYPE_SU
-        if (flagsn & TYPE_BO) == TYPE_S || su == TYPE_G
-            cstar[n] = c[n]
-        else
-            n0 = n - 1
-            x = n0 % Nx
-            y = (n0 ÷ Nx) % Ny
-            z = n0 ÷ (Nx * Ny)
-            c0 = CType(c[n])
-            xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
-            xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
-            yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-            ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
-            zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
-            zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
-            cxp = _liquid_c(c, flags, xp, c0)
-            cxm = _liquid_c(c, flags, xm, c0)
-            cyp = _liquid_c(c, flags, yp, c0)
-            cym = _liquid_c(c, flags, ym, c0)
-            czp = _liquid_c(c, flags, zp, c0)
-            czm = _liquid_c(c, flags, zm, c0)
-            lap = cxp + cxm + cyp + cym + czp + czm - CType(6) * c0
-            ux = u[n, 1]; uy = u[n, 2]; uz = u[n, 3]
-            adv = ux * (ux > 0 ? c0 - cxm : cxp - c0) +
-                  uy * (uy > 0 ? c0 - cym : cyp - c0) +
-                  uz * (uz > 0 ? c0 - czm : czp - c0)
-            cstar[n] = c0 + D * lap - adv
-        end
+    do_henry || return gpx, gmx
+    gp_g = (flp & TYPE_SU) == TYPE_G
+    gm_g = (flm & TYPE_SU) == TYPE_G
+    two_w = CType(0.25)
+    if gp_g && gm_g
+        gax = cgeq_axis(cH, zero(CType))
+        return gax, gax
+    elseif gp_g
+        return two_w * cH - gmx, gmx
+    elseif gm_g
+        return gpx, two_w * cH - gpx
     end
+    return gpx, gmx
 end
 
-@kernel function dissolved_henry_kernel!(
-    c, nflux, @Const(cstar), @Const(flags), @Const(ϕ), @Const(pgas), k_H::CType
+@inline function dissolved_body!(
+    t_odd::Val{odd}, ci, c, nflux, flags, u, pgas, ϕ, k_H, ω_c,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, ::Type{CType}
+) where {odd, CType}
+    flagsn = flags[n]
+    su = flagsn & TYPE_SU
+    if (flagsn & TYPE_BO) == TYPE_S || su == TYPE_G
+        nflux[n] = zero(CType)
+        return nothing
+    end
+    n0 = n - 1
+    x = n0 % Nx
+    y = (n0 ÷ Nx) % Ny
+    z = n0 ÷ (Nx * Ny)
+    srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    srcxm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+    srcym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+    srczm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+    g0 = CType(ci[f_index(n, 1, N)])
+    gpx, gmx = load_pair(ci, n, srcx, 2, t_odd, N, CType)
+    gpy, gmy = load_pair(ci, n, srcy, 4, t_odd, N, CType)
+    gpz, gmz = load_pair(ci, n, srcz, 6, t_odd, N, CType)
+    do_henry = (k_H > zero(CType)) & (su == TYPE_I)
+    cH = do_henry ? k_H * pgas[n] : zero(CType)
+    cH = ifelse(cH > CType(1e-12), cH, CType(1e-12))
+    gpx, gmx = _reconstruct_c_axis(gpx, gmx, flags[srcx], flags[srcxm], cH, do_henry)
+    gpy, gmy = _reconstruct_c_axis(gpy, gmy, flags[srcy], flags[srcym], cH, do_henry)
+    gpz, gmz = _reconstruct_c_axis(gpz, gmz, flags[srcz], flags[srczm], cH, do_henry)
+    cn = g0 + gpx + gmx + gpy + gmy + gpz + gmz
+    cn = ifelse(cn > zero(CType), cn, zero(CType))
+    ux = u[n, 1]; uy = u[n, 2]; uz = u[n, 3]
+    om = one(CType) - ω_c
+    g0p = om * g0 + ω_c * cgeq_rest(cn)
+    gpxp = om * gpx + ω_c * cgeq_axis(cn, ux)
+    gmxp = om * gmx + ω_c * cgeq_axis(cn, -ux)
+    gpyp = om * gpy + ω_c * cgeq_axis(cn, uy)
+    gmyp = om * gmy + ω_c * cgeq_axis(cn, -uy)
+    gpzp = om * gpz + ω_c * cgeq_axis(cn, uz)
+    gmzp = om * gmz + ω_c * cgeq_axis(cn, -uz)
+    ci[f_index(n, 1, N)] = eltype(ci)(g0p)
+    store_pair!(ci, n, srcx, 2, gpxp, gmxp, t_odd, N)
+    store_pair!(ci, n, srcy, 4, gpyp, gmyp, t_odd, N)
+    store_pair!(ci, n, srcz, 6, gpzp, gmzp, t_odd, N)
+    cpost = g0p + gpxp + gmxp + gpyp + gmyp + gpzp + gmzp
+    dn = zero(CType)
+    if do_henry
+        fillc = ϕ[n]
+        fillc = ifelse(fillc > zero(CType),
+            ifelse(fillc < one(CType), fillc, one(CType)), zero(CType))
+        # Excess after D3Q7 stream+reconstruct vs Dirichlet c_H (eq. 27).
+        dn = fillc * (cn - cH) / k_H
+        store_cgeq!(ci, n, x, y, z, cH, ux, uy, uz, N, Nx, Ny, Nz, t_odd, CType)
+        cpost = cH
+    end
+    c[n] = cpost
+    nflux[n] = dn
+    return nothing
+end
+
+@kernel function dissolved_even_kernel!(
+    ci, c, nflux, @Const(flags), @Const(u), @Const(pgas), @Const(ϕ),
+    k_H::CType, ω_c::CType, N::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {CType}
     n = @index(Global)
+    @inbounds dissolved_body!(Val(false), ci, c, nflux, flags, u, pgas, ϕ, k_H, ω_c,
+                              N, Nx, Ny, Nz, Int(n), CType)
+end
+
+@kernel function dissolved_odd_kernel!(
+    ci, c, nflux, @Const(flags), @Const(u), @Const(pgas), @Const(ϕ),
+    k_H::CType, ω_c::CType, N::Int, Nx::Int, Ny::Int, Nz::Int
+) where {CType}
+    n = @index(Global)
+    @inbounds dissolved_body!(Val(true), ci, c, nflux, flags, u, pgas, ϕ, k_H, ω_c,
+                             N, Nx, Ny, Nz, Int(n), CType)
+end
+
+@kernel function initialize_dissolved_kernel!(
+    ci, @Const(c), @Const(u), N::Int, Nx::Int, Ny::Int, Nz::Int
+)
+    n = @index(Global)
     @inbounds begin
-        flagsn = flags[n]
-        su = flagsn & TYPE_SU
-        if (flagsn & TYPE_BO) == TYPE_S || su == TYPE_G
-            nflux[n] = zero(CType)
-        else
-            cs = CType(cstar[n])
-            henry = (k_H > zero(CType)) & (su == TYPE_I)
-            if henry
-                cH = k_H * pgas[n]
-                cH = ifelse(cH > CType(1e-8), cH, CType(1e-8))
-                fillc = ϕ[n]
-                fillc = ifelse(fillc > zero(CType),
-                    ifelse(fillc < one(CType), fillc, one(CType)), zero(CType))
-                nflux[n] = fillc * (cs - cH) / k_H
-                c[n] = cH
-            else
-                nflux[n] = zero(CType)
-                c[n] = cs
-            end
-        end
+        n0 = n - 1
+        x = n0 % Nx
+        y = (n0 ÷ Nx) % Ny
+        z = n0 ÷ (Nx * Ny)
+        CType = eltype(c)
+        cn = CType(c[n])
+        cn = ifelse(cn > zero(CType), cn, zero(CType))
+        ux = u[n, 1]; uy = u[n, 2]; uz = u[n, 3]
+        store_cgeq!(ci, n, x, y, z, cn, ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType)
     end
 end
 

@@ -234,8 +234,26 @@ end
                 oz = hz + epsn * dirz
                 continue
             end
+            # Front-facing PLIC miss: metal is opaque — absorb here. Do not
+            # walk into the first TYPE_F and dump the whole ray in one cell
+            # (that is the keyhole focusing crash). Back face: keep walking.
+            n2 = noutx * noutx + nouty * nouty + noutz * noutz
+            if n2 <= T(1e-12)
+                noutx, nouty, noutz = -dirx, -diry, -dirz
+                cθ = one(T)
+            end
+            if cθ > zero(T)
+                A = clamp(fresnel_absorptance(cθ, n_re, n_im), zero(T), one(T))
+                _deposit_along_normal!(Q, flags, A * Pleft * qfac, skin,
+                                       ix, iy, iz, noutx, nouty, noutz,
+                                       Nx, Ny, Nz)
+                break
+            end
         elseif su == TYPE_F
-            _add_q!(Q, n, Pleft * qfac)
+            # Bulk metal: Beer–Lambert along the ray, not a point source.
+            _deposit_along_normal!(Q, flags, Pleft * qfac, skin,
+                                   ix, iy, iz, -dirx, -diry, -dirz,
+                                   Nx, Ny, Nz)
             break
         end
         tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :

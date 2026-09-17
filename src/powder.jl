@@ -133,19 +133,19 @@ function _spawn_parcels!(J::PowderJet{T}, m_each::T) where {T}
 end
 
 @inline function _deposit_parcel!(mp, mass, flags, n::Int, pmass, τ_p, a, fa)
-    if τ_p > 0
-        @inbounds mp[n] += pmass
-        return pmass
-    else
-        @inbounds begin
-            su = flags[n] & TYPE_SU
-            if su == TYPE_I || su == TYPE_F
-                mass[n] += (one(pmass) - fa) * pmass
-                a[n] += fa * pmass
-                return pmass
-            end
+    @inbounds begin
+        su = flags[n] & TYPE_SU
+        (su == TYPE_I || su == TYPE_F) || return zero(pmass)
+        # Metal mass is (1−fa); agent loading is fa regardless of τ_p.
+        # Solid fs skips Arrhenius until the laser melts the captured powder.
+        fa > 0 && (a[n] += fa * pmass)
+        dm = (one(pmass) - fa) * pmass
+        if τ_p > 0
+            mp[n] += dm
+        else
+            mass[n] += dm
         end
-        return zero(pmass)
+        return pmass
     end
 end
 

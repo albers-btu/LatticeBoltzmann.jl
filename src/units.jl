@@ -63,6 +63,34 @@ lbm_g(U::Units, si_g)                  = si_g * U.s^2 / U.m # lattice gravity; f
 lbm_g(U::Units, g::Acceleration)       = lbm_g(U, ustrip(u"m/s^2", g))
 lbm_σ(U::Units, si_σ)                  = si_σ * U.s^2 / U.kg
 lbm_σ(U::Units, σ::Quantity)           = lbm_σ(U, ustrip(u"N/m", σ))
+# Absolute SI pressure → lattice. CSF / HK / recoil must share this conversion.
+# FSLBM atmosphere stays ρ/3 (P_ATM_LAT); that is a gauge, not 1 atm.
+lbm_p(U::Units{T}, p_si::Real, ρlat=1) where {T} =
+    T(p_si * U.s^2 / (si_ρ(U, ρlat) * U.m^2))
+lbm_p(U::Units, p::Quantity, ρlat=1) = lbm_p(U, ustrip(u"Pa", p), ρlat)
+
+# Δt such that lbm_σ(U, σ) = σ_lat. CSF is typically stable for σ_lat ≲ 0.05.
+const σ_LAT_MAX = 0.05
+function capillary_s(m::Real, ρ::Real, σ::Real; σ_lat::Real = 0.03)
+    (σ > 0 && m > 0 && ρ > 0 && σ_lat > 0) || return 0.0
+    return sqrt(σ_lat * ρ * m^3 / σ)
+end
+capillary_s(m, ρ, σ::Quantity; σ_lat=0.03) =
+    capillary_s(m, ρ, ustrip(u"N/m", σ); σ_lat=σ_lat)
+
+# Units with Δt from SI σ (not from α_lat = 0.1).
+function Units(
+    si_x::Length, si_ρ::Density, si_σ::Quantity;
+    x, σ_lat=0.03, u=0.05, ρ=1,
+    T::Type{<:AbstractFloat}=Float32, K=1, cp=1
+)
+    xf = ustrip(u"m", si_x)
+    ρf = ustrip(u"kg/m^3", si_ρ)
+    m = xf / x
+    s = capillary_s(m, ρf, si_σ; σ_lat=σ_lat)
+    si_u = (u * m / s) * u"m/s"
+    return Units(si_x, si_u, si_ρ; x, u=u, ρ=ρ, T=T, K=K, cp=cp)
+end
 # dσ/dT: N/(m·K) → lattice σ per lattice T
 lbm_σT(U::Units, si_σT)                = si_σT * U.K * U.s^2 / U.kg
 lbm_σT(U::Units, σT::Quantity)         = lbm_σT(U, ustrip(u"N/m/K", σT))
@@ -107,7 +135,9 @@ function lbm_rad(U::Units{T}, ε, ρlat=1) where {T}
 end
 
 # Hertz–Knudsen / Clausius–Clapeyron lattice scalars.
-# Λ_v = L_v/(cp K), β_v = L_v/(R_sp K), p0_lat, C_hk for ṁ_lat = C_hk p_lat/√T.
+# Λ_v = L_v/(cp K), β_v = L_v/(R_sp K), p0_lat = lbm_p(p_atm) so recoil Δp
+# and Young–Laplace 2σ/R share the kinetic pressure scale. C_hk for
+# ṁ_lat = C_hk p_lat/√T. FSLBM atmosphere reconstruction stays P_ATM_LAT = ρ/3.
 function lbm_evap(U::Units{T}, L_v, M, p0) where {T}
     Lv = L_v isa Quantity ? ustrip(u"J/kg", L_v) : Float64(L_v)
     Mv = M isa Quantity ? ustrip(u"kg/mol", M) : Float64(M)
@@ -115,7 +145,7 @@ function lbm_evap(U::Units{T}, L_v, M, p0) where {T}
     Rsp = R_GAS / Mv
     Λ_v = T(Lv / (U.cp * U.K))
     β_v = T(Lv / (Rsp * U.K))
-    p0l = T(p0s * U.s^2 / (si_ρ(U, one(T)) * U.m^2))
+    p0l = lbm_p(U, p0s)
     C_hk = T(U.m / (U.s * sqrt(2 * π * Rsp * U.K)))
     return Λ_v, β_v, p0l, C_hk
 end

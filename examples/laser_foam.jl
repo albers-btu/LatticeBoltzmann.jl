@@ -2,9 +2,14 @@
 # in the pool. Stationary beam, no powder, no scan. Starts at room T (solid);
 # agent decomposes in the hot liquid while the beam is on (Arrhenius + fs).
 # Hertz–Knudsen evaporation + recoil hold a keyhole: T stays near Tv instead
-# of running away in the subsurface liquid.
+# of running away in the subsurface liquid. SI σ (1.5 N/m) with Δt from
+# capillary_s so σ_lat ≈ 0.03; SI g is on (Bond-matched, tiny at this scale).
 #
-# ParaView: output_laser_foam/lbm.pvd. Colour by T (set the range 300–2500 K) —
+# Coupled laser + foam at this Δx is limited: a 3³ nucleus in the shallow
+# melt opens a crater and the ray-traced beam dumps into it (Ma→1). See
+# examples/melt_nuclei.jl for nucleation in a liquid pad without the laser.
+# ParaView: output_laser_foam_v7/lbm.pvd (older crash/stable dirs kept).
+# Colour by T (set the range 300–2500 K) —
 # gas is written as 0 K so the pad should read ~room T with a hot spot under
 # the beam. Contour phi = 0.5 (Threshold flags 8–32). Nuclei form in the melt,
 # not against the floor.
@@ -16,8 +21,9 @@ using Unitful
 using ProgressMeter
 using Logging
 
-@assert SURFACE && TEMPERATURE
-start_run_log!("output_laser_foam")
+@assert SURFACE && TEMPERATURE && VOLUME_FORCE
+# Keep the crashed run in output_laser_foam. This write goes next to it.
+start_run_log!("output_laser_foam_v7")
 
 # --- SI box / 316L-like pad ---
 si_Lx = 4.0e-3u"m"
@@ -36,18 +42,15 @@ si_Lheat = 2.7e5u"J/kg"
 si_Lv = 7.45e6u"J/kg"             # HK evaporation: caps T near Tv, opens a keyhole
 si_Tv = 3086.0u"K"
 si_M = 0.0558u"kg/mol"
-# Steel σ at this Δx/Δt is σ_lat~O(1) and Ma blows FSLBM. 0.015 N/m is the
-# melt-pool value (σ_lat ~ 0.01) and still holds a keyhole against recoil.
-si_σ = 0.015u"N/m"
+si_σ = 1.5u"N/m"                  # 316L-like; Δt from capillary_s so σ_lat ≈ 0.03
+si_g = 9.81u"m/s^2"
 si_P = 300.0u"W"
 si_d_spot = 0.7e-3u"m"
-si_δ = 0.20e-3u"m"
+si_δ = 0.20e-3u"m"                 # skin; 8 cells — deep enough pool to nucleate
 si_k_a = 2.0e5u"s^-1"
 si_E_a = 6.7e3u"K"                # E/R ≈ 4 Tm; cold solid does not release
-
-n_heat = 800
-n_develop = 280
-every = 40
+si_t_heat = 7.0e-3u"s"             # SI dwell; Δt is capillary so this is ~4k steps
+si_t_develop = 2.0e-3u"s"
 
 dx = ustrip(u"m", si_dx)
 L = max(4, round(Int, ustrip(u"m", si_H) / dx))
@@ -61,12 +64,12 @@ Nz = Hfill + n_gas_top + 1
 α_s_si = si_k_s / (si_ρ * si_cp)
 α_l_si = si_k_l / (si_ρ * si_cp)
 si_ν = ustrip(u"m^2/s", α_l_si) * u"m^2/s"
-lbm_α_true = 0.1
-s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
-lbm_u = 0.05
-si_u = (lbm_u * m / s) * u"m/s"
-units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
+units = Units(si_H, si_ρ, si_σ; x=L, σ_lat=0.03, u=0.05, ρ=1, T=Float32,
               K=ustrip(u"K", si_Tm), cp=si_cp)
+s = units.s
+n_heat = max(40, round(Int, ustrip(u"s", si_t_heat) / s))
+n_develop = max(40, round(Int, ustrip(u"s", si_t_develop) / s))
+every = max(20, n_heat ÷ 20)
 
 T_init = Float32(lbm_T(units, si_T_init))
 nskin = max(3, round(Int, ustrip(u"m", si_δ) / m))
@@ -78,12 +81,12 @@ Q_si = A0 * I_peak / (nskin * m)
 Q_full = Float32(lbm_Q(units, Q_si * u"W/m^3"))
 
 backend = CUDA.functional() ? CUDABackend() : CPU()
-nuc = Nucleation{Float32}(; d_min=10, R=1, c_star=1.02f0, p_cell=1,
-                          n_max=3, n_over=1.12f0, every=20, n_total_max=16)
+nuc = Nucleation{Float32}(; d_min=10, R=1, c_star=1.015f0, p_cell=1,
+                          n_max=3, n_over=1.0f0, every=20, n_total_max=12)
 model = Model(Nx, Ny, Nz, units;
               ν=si_ν, α=2 * α_l_si, α_s=2 * α_s_si, α_l=2 * α_l_si, α_c=α_l_si,
               ν_s=0.5 * si_ν, ν_l=si_ν, k_H=k_H,
-              gz=0, σ=si_σ,
+              gz=-si_g, σ=si_σ,
               k_a=si_k_a, E_a=si_E_a, Y_a=1, a_fs_max=0.5,
               T_avg=T_init, latent=si_Lheat, Ts=si_Tm, Tl=si_Tm,
               latent_v=si_Lv, T_v=si_Tv, M=si_M,
@@ -197,7 +200,7 @@ function bubble_z_mean(model)
 end
 
 Tmn0, Tmx0, nliq0, Tspot0, Tfar0, umax0 = metal_T_minmax(model)
-export!(model; dir="output_laser_foam")
+export!(model; dir="output_laser_foam_v7")
 m0 = foam_metrics(model)
 @info "laser foam" Nx Ny Nz Hfill m_um=(1e6*m) s_us=(1e6*s) spot_mm=(1e3*ustrip(u"m", si_d_spot)) si_P n_heat n_develop nskin σ_lat=d.σ fz=d.fz k_a=d.k_a E_a=d.E_a T_init Tmin0_K=si_T(units, Tmn0) Tmax0_K=si_T(units, Tmx0) Tspot0_K=si_T(units, Tspot0) Tfar0_K=si_T(units, Tfar0) nliq0 umax0 A0 Q_full Pabs_W=Pabs nQ Qmax_lat=Qmx Ncell=(Nx*Ny*Nz) m0 backend
 
@@ -211,7 +214,7 @@ function run_phase!(model, nsteps, every, tag)
             run!(model, nrun)
         end
         t += nrun
-        export!(model; dir="output_laser_foam")
+        export!(model; dir="output_laser_foam_v7")
         m = foam_metrics(model)
         Tmn, Tmx, nliq, Tspot, Tfar, umax = metal_T_minmax(model)
         zbar = bubble_z_mean(model)

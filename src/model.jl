@@ -275,7 +275,7 @@ function Model(
     Hz::UInt = UInt(Dz > 1) # halo offset z
     
     ν = CType(ν)
-    warn_lattice_stability(ν, CType(fx), CType(fy), CType(fz), Nx, Ny, Nz; SType)
+    warn_lattice_stability(ν, CType(fx), CType(fy), CType(fz), Nx, Ny, Nz; SType, σ=CType(σ))
 
     domains = map(1:Int(D)) do d
         d0 = d - 1
@@ -548,6 +548,7 @@ function warn_lattice_stability(
     SType::Type = Float32,
     u = nothing,
     H = nothing,
+    σ = 0,
 )
     C = typeof(float(ν))
     νc = C(ν)
@@ -555,6 +556,10 @@ function warn_lattice_stability(
     τ = C(3) * νc + C(1) / C(2)
     ω = one(C) / τ
     fmag = hypot(C(fx), C(fy), C(fz))
+    σc = C(σ)
+    if σc > C(σ_LAT_MAX)
+        @warn "lattice σ=$(σc) ≳ $(σ_LAT_MAX); CSF may blow up. Reduce Δt with capillary_s (do not lower SI σ)." σ=σc
+    end
     L = C(max(Int(Nx), Int(Ny), Int(Nz)))
     Hcells = H === nothing ? L : C(H)
     u_g = (fmag > 0 && Hcells > 0) ? sqrt(fmag * Hcells) : zero(C)
@@ -814,8 +819,9 @@ function initialize!(model::Model)
     model.initialized = true
     @static if SURFACE
         for domain in model.domains
-            initialize_dissolved!(model, domain)
             update_bubbles!(model, domain)
+            snap_interface_henry!(model, domain)
+            domain.ω_c > 0 && domain.k_H <= 0 && initialize_dissolved!(model, domain)
         end
         KernelAbstractions.synchronize(model.backend)
     end
@@ -925,6 +931,7 @@ function step!(model::Model)
                 _seed_new_nuclei!(
                     B, cores, flags, ϕA, domain.p_gas.data, domain.bid.data,
                     domain.σ, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
+                snap_interface_henry!(model, domain)
             end
         end
     end

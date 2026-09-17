@@ -34,6 +34,62 @@ function closed_bubble_model(Nx, Ny, Nz, spheres; σ=0.0f0, ν=0.1f0, bubbles=tr
     return model
 end
 
+@testset "spherical seeds: G core and Laplace n" begin
+    @test SURFACE
+    Nx = Ny = Nz = 24
+    xc = yc = zc = (Nx + 1) / 2
+    R = 4.0f0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0.02f0, T_avg=1.0f0,
+                  backend=CPU(), workgroup=64, bubbles=BubbleTracker{Float32}())
+    host = zeros(UInt8, Nx * Ny * Nz)
+    paint_spherical_nuclei!(host, Nx, Ny, Nz, ((Float32(xc), Float32(yc), Float32(zc)),), R)
+    copyto!(model.domains[1].flags.data, host)
+    LatticeBoltzmann.initialize!(model)
+    recs = bubble_records(model)
+    @test length(recs) == 1
+    @test recs[1].R > 2
+    equilibrate_nuclei_n!(model; n_over=1)
+    b = bubble_records(model)[1]
+    peq = young_laplace_p(0.02f0, b.R, P_ATM_LAT)
+    @test b.n ≈ peq * b.V rtol=0.08
+end
+
+@testset "quiet seed I shell has no G–F contact" begin
+    @test SURFACE
+    Nx = Ny = Nz = 24
+    xc = yc = zc = (Nx + 1) / 2
+    R = 5.0f0
+    host = zeros(UInt8, Nx * Ny * Nz)
+    paint_spherical_nuclei!(host, Nx, Ny, Nz, ((Float32(xc), Float32(yc), Float32(zc)),), R; shell=true)
+    nG = 0
+    nI = 0
+    gf = 0
+    @inbounds for z in 2:(Nz - 1), y in 2:(Ny - 1), x in 2:(Nx - 1)
+        n = lbm_n_b(x, y, z, Nx, Ny)
+        su = host[n] & TYPE_SU
+        su == TYPE_G && (nG += 1)
+        su == TYPE_I && (nI += 1)
+        su == TYPE_G || continue
+        for dz in -1:1, dy in -1:1, dx in -1:1
+            (dx == 0 && dy == 0 && dz == 0) && continue
+            (dx != 0 && dy != 0 && dz != 0) && continue
+            j = lbm_n_b(x + dx, y + dy, z + dz, Nx, Ny)
+            (host[j] & TYPE_SU) == TYPE_F && (gf += 1)
+        end
+    end
+    @info "quiet seed shell" nG nI gf R
+    @test nG > 0
+    @test nI > 0
+    @test gf == 0
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0.02f0, T_avg=1.0f0,
+                  backend=CPU(), workgroup=64, bubbles=BubbleTracker{Float32}())
+    copyto!(model.domains[1].flags.data, host)
+    LatticeBoltzmann.initialize!(model)
+    recs = bubble_records(model)
+    @test length(recs) == 1
+    @test recs[1].R > 3
+end
+
 @testset "Young–Laplace formula" begin
     σ, R, patm = 0.02f0, 5.0f0, P_ATM_LAT
     @test young_laplace_p(σ, R, patm) ≈ patm + 2 * σ / R

@@ -117,3 +117,37 @@ end
     @info "powder agent" Sa
     @test Sa ≈ 0.4f0 * 2.0f0 atol=0.05
 end
+
+@testset "powder agent_frac lands in a when τ_p > 0" begin
+    @test SURFACE
+    Nx, Ny, Nz = 12, 12, 16
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, τ_p=10.0f0,
+                  backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Hfill = 8
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n_a(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            host[n] = TYPE_S
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        else
+            host[n] = TYPE_G
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    model.powder_jet = PowderJet{Float32}(; mdot=0, w=2, v=8, x=6, y=6,
+                                          z=Float32(Hfill) + 2.5f0,
+                                          nparcels=1, agent_frac=0.4f0, enabled=true)
+    LatticeBoltzmann.initialize!(model)
+    J = model.powder_jet
+    J.px[1] = 6; J.py[1] = 6; J.pz[1] = Float32(Hfill) + 2.5f0
+    J.pvx[1] = 0; J.pvy[1] = 0; J.pvz[1] = -J.v
+    J.pm[1] = 2.0f0
+    J.alive[1] = true
+    LatticeBoltzmann.advance_powder_jet!(model, model.domains[1])
+    aA = Array(model.domains[1].a.data)
+    mpA = Array(model.domains[1].mp.data)
+    @test sum(aA) ≈ 0.4f0 * 2.0f0 atol=0.05
+    @test sum(mpA) ≈ 0.6f0 * 2.0f0 atol=0.05
+end

@@ -136,3 +136,60 @@ end
     @test minimum(zs) > 4
     @test zbar > Hfill / 2
 end
+
+@testset "nuclei in a deep liquid film stay enclosed without a laser" begin
+    @test SURFACE
+    Nx, Ny, Nz = 28, 28, 24
+    Hfill = 16
+    nuc = Nucleation{Float32}(; d_min=6, R=1, c_star=1.05f0, p_cell=1,
+                              n_max=2, n_over=1.0f0, every=1, n_total_max=8)
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, α_c=0.2f0, k_H=3.0f0, fz=0, σ=0.02f0,
+                  T_avg=1.05f0, Λ=0.6f0, Ts=1.0f0, Tl=1.0f0, K0=1.0f-3,
+                  backend=CPU(), workgroup=64,
+                  bubbles=BubbleTracker{Float32}(; nucleation=nuc, k_Π=0.08f0, d_max=4))
+    host = zeros(UInt8, Nx * Ny * Nz)
+    fsh = zeros(Float32, Nx * Ny * Nz)
+    Th = fill(1.05f0, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n_n(x, y, z, Nx, Ny)
+        if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
+            host[n] = TYPE_S
+            fsh[n] = 1
+        elseif z <= Hfill
+            host[n] = TYPE_F
+        else
+            host[n] = TYPE_G
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].fs.data, fsh)
+    copyto!(model.domains[1].T.data, Th)
+    fill!(model.domains[1].c.data, 1.4f0)
+    LatticeBoltzmann.initialize!(model)
+    nF0 = foam_metrics(model).nF
+    with_logger(NullLogger()) do
+        run!(model, 24)
+    end
+    m = foam_metrics(model)
+    uA = Array(model.domains[1].u.data)
+    fl = Array(model.domains[1].flags.data)
+    umax = 0.0f0
+    for n in axes(uA, 1)
+        su = fl[n] & TYPE_SU
+        (su == TYPE_F || su == TYPE_I) || continue
+        umax = max(umax, hypot(uA[n, 1], uA[n, 2], uA[n, 3]))
+    end
+    zs = Int[]
+    Nx_, Ny_ = Nx, Ny
+    for i in eachindex(model.bubbles.label)
+        model.bubbles.label[i] > 0 || continue
+        push!(zs, (i - 1) ÷ (Nx_ * Ny_) + 1)
+    end
+    zbar = isempty(zs) ? 0.0 : sum(zs) / length(zs)
+    @info "film nuclei" m.nb m.n_planted umax nF0 nF=m.nF zbar Hfill
+    @test m.n_planted >= 1
+    @test m.nb >= 1
+    @test umax < 0.70f0
+    @test m.nF > 0.85 * nF0
+    @test zbar > Hfill / 3
+end
