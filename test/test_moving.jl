@@ -16,6 +16,8 @@ using KernelAbstractions
             uh[n, 1] = u_lid
         elseif x == 1 || x == Nx || y == 1 || y == Ny || z == 1
             host[n] = TYPE_S
+        else
+            host[n] = TYPE_F
         end
     end
     copyto!(model.domains[1].flags.data, host)

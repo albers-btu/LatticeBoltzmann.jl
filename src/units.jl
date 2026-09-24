@@ -65,6 +65,7 @@ lbm_ν(U::Units, ν::KinematicViscosity)   = lbm_ν(U, ustrip(u"m^2/s", ν))
 lbm_T(U::Units, Tsi)                     = Tsi / U.K
 lbm_T(U::Units, θ::Quantity)             = lbm_T(U, ustrip(u"K", θ))
 lbm_α(U::Units, si_α)                    = si_α * U.s / U.m^2
+lbm_α(U::Units, α::Quantity)             = lbm_α(U, ustrip(u"m^2/s", α))
 
 # Glossary
 # αT    dα/dT

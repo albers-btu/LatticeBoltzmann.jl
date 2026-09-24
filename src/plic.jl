@@ -208,5 +208,6 @@ end
     σ == zero(T) && return one(T)
     phij = gather_phi_d3q27(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
     κ = calculate_curvature(phij)
-    return one(T) - T(6) * σ * κ
+    # 6σκ > 1 makes ρ_g ≤ 0 and feq invalid. Floor (and cap) the jump.
+    return clamp(one(T) - T(6) * σ * κ, T(0.2), T(2))
 end

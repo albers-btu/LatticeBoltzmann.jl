@@ -9,7 +9,7 @@ export VELOCITIES
 export velocities
 
 include("extensions.jl")
-export TRT, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE
+export TRT, KBC, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE
 
 include("units.jl")
 export Units
@@ -49,7 +49,7 @@ include("plic.jl")
 export plic_cube, calculate_curvature, calculate_normal_py
 
 include("laser.jl")
-export Laser, set_laser_position!, deposit_laser!, fresnel_absorptance
+export Laser, set_laser_position!, deposit_laser!, fresnel_absorptance, trace_laser_rays
 
 include("powder.jl")
 export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
@@ -57,10 +57,10 @@ export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 include("model.jl")
 export Model
 export get_D
-export run!
+export run!, initialize!, moments!
 export update_force_field!, reset_force_field!
 
 include("export.jl")
-export export!
+export export!, flush_exports!
 
 end

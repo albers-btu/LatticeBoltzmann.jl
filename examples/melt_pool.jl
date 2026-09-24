@@ -1,11 +1,12 @@
-# DED-style 316L melt track. 2 kW, 0.5 mm 1/e² spot. SI box is independent of
-# Δx: change `si_dx` only to refine. Heat: PLIC + Fresnel (multi-bounce).
-# Powder: ballistic Gaussian jet from behind or ahead of the spot along x.
-# Set `n_layers` to retrace. Evaporation cooling, mass loss, and recoil are on.
+# Autogenous 316L weld: one pass, no powder. 2 kW, 0.5 mm 1/e² spot.
+# SI box is independent of Δx: change `si_dx` only to refine.
+# Heat: PLIC + Fresnel (multi-bounce). Evaporation, recoil, radiation, gravity.
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
+# σ is capped below the physical 1.6 N/m — see the note after Units.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
-# isosurface slider. Open lbm.pvd, colour by T (or phi), then Contour.
+# isosurface slider. Open lbm.pvd and rays.pvd (colour rays by power).
+# Colour the volume by T (or phi), then Contour.
 # Type the isosurface in the text box (e.g. T=1673, or phi=0.5 for the
 # free surface). Do not drag the slider if the range looks empty.
 #
@@ -21,11 +22,11 @@ using Logging
 start_run_log!("output_melt_pool")
 
 # --- user: scan ---
-n_layers      = 1          # passes over the same bead (1 = single track)
-bidirectional = true       # even layers scan x1 → x0; false = always x0 → x1
-si_dwell      = 0.0u"s"    # laser + powder off between layers; 0 → none
-si_powder_delay = 0.05u"s" # laser-only lead-in each layer; 0 → powder from step 1
-jet_along     = :back      # :back = trailing (behind the travel), :front = leading
+n_layers      = 1          # one weld line
+bidirectional = false      # always x0 → x1
+si_dwell      = 0.0u"s"
+si_freeze     = 0.5u"s"    # laser off after the pass so the pool can solidify
+use_powder    = false      # autogenous; jet stays off the whole pass
 
 # --- user: box / resolution (SI; Δx does not change the box or the spot) ---
 # 8 × 6 mm in xy. Pad 4 mm + 2 mm gas so a 2 kW keyhole can open in z without
@@ -58,12 +59,15 @@ si_h_sub  = 2.0e4u"W/m^2/K"             # Robin backing; ∞ was Dirichlet T_ini
 si_d_spot = 0.5e-3u"m"
 si_v      = 8.0e-3u"m/s"
 si_δ      = 0.24e-3u"m"
-si_mdot   = 2.0u"g/minute"
-si_eta    = 0.7
-si_powder_τ = 0.05u"s"                  # unmelted powder lifetime; 0 → instant metal
-si_v_jet  = 8.0u"m/s"                   # parcel speed in the jet
-si_σ      = 0.015u"N/m"
-si_σT     = -1.5e-5u"N/m/K"
+si_mdot   = 0.0u"g/minute"              # no powder
+si_eta    = 1.0
+si_g      = 9.81u"m/s^2"
+si_β      = 1.2e-4u"K^-1"               # volumetric expansion; lattice β = β_SI * K
+# 316L near Tm is ~1.6 N/m and dσ/dT ~ −4.3e-4 N/m/K. Lattice CSF cannot
+# hold that at this Δx,Δt (σ_lat would be O(1)). Capped after Units.
+si_σ_phys = 1.6u"N/m"
+si_σT_phys = -4.3e-4u"N/m/K"
+σ_lat_cap = 0.03f0
 q_max     = 0.04f0
 
 # sgn = +1 when the laser travels +x. Trailing nozzle sits behind that motion.
@@ -110,9 +114,9 @@ n_layers >= 1 || throw(ArgumentError("n_layers must be ≥ 1"))
 
 α_l_si = si_k_l / (si_ρ * si_cp)
 α_s_si = si_k_s / (si_ρ * si_cp)
-si_ν_l = ustrip(u"m^2/s", α_l_si) * u"m^2/s"
-si_ν_s = 0.5 * si_ν_l
-si_ν_lT = -2.0e-9u"m^2/s/K"              # liquid thins with T; ν_sT = 0
+si_ν_l = 6.0e-7u"m^2/s"                 # liquid 316L; KBC is what makes this ω survivable
+si_ν_s = 1.0e-4u"m^2/s"
+si_ν_lT = -2.0e-10u"m^2/s/K"
 lbm_α_true = 0.1
 # Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx so the
 # SI box and the SI spot stay put when you refine.
@@ -137,15 +141,22 @@ Q_si   = A0 * I_peak / (nskin * m)
 Q_full = Float32(lbm_Q(units, Q_si * u"W/m^3"))
 mdot_kg_s = si_eta * ustrip(u"kg/s", uconvert(u"kg/s", si_mdot))
 
-# Gas headroom: expected layer height from captured powder on a ~spot-wide bead,
-# plus `si_gas` so the keyhole depression and launch plane stay in TYPE_G.
+# No powder bead. Gas headroom is only si_gas (keyhole / launch plane).
 v_m      = ustrip(u"m/s", si_v)
 ρ_m      = ustrip(u"kg/m^3", si_ρ)
 w_bead   = 2 * w_m
-h_layer  = mdot_kg_s / max(ρ_m * w_bead * v_m, 1e-30)
-n_z_layer = max(2, ceil(Int, h_layer / m))
+h_layer  = use_powder ? mdot_kg_s / max(ρ_m * w_bead * v_m, 1e-30) : 0.0
+n_z_layer = use_powder ? max(2, ceil(Int, h_layer / m)) : 0
 n_gas_top = max(6, ceil(Int, ustrip(u"m", si_gas) / m))
 Nz = Hfill + n_layers * n_z_layer + n_gas_top + 1
+
+# Physical σ on the outer step is σ_lat ∝ Δt². Hydro substeps use Δt/n_hydro,
+# so σ_lat,sub = σ_lat / n_hydro². Pick n_hydro so that stays ≤ σ_lat_cap.
+kg_cell = ρ_m * m^3
+σ_lat_phys = ustrip(u"N/m", si_σ_phys) * s^2 / kg_cell
+n_hydro = max(1, ceil(Int, sqrt(max(σ_lat_phys, 0.0) / Float64(σ_lat_cap))))
+si_σ  = si_σ_phys
+si_σT = si_σT_phys
 
 model = Model(Nx, Ny, Nz, units;
               ν = si_ν_l,
@@ -156,14 +167,16 @@ model = Model(Nx, Ny, Nz, units;
               ν_l = si_ν_l,
               k_sT = si_k_sT, k_lT = si_k_lT, cp_sT = si_cp_sT, cp_lT = si_cp_lT,
               ν_lT = si_ν_lT,
-              β = 0.0f0, gz = 0.0f0,
+              β = Float32(ustrip(u"K^-1", si_β) * ustrip(u"K", si_Tm)),
+              gz = -si_g,
               σ = si_σ, σT = si_σT, Tσ = si_Tm,
               latent = si_Lheat,
               Ts = si_Tm, Tl = si_Tm, K0 = si_K0,
               latent_v = si_Lv, T_v = si_Tv, M = si_M,
               T_avg = Float32(lbm_T(units, si_Tm)),
               emissivity = 0.4, T_rad = si_T_init,
-              powder_τ = si_powder_τ, powder_T = si_T_init,
+              powder_τ = 0.0u"s", powder_T = si_T_init,
+              n_hydro = n_hydro,
               backend = CUDABackend())
 
 Tm      = Float32(lbm_T(units, si_Tm))
@@ -179,12 +192,11 @@ x1    = Float32(clamp(Nx + 1 - n_end, 3 * Nx / 4, Nx - 3))
 nsteps_pass  = max(2, round(Int, abs(x1 - x0) / max(v_lat, Float32(1e-8))))
 nsteps_dwell = si_dwell > 0u"s" ?
     max(0, round(Int, ustrip(u"s", si_dwell) / Float64(units.s))) : 0
-nsteps_powder_delay = si_powder_delay > 0u"s" ?
-    max(0, round(Int, ustrip(u"s", si_powder_delay) / Float64(units.s))) : 0
-nsteps_total = n_layers * nsteps_pass + max(0, n_layers - 1) * nsteps_dwell
-if nsteps_powder_delay >= nsteps_pass
-    @warn "si_powder_delay ≥ pass duration; powder never starts this pass" si_powder_delay nsteps_powder_delay nsteps_pass
-end
+nsteps_powder_delay = 0
+nsteps_freeze = si_freeze > 0u"s" ?
+    max(0, round(Int, ustrip(u"s", si_freeze) / Float64(units.s))) : 0
+nsteps_total = n_layers * nsteps_pass + max(0, n_layers - 1) * nsteps_dwell + nsteps_freeze
+
 qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))
 # Frame spacing from one pass, not the whole job — otherwise n_layers=3
 # writes 3× fewer VTK/progress samples and the beam looks 3× faster.
@@ -200,7 +212,7 @@ end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "DED 316L multilayer track" n_layers bidirectional si_dwell si_powder_delay nsteps_powder_delay Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) pad_mm=(1e3*m*L) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_mm=(1e3*w_m) w_cells scan_mm=(1e3*m*abs(x1-x0)) h_layer_mm=(1e3*h_layer) n_z_layer n_gas_top v_lat nsteps_pass nsteps_dwell nsteps_total qevery Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_v_jet A0 nskin Q_full h_lat γ_s=model.domains[1].γ_s γ_l=model.domains[1].γ_l τ_p=model.domains[1].τ_p T_p=model.domains[1].T_p Λ_v=model.domains[1].Λ_v T_v=model.domains[1].T_v T_init
+@info "316L autogenous weld" use_powder n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_cells scan_mm=(1e3*m*abs(x1-x0)) v_lat nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_v si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
@@ -230,23 +242,22 @@ d = model.domains[1]
 model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
                     nrays = 11, max_bounce = 8, every = qevery, skin = nskin)
-model.powder_jet = PowderJet(units; mdot = si_eta * si_mdot, w = 0.6 * si_d_spot,
-                             v = si_v_jet, x = x0, y = y_las, z = z_noz,
-                             nparcels = 16, enabled = nsteps_powder_delay == 0)
-place_powder_jet!(model.powder_jet, x0, y_las, z_noz, z_aim, 1.0f0, dx_noz, jet_along, Nx)
+model.powder_jet = PowderJet(units; mdot = 0.0u"kg/s", w = 0.6 * si_d_spot,
+                             v = 1.0u"m/s", x = x0, y = y_las, z = z_noz,
+                             nparcels = 1, enabled = false)
 LatticeBoltzmann.initialize!(model)
 export!(model; dir="output_melt_pool")
 
 function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
-                     nsteps_pass, nsteps_dwell, nsteps_powder_delay, nsteps_total,
-                     qevery, every, Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz, jet_along)
+                     nsteps_pass, nsteps_dwell, nsteps_freeze, nsteps_powder_delay, nsteps_total,
+                     qevery, every, Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz)
     Ncell = Nx * Ny * Nz
     xmin, xmax = min(x0, x1), max(x0, x1)
     istep = 0
     x_now = x0
     mlups_ema = NaN
     αema = 0.2
-    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="DED layers ", showspeed=true)
+    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="weld ", showspeed=true)
 
     function report!(layer, x_las)
         export!(model; dir="output_melt_pool")
@@ -283,11 +294,11 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
         return nothing
     end
 
-    function do_step!(layer, x_las, powder, sgn)
+    function do_step!(layer, x_las, powder, sgn, force=false)
         set_laser_position!(model.laser, x_las, y_las)
         jet = model.powder_jet
-        jet.enabled = powder
-        powder && place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, sgn, dx_noz, jet_along, Nx)
+        jet.enabled = powder && use_powder
+        jet.enabled && place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, sgn, dx_noz, :back, Nx)
         t0 = time_ns()
         with_logger(NullLogger()) do
             run!(model, 1)
@@ -296,7 +307,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
         mlups = Ncell / max(dt, 1e-12) / 1e6
         mlups_ema = isfinite(mlups_ema) ? αema * mlups + (1 - αema) * mlups_ema : mlups
         istep += 1
-        if istep % every == 0 || istep == nsteps_total
+        if force || istep % every == 0 || istep == nsteps_total
             report!(layer, x_las)
         end
         return nothing
@@ -309,7 +320,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
         sgn = backward ? -one(Float32) : one(Float32)
         for k in 0:(nsteps_pass - 1)
             x_now = clamp(x_start + sgn * v_lat * Float32(k), xmin, xmax)
-            do_step!(layer, x_now, k >= nsteps_powder_delay, sgn)
+            do_step!(layer, x_now, false, sgn, k == nsteps_pass - 1)
         end
         if layer < n_layers && nsteps_dwell > 0
             model.laser.enabled = false
@@ -319,13 +330,20 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             end
         end
     end
+    if nsteps_freeze > 0
+        model.laser.enabled = false
+        fill!(d.Q.data, 0)
+        for _ in 1:nsteps_freeze
+            do_step!(n_layers, x_now, false, one(Float32))
+        end
+    end
     finish!(prog)
     return x_now
 end
 
 x_end = run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
-                    nsteps_pass, nsteps_dwell, nsteps_powder_delay, nsteps_total,
-                    qevery, every, Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz, jet_along)
+                    nsteps_pass, nsteps_dwell, nsteps_freeze, nsteps_powder_delay, nsteps_total,
+                    qevery, every, Nx, Ny, Nz, Hfill, z_noz, z_aim, dx_noz)
 
 LatticeBoltzmann.moments!(model)
 nliq, depth, bead, Tmax_K, Tmin_K, umax, u_sol, zI, xl = track_metrics(
@@ -335,4 +353,4 @@ b = energy_budget(d)
 m = mass_budget(d)
 U = model.units
 dx = Float64(U.m)
-@info "DED multilayer report" n_layers bidirectional nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mpow_kg=si_mass(U, m.powder) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full mdot_kg_s
+@info "autogenous weld report" nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full

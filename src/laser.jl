@@ -122,6 +122,7 @@ end
 
 # Add heat into cell n
 @inline function _add_q!(Q, n::Int, dq)
+    dq == 0 && return nothing
     @inbounds Q[n] += dq
     return nothing
 end
@@ -159,6 +160,7 @@ end
     nx::T, ny::T, nz::T,
     Nx::Int, Ny::Int, Nz::Int,
 ) where {T}
+    Pabs_q == 0 && return nothing
     nskin = max(1, skin)
     dq = Pabs_q / T(nskin)
     px = T(ix)
@@ -194,6 +196,7 @@ end
     o0x::T, o0y::T, o0z::T, dx::T, dy::T, dz::T, Pray::T,
     n_re::T, n_im::T, max_bounce::Int, skin::Int, qfac::T,
     Nx::Int, Ny::Int, Nz::Int,
+    path=nothing,
 ) where {T}
     ox, oy, oz = o0x, o0y, o0z
     dirx, diry, dirz = dx, dy, dz
@@ -201,16 +204,21 @@ end
     bounces = 0
     max_step = Nx + Ny + Nz + 16
     epsn = T(1e-4)
+    _raypoint!(path, ox, oy, oz, Pleft)
     @inbounds for _ in 1:max_step
         Pleft < T(1e-8) * Pray && break
         ix = floor(Int, ox + T(0.5))
         iy = floor(Int, oy + T(0.5))
         iz = floor(Int, oz + T(0.5))
-        (ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz) && break
+        if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
+            _raypoint!(path, ox, oy, oz, Pleft)
+            break
+        end
         n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
         fl = flags[n]
         su = fl & TYPE_SU
         if (fl & TYPE_BO) == TYPE_S
+            _raypoint!(path, ox, oy, oz, Pleft)
             break
         elseif su == TYPE_I
             ϕ0 = T(ϕ[n])
@@ -227,10 +235,11 @@ end
                                        Nx, Ny, Nz)
                 Pleft -= Pabs
                 bounces += 1
-                (bounces >= max_bounce || Pleft < T(1e-8) * Pray) && break
                 hx = ox + t * dirx
                 hy = oy + t * diry
                 hz = oz + t * dirz
+                _raypoint!(path, hx, hy, hz, Pleft)
+                (bounces >= max_bounce || Pleft < T(1e-8) * Pray) && break
                 dn = T(2) * (dirx * noutx + diry * nouty + dirz * noutz)
                 dirx -= dn * noutx
                 diry -= dn * nouty
@@ -240,10 +249,12 @@ end
                 ox = hx + epsn * dirx
                 oy = hy + epsn * diry
                 oz = hz + epsn * dirz
+                _raypoint!(path, ox, oy, oz, Pleft)
                 continue
             end
         elseif su == TYPE_F
             _add_q!(Q, n, Pleft * qfac)
+            _raypoint!(path, ox, oy, oz, zero(T))
             break
         end
         tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
@@ -256,8 +267,74 @@ end
         ox += tstep * dirx
         oy += tstep * diry
         oz += tstep * dirz
+        _raypoint!(path, ox, oy, oz, Pleft)
     end
     return nothing
+end
+
+_raypoint!(::Nothing, args...) = nothing
+function _raypoint!(path::Vector, x, y, z, p)
+    if !isempty(path)
+        lx, ly, lz = path[end][1], path[end][2], path[end][3]
+        (x - lx)^2 + (y - ly)^2 + (z - lz)^2 < 1e-10 && return nothing
+    end
+    push!(path, (Float64(x), Float64(y), Float64(z), Float64(p)))
+    return nothing
+end
+
+# Bundle offsets (ox, oy) live in the plane normal to the beam.
+# A downward beam keeps ox along x and oy along y.
+function _ray_origin(L, rid)
+    T = eltype(L.x)
+    dx, dy, dz = L.dx, L.dy, L.dz
+    ox, oy = L.ox[rid], L.oy[rid]
+    if abs(dz) >= abs(dx) && abs(dz) >= abs(dy)
+        return L.x + ox, L.y + oy, L.z
+    end
+    ax, ay, az = abs(dx), abs(dy), abs(dz)
+    hx, hy, hz = ax <= ay && ax <= az ? (one(T), zero(T), zero(T)) :
+                 ay <= az ? (zero(T), one(T), zero(T)) : (zero(T), zero(T), one(T))
+    e1x = dy * hz - dz * hy
+    e1y = dz * hx - dx * hz
+    e1z = dx * hy - dy * hx
+    n1 = sqrt(e1x * e1x + e1y * e1y + e1z * e1z)
+    n1 = max(n1, T(1e-12))
+    e1x /= n1; e1y /= n1; e1z /= n1
+    e2x = dy * e1z - dz * e1y
+    e2y = dz * e1x - dx * e1z
+    e2z = dx * e1y - dy * e1x
+    n2 = sqrt(e2x * e2x + e2y * e2y + e2z * e2z)
+    n2 = max(n2, T(1e-12))
+    e2x /= n2; e2y /= n2; e2z /= n2
+    return L.x + ox * e1x + oy * e2x,
+           L.y + ox * e1y + oy * e2y,
+           L.z + ox * e1z + oy * e2z
+end
+
+# Retrace the current bundle on the host. Each entry is one ray of (x,y,z,P_left)
+# in cell coordinates. Does not deposit heat.
+function trace_laser_rays(model, domain)
+    L = model.laser
+    (L === nothing || !L.enabled || L.P <= 0 || isempty(L.Pray)) && return Vector{NTuple{4,Float64}}[]
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    flags = Array(domain.flags.data)
+    ϕ = Array(domain.ϕ.data)
+    Q = zeros(Float32, 1)
+    rays = Vector{NTuple{4,Float64}}[]
+    T = eltype(L.x)
+    @inbounds for rid in eachindex(L.Pray)
+        path = NTuple{4,Float64}[]
+        rx, ry, rz = _ray_origin(L, rid)
+        _walk_laser_ray!(
+            Q, flags, ϕ,
+            rx, ry, rz,
+            L.dx, L.dy, L.dz, L.Pray[rid],
+            L.n_re, L.n_im, L.max_bounce, L.skin, zero(T),
+            Nx, Ny, Nz, path,
+        )
+        length(path) >= 2 && push!(rays, path)
+    end
+    return rays
 end
 
 # Converts from input power (Watts) to lattice Q.
@@ -272,18 +349,21 @@ function deposit_laser!(model, domain)
     t = Int(domain.t)
     L.every > 1 && (t % L.every != 0) && t != 0 && return nothing
     Q = domain.Q.data
-    fill!(Q, zero(eltype(Q)))
     nray = length(L.Pray)
-    nray == 0 && return nothing
+    if nray == 0
+        fill!(Q, zero(eltype(Q)))
+        return nothing
+    end
     qfac = laser_qfac(model.units)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
     flags = Array(domain.flags.data)
     ϕ = Array(domain.ϕ.data)
     Qh = zeros(eltype(Q), length(Q))
     @inbounds for rid in 1:nray
+        rx, ry, rz = _ray_origin(L, rid)
         _walk_laser_ray!(
             Qh, flags, ϕ,
-            L.x + L.ox[rid], L.y + L.oy[rid], L.z,
+            rx, ry, rz,
             L.dx, L.dy, L.dz, L.Pray[rid],
             L.n_re, L.n_im, L.max_bounce, L.skin, qfac,
             Nx, Ny, Nz,

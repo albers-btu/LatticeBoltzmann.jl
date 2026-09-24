@@ -8,6 +8,7 @@ using KernelAbstractions
     Fz = 1.0f-4
     nsteps = 40
     model = Model(Nx, Ny, Nz, 0.02; backend=CPU(), workgroup=64)
+    fill!(model.domains[1].flags.data, TYPE_F)
     Fd = model.domains[1].F.data
     Fd[:, 3] .= Fz
     LatticeBoltzmann.initialize!(model)
@@ -27,6 +28,8 @@ end
         n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
         if z == 1 || z == Nz
             host[n] = TYPE_S
+        else
+            host[n] = TYPE_F
         end
     end
     copyto!(model.domains[1].flags.data, host)

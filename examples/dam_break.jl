@@ -8,7 +8,9 @@ using Logging
 @assert SURFACE && VOLUME_FORCE && UPDATE_FIELDS
 start_run_log!("output_dam_break")
 
-Nx, Ny, Nz = 64, 64, 64
+# 256³ puts water ν above the KBC floor (ω≤1.999) at Ma=0.05.
+# 240³ is the first size that clears it; 256³ leaves a little margin.
+Nx, Ny, Nz = 256, 256, 256
 si_L = 0.1u"m"                  # tank size
 si_H = (2 * Nz ÷ 3) / Nz * si_L # dam height ~ 2/3 box height
 si_g = 9.81u"m/s^2"
@@ -18,14 +20,19 @@ Ma = 0.05 # D3Q19 Ma is usually safe below 0.05
 cs = 1 / sqrt(3)
 lbm_u = Ma * cs
 
-# Glycerol at 20 °C against air. Water (ν=1e-6 m²/s, σ=0.072 N/m) is Re~5e4
-# at this tank size and is not resolvable on 64³; glycerol gives lattice τ≈0.58.
-si_ρ = 1260u"kg/m^3"       # density
-ν    = 1.12e-3u"m^2/s"     # kinematic viscosity, μ/ρ ≈ 1.41 Pa·s / 1260 kg/m³
-σ    = 0.0634u"N/m"        # surface tension, glycerol–air
+# Water at 20 °C. Grid is fine enough that lattice ν is above the KBC floor.
+si_ρ = 998u"kg/m^3"
+ν    = 1.004e-6u"m^2/s"
+σ    = 0.0728u"N/m"
 
 units = Units(si_L, si_u, si_ρ; x=Nx, u=lbm_u, ρ=1, T=Float32)
-@info "glycerol 20°C" ν σ si_ρ τ=(3 * lbm_ν(units, ν) + 0.5)
+ν_lat = lbm_ν(units, ν)
+ν_floor = (1 / 1.999 - 0.5) / 3
+σ_lat = lbm_σ(units, σ)
+if ν_lat < ν_floor
+    @warn "water ν is below the KBC floor on this grid; effective ν is higher" ν_lat ν_floor ν_eff_over_real=(ν_floor / ν_lat)
+end
+@info "water 20°C" ν σ si_ρ ν_lat σ_lat τ=(3 * max(ν_lat, ν_floor) + 0.5)
 
 model = Model(Nx, Ny, Nz, units;
               ν = ν,                 # kinematic viscosity
@@ -47,10 +54,11 @@ copyto!(model.domains[1].flags.data, host)
 
 d = model.domains[1]
 LatticeBoltzmann.initialize!(model)
-export!(model; dir="output")
+export!(model; dir="output", fields=(:rho, :p, :u, :phi, :flags))
 
-nsteps = 2000
-every  = 50
+si_t_end = 0.112u"s"   # same physical duration as the old 64³, 2000-step run
+nsteps = max(1, round(Int, ustrip(u"s", si_t_end) / Float64(units.s)))
+every  = max(1, round(Int, nsteps / 40))
 nchunks = nsteps ÷ every
 Ncell = Int(model.Nx) * Int(model.Ny) * Int(model.Nz)
 mlups_ema = NaN
@@ -64,7 +72,7 @@ for i in 1:nchunks
     dt = (time_ns() - t0) * 1e-9
     mlups = Ncell * every / dt / 1e6
     global mlups_ema = isfinite(mlups_ema) ? α * mlups + (1 - α) * mlups_ema : mlups
-    export!(model; dir="output_dam_break")
+    export!(model; dir="output_dam_break", fields=(:rho, :p, :u, :phi, :flags))
     next!(prog; showvalues = [
         (:t, Int(d.t)),
         (:t_si, si_t(model.units, Int(d.t))),

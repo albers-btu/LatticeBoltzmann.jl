@@ -65,6 +65,7 @@ mutable struct Model{
     units::Units{CType}                     # Units to convert between lattice and SI
     laser::Any                              # Laser source (see laser.jl)
     powder_jet::Any                         # Powder source (see powder.jl)
+    n_hydro::Int                            # Hydro/interface substeps per thermal step
 end
 
 function Model(
@@ -101,6 +102,7 @@ function Model(
     powder_T = nothing,                     # Powder temperature
     laser = nothing,
     powder_jet = nothing,
+    n_hydro::Int = 1,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19,
     backend = CPU(),
@@ -154,7 +156,7 @@ function Model(
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
                   C_rad=Crad, T_rad=Trad,
                   τ_p=τp, T_p=Tp,
-                  laser=laser, powder_jet=powder_jet, CType, SType, scheme, backend, workgroup)
+                  laser=laser, powder_jet=powder_jet, n_hydro=n_hydro, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
 end
@@ -193,6 +195,7 @@ function Model(
     T_p = nothing,
     laser = nothing,
     powder_jet = nothing,
+    n_hydro::Int = 1,
     CType::Type{<:AbstractFloat} = Float32,
     SType::Type{<:AbstractFloat} = CType,
     scheme = :D3Q19, 
@@ -369,6 +372,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                max(1, n_hydro),
             )
         else
             Model(
@@ -399,6 +403,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                max(1, n_hydro),
             )
         end
     else
@@ -425,6 +430,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                max(1, n_hydro),
             )
         else
             Model(
@@ -448,6 +454,7 @@ function Model(
                 Units{CType}(),
                 laser,
                 powder_jet,
+                max(1, n_hydro),
             )
         end
     end
@@ -626,11 +633,25 @@ function initialize!(model::Model)
 end
 
 function step!(model::Model)
+    nsub = max(1, model.n_hydro)
+    invN = 1 / nsub
+    invN2 = invN * invN
     for domain in model.domains
         N = get_N(domain)
-        t_odd = isodd(domain.t)
         Nx = Int(domain.Nx); Ny = Int(domain.Ny); Nz = Int(domain.Nz)
         Nd = Int(domain.N)
+        # Coefficients on Domain are for one outer step (Units.s).
+        # Hydro substep Δt is that / n_hydro: ν ∝ Δt, σ, g, p ∝ Δt².
+        CT = eltype(domain.ν)
+        sν = CT(invN)
+        s2 = CT(invN2)
+        fx = domain.fx * s2; fy = domain.fy * s2; fz = domain.fz * s2
+        σ = domain.σ * s2
+        σT = domain.σT * s2
+        p0v = domain.p0v * s2
+        νs = domain.ν_s * sν; νl = domain.ν_l * sν
+        νsT = domain.ν_sT * sν; νlT = domain.ν_lT * sν
+        ω = omega_from_nu(domain.ν * sν)
 
         @static if SURFACE && TEMPERATURE
             deposit_laser!(model, domain)
@@ -643,74 +664,79 @@ function step!(model::Model)
             end
         end
 
-        @static if SURFACE
-            s0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
-            s0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
-               domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
-               domain.fs.data, domain.gi.data,
-               model.weights, model.velocities,
-               domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
-               domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
-               Nd, Nx, Ny, Nz, domain.Eacc.data,
-               domain.h.data, domain.Q.data, domain.ω_T; ndrange = N)
-        end
+        for sub in 1:nsub
+            # Stream index across outer steps, so AA parity stays continuous.
+            t_odd = isodd(Int(domain.t) * nsub + sub - 1)
+            thermal = sub == nsub
 
-        @static if MOVING_BOUNDARIES
-            model.cached_moving_kernel!(
-                domain.u.data, domain.flags.data, model.velocities,
-                Nd, Nx, Ny, Nz; ndrange = N)
-        end
+            @static if SURFACE
+                sk0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
+                sk0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+                    domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+                    domain.fs.data, domain.gi.data,
+                    model.weights, model.velocities,
+                    fx, fy, fz, σ, σT, domain.Tσ,
+                    domain.Λ_v, domain.T_v, p0v, domain.β_v,
+                    Nd, Nx, Ny, Nz, domain.Eacc.data,
+                    domain.h.data, domain.Q.data, domain.ω_T; ndrange = N)
+            end
 
-        kernel = t_odd ? model.cached_collide_odd_kernel! : model.cached_collide_even_kernel!
-        @static if SURFACE
-            kernel(domain.flags.data, domain.fi.data,
-                   domain.ρ.data, domain.u.data, domain.F.data,
-                   domain.mass.data,                                                # SURFACE specific
-                   domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                   domain.ϕ.data,                                                   # SURFACE specific
-                   domain.fs.data,
-                   domain.msrc.data, domain.mp.data,                                # SURFACE specific
-                   model.weights, model.velocities,
-                   domain.ω, domain.fx, domain.fy, domain.fz,
-                   domain.ω_T, domain.β, domain.T_avg, domain.σT,
-                   domain.Λ, domain.Ts, domain.Tl, domain.K0,
-                   domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
-                   domain.γ_s, domain.γ_l,
-                   domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
-                   domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
-                   domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
-                   Nd, Nx, Ny, Nz, domain.Eacc.data,
-                   domain.Macc.data;                                                # SURFACE specific
-                   ndrange = N)
-        else
-            kernel(domain.flags.data, domain.fi.data,
-                   domain.ρ.data, domain.u.data, domain.F.data,
-                   domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                   domain.fs.data,
-                   model.weights, model.velocities,
-                   domain.ω, domain.fx, domain.fy, domain.fz,
-                   domain.ω_T, domain.β, domain.T_avg,
-                   domain.Λ, domain.Ts, domain.Tl, domain.K0,
-                   domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
-                   domain.γ_s, domain.γ_l,
-                   domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
-                   domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
-                   domain.C_rad, domain.T_rad,
-                   Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
-        end
+            @static if MOVING_BOUNDARIES
+                model.cached_moving_kernel!(
+                    domain.u.data, domain.flags.data, model.velocities,
+                    Nd, Nx, Ny, Nz; ndrange = N)
+            end
 
-        @static if SURFACE
-            model.cached_surface_1_kernel!(domain.flags.data, model.velocities,
-                                           Nd, Nx, Ny, Nz; ndrange = N)
+            kernel = t_odd ? model.cached_collide_odd_kernel! : model.cached_collide_even_kernel!
+            @static if SURFACE
+                kernel(domain.flags.data, domain.fi.data,
+                       domain.ρ.data, domain.u.data, domain.F.data,
+                       domain.mass.data,
+                       domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                       domain.ϕ.data,
+                       domain.fs.data,
+                       domain.msrc.data, domain.mp.data,
+                       model.weights, model.velocities,
+                       ω, fx, fy, fz,
+                       domain.ω_T, domain.β, domain.T_avg, σT,
+                       domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                       domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                       domain.γ_s, domain.γ_l,
+                       νs, νl, νsT, νlT,
+                       domain.Λ_v, domain.T_v, domain.C_hk, p0v, domain.β_v,
+                       domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
+                       thermal,
+                       Nd, Nx, Ny, Nz, domain.Eacc.data,
+                       domain.Macc.data;
+                       ndrange = N)
+            else
+                kernel(domain.flags.data, domain.fi.data,
+                       domain.ρ.data, domain.u.data, domain.F.data,
+                       domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                       domain.fs.data,
+                       model.weights, model.velocities,
+                       ω, fx, fy, fz,
+                       domain.ω_T, domain.β, domain.T_avg,
+                       domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                       domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                       domain.γ_s, domain.γ_l,
+                       νs, νl, νsT, νlT,
+                       domain.Λ_v, domain.T_v, domain.C_hk, p0v, domain.β_v,
+                       domain.C_rad, domain.T_rad,
+                       Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
+            end
 
-            s2 = t_odd ? model.cached_surface_2_odd_kernel! : model.cached_surface_2_even_kernel!
-            s2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
-               domain.gi.data, domain.T.data, domain.fs.data,
-               model.weights, model.velocities, Nd, Nx, Ny, Nz; ndrange = N)
-
-            model.cached_surface_3_kernel!(domain.ρ.data, domain.flags.data, domain.mass.data,
-                                           domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
-                                           Nd, Nx, Ny, Nz; ndrange = N)
+            @static if SURFACE
+                model.cached_surface_1_kernel!(domain.flags.data, model.velocities,
+                                               Nd, Nx, Ny, Nz; ndrange = N)
+                sk2 = t_odd ? model.cached_surface_2_odd_kernel! : model.cached_surface_2_even_kernel!
+                sk2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+                    domain.gi.data, domain.T.data, domain.fs.data,
+                    model.weights, model.velocities, Nd, Nx, Ny, Nz; ndrange = N)
+                model.cached_surface_3_kernel!(domain.ρ.data, domain.flags.data, domain.mass.data,
+                                               domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
+                                               Nd, Nx, Ny, Nz; ndrange = N)
+            end
         end
 
         increment_time_step!(domain, 1)
@@ -718,12 +744,16 @@ function step!(model::Model)
     KernelAbstractions.synchronize(model.backend)
 end
 
-@inline last_collide_odd(domain::Domain) = Int(domain.t) == 0 ? false : isodd(Int(domain.t) - 1)
+@inline function last_collide_odd(model::Model, domain::Domain)
+    Int(domain.t) == 0 && return false
+    nsub = max(1, model.n_hydro)
+    return isodd(Int(domain.t) * nsub - 1)
+end
 
 function moments!(model::Model)
     for domain in model.domains
         N = get_N(domain)
-        kernel = last_collide_odd(domain) ? model.cached_moments_odd_kernel! : model.cached_moments_even_kernel!
+        kernel = last_collide_odd(model, domain) ? model.cached_moments_odd_kernel! : model.cached_moments_even_kernel!
         kernel(
             domain.ρ.data,
             domain.u.data,
@@ -752,7 +782,7 @@ function update_force_field!(model::Model)
     end
     for domain in model.domains
         N = get_N(domain)
-        kernel = last_collide_odd(domain) ? model.cached_update_force_odd_kernel! : model.cached_update_force_even_kernel!
+        kernel = last_collide_odd(model, domain) ? model.cached_update_force_odd_kernel! : model.cached_update_force_even_kernel!
         kernel(
             domain.flags.data, domain.fi.data, domain.F.data,
             model.velocities,

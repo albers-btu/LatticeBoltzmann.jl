@@ -3,12 +3,13 @@
 # SRT = Single Relaxation Time
 # TRT = Two Relaxation Times
 const TRT                    = true # false evaluates as SRT
+const KBC                    = true # entropic stabilizer; shear at ω(ν), ghosts at γω
 
 const SURFACE                = true
 const VOLUME_FORCE           = true
-const EQUILIBRIUM_BOUNDARIES = false
-const MOVING_BOUNDARIES      = false
-const FORCE_FIELD            = false
+const EQUILIBRIUM_BOUNDARIES = true
+const MOVING_BOUNDARIES      = true
+const FORCE_FIELD            = true
 const TEMPERATURE            = true
 
 const UPDATE_FIELDS          = SURFACE

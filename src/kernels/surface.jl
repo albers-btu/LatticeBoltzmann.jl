@@ -1,9 +1,10 @@
 using KernelAbstractions
 
 @inline function calculate_phi(ρn::CType, massn::CType, flagsn::UInt8) where {CType}
-    if (flagsn & TYPE_F) != 0x00
+    su = flagsn & TYPE_SU
+    if su == TYPE_F || su == TYPE_IF
         return one(CType)
-    elseif (flagsn & TYPE_I) != 0x00
+    elseif su == TYPE_I || su == TYPE_GI
         return ρn > 0 ? clamp(massn / ρn, zero(CType), one(CType)) : CType(0.5)
     else
         return zero(CType)
@@ -118,9 +119,14 @@ end
             uy += CType(c[i][2])*fp_out + CType(c[i+1][2])*fm_out
             uz += CType(c[i][3])*fp_out + CType(c[i+1][3])*fm_out
         end
-        invρ = one(CType) / ρn
-        ux *= invρ; uy *= invρ; uz *= invρ
-        ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
+        if ρn <= zero(CType)
+            ρn = one(CType)
+            ux = zero(CType); uy = zero(CType); uz = zero(CType)
+        else
+            invρ = one(CType) / ρn
+            ux *= invρ; uy *= invρ; uz *= invρ
+            ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
+        end
         ϕn = calculate_phi(ρn, massn, flagsn)
         σn = σ
         @static if TEMPERATURE

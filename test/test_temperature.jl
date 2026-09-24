@@ -494,8 +494,8 @@ end
     pcold = LatticeBoltzmann.prop_fs_T(1.0f0, 0.2f0, 0.3f0, 0.4f0, 0.0f0, 0.2f0, 1.0f0, 1.0f-6)
     @test pcold ≈ 0.02f0
     @test LatticeBoltzmann.floor_prop(0.2f0, 1.0f-6) ≈ 0.02f0
-    @test LatticeBoltzmann.omega_T_from_alpha(1.0f-6) <= 1.95f0
-    @test LatticeBoltzmann.omega_from_nu(1.0f-8) <= 1.95f0
+    @test LatticeBoltzmann.omega_T_from_alpha(1.0f-6) <= 1.999f0
+    @test LatticeBoltzmann.omega_from_nu(1.0f-8) <= 1.999f0
     @test LatticeBoltzmann.radiation_dT(2.0f0, 0.01f0, 1.0f0) ≈ 0.01f0 * (16.0f0 - 1.0f0)
     @test LatticeBoltzmann.radiation_dT(1.0f0, 0.01f0, 1.0f0) == 0
     @test LatticeBoltzmann.radiation_dT(2.0f0, 0.0f0, 1.0f0) == 0
