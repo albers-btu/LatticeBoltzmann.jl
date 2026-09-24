@@ -24,6 +24,8 @@ end
     return SVector{3,T}(v[1] / s, v[2] / s, v[3] / s)
 end
 
+# Parker-Youngs interface normal from the 3×3×3 fill phij.
+# Weighted central difference of ϕ
 @inline function calculate_normal_py(phij::NTuple{27,T}) where {T}
     nx = T(4)*(phij[3]-phij[2]) +
          T(2)*(phij[9]-phij[8] + phij[11]-phij[10] + phij[15]-phij[14] + phij[17]-phij[16]) +
@@ -111,6 +113,8 @@ end
     return true
 end
 
+# Reads all 27 phi values from its neighborhood to generate a 3×3×3 cube.
+# Order is the same as the velocities of a D3Q27 scheme.
 @inline function gather_phi_d3q27(
     ϕ, ϕ0::T, x::Int, y::Int, z::Int, Nx::Int, Ny::Int, Nz::Int
 ) where {T}

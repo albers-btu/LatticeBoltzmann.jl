@@ -35,7 +35,14 @@ export increment_time_step!
 include("log.jl")
 export start_run_log!, stop_run_log!
 
-include("kernel.jl")
+include("kernels/helper.jl")
+include("kernels/hydro.jl")
+include("kernels/temperature.jl")
+include("kernels/forces.jl")
+include("kernels/init.jl")
+include("kernels/collide.jl")
+include("kernels/surface.jl")
+include("kernels/moments.jl")
 export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!, powder_gas_kernel!
 
 include("plic.jl")
@@ -50,7 +57,10 @@ export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 include("model.jl")
 export Model
 export get_D
-export run!, export!
+export run!
 export update_force_field!, reset_force_field!
+
+include("export.jl")
+export export!
 
 end

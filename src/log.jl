@@ -1,35 +1,38 @@
 using Dates
 using Logging
 
-# Tee stderr + file via stdlib SimpleLogger (no custom AbstractLogger: that
-# hits a world-age error after the first kernel compile).
+const _RUN_LOG = Ref{Any}(nothing)
+
+# Streams to both, (1) console and (2) file
 struct TeeIO <: IO
     console::IO
     file::IO
 end
+
 function Base.unsafe_write(t::TeeIO, p::Ptr{UInt8}, n::UInt)
     nout = unsafe_write(t.console, p, n)
     unsafe_write(t.file, p, n)
     flush(t.file)
     return nout
 end
+
 function Base.write(t::TeeIO, x::UInt8)
     write(t.console, x)
     n = write(t.file, x)
     flush(t.file)
     return n
 end
+
 function Base.write(t::TeeIO, xs::StridedVector{UInt8})
     write(t.console, xs)
     n = write(t.file, xs)
     flush(t.file)
     return n
 end
+
 Base.flush(t::TeeIO) = (flush(t.console); flush(t.file); nothing)
 Base.isopen(t::TeeIO) = isopen(t.console) && isopen(t.file)
 Base.close(t::TeeIO) = close(t.file)
-
-const _RUN_LOG = Ref{Any}(nothing)
 
 function _logstate_key()
     isdefined(Base.CoreLogging, :LOGGER_STATE) && return Base.CoreLogging.LOGGER_STATE
@@ -38,7 +41,6 @@ end
 
 function _install_logger(logger::AbstractLogger)
     global_logger(logger)
-    # REPL / include() uses a task-local logger; global_logger alone is ignored.
     try
         task_local_storage(_logstate_key(), Base.CoreLogging.LogState(logger))
     catch

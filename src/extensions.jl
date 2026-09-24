@@ -1,11 +1,15 @@
-const TRT                    = true # false -> keep SRT
+# Compile-time switches
 
-const SURFACE                = true # FSLBM; with TEMPERATURE: T on F/I, gas skipped (adiabatic FS)
+# SRT = Single Relaxation Time
+# TRT = Two Relaxation Times
+const TRT                    = true # false evaluates as SRT
+
+const SURFACE                = true
 const VOLUME_FORCE           = true
 const EQUILIBRIUM_BOUNDARIES = false
 const MOVING_BOUNDARIES      = false
 const FORCE_FIELD            = false
-const TEMPERATURE            = true # D3Q7 thermal; TYPE_T Dirichlet; TYPE_H flux/Robin; Q volumetric; Boussinesq on fx,fy,fz
+const TEMPERATURE            = true
 
 const UPDATE_FIELDS          = SURFACE
 const APPLY_FORCE            = VOLUME_FORCE || FORCE_FIELD || TEMPERATURE

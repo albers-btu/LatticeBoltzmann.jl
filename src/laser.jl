@@ -1,31 +1,26 @@
-# Gaussian laser with PLIC hits, Fresnel absorption, and multiple reflections.
-# Deposits absorbed power into Q (lattice dT/step). No third-party optic package.
-#
-# PLIC n = calculate_normal_py points metal → gas. Front-face hit: −dir · n > 0.
-# Optional `skin` spreads each hit along −n into metal (numerical absorption depth).
-
+# Gaussian laser with PLIC hits, Fresnel absorption and multiple reflections.
 mutable struct Laser{T<:AbstractFloat}
     enabled::Bool
-    P::T                 # incident power [W]
-    w::T                 # 1/e² radius [lattice cells]
-    x::T                 # beam axis, 1-based cell coords
-    y::T
-    z::T                 # launch plane z
-    dx::T
-    dy::T
-    dz::T
-    n_re::T              # Re(ñ) of metal (316L ~ 1.07 µm)
-    n_im::T
+    P::T                 # Incident power in W
+    w::T                 # 1/e² radius in cells (unit)
+    x::T                 # X position of ray bundle in cell coords
+    y::T                 # Y position of ray bundle in cell coords
+    z::T                 # Z position of ray bundle in cell coords
+    dx::T                # X direction of beam in cell coords
+    dy::T                # Y direction of beam in cell coords
+    dz::T                # Z direction of beam in cell coords
+    n_re::T              # Real      part of complex refrective index (316L ~ 1.07 µm)
+    n_im::T              # Imaginary part of complex refrective index
     nrays::Int           # nrays × nrays bundle
-    max_bounce::Int
-    every::Int
-    skin::Int            # cells into metal to spread a hit; 1 → interface only
-    ox::Vector{T}        # ray offsets in x
-    oy::Vector{T}
-    Pray::Vector{T}      # incident power per ray [W]
+    max_bounce::Int      # Maximum number of ray bounces
+    every::Int           # Deposit laser every n steps 
+    skin::Int            # Cells into metal to spread a hit; 1 leads to interface only
+    ox::Vector{T}        # Ray offsets in x
+    oy::Vector{T}        # Ray offsets in y
+    Pray::Vector{T}      # Incident power per ray in W
 end
 
-# Unpolarized Fresnel absorptance, vacuum → metal ñ = n + i k.
+# Unpolarized Fresnel absorptance, vacuum to metal ñ = n + i k.
 # Real arithmetic so the same code runs on CPU and CUDA.
 @inline function fresnel_absorptance(cosθ::T, n_re::T, n_im::T) where {T}
     c = clamp(cosθ, zero(T), one(T))
@@ -47,6 +42,7 @@ end
     return one(T) - clamp(R, zero(T), one(T))
 end
 
+# Returns the ray bundle with given incident power per ray.
 function _build_ray_bundle(P::T, w::T, nrays::Int) where {T}
     nrays < 1 && return T[], T[], T[]
     half = T(2) * w
@@ -75,6 +71,7 @@ function _build_ray_bundle(P::T, w::T, nrays::Int) where {T}
     return ox, oy, wt
 end
 
+# Default Laser
 function Laser{T}(;
     P = zero(T),
     w = one(T),
@@ -100,6 +97,7 @@ function Laser{T}(;
                     max(1, Int(skin)), ox, oy, Pray)
 end
 
+# SI Wrapper of default Laser
 function Laser(U::Units{T};
     P, w,
     x = one(T), y = one(T), z = one(T),
@@ -122,14 +120,21 @@ function set_laser_position!(L::Laser{T}, x, y, z=L.z) where {T}
     return L
 end
 
+# Add heat into cell n
 @inline function _add_q!(Q, n::Int, dq)
     @inbounds Q[n] += dq
     return nothing
 end
 
-# Parker–Youngs n points metal → gas. Plane: n · (r − c) = plic_cube(ϕ, n).
-@inline function plic_hit(ϕ0::T, phij, ox::T, oy::T, oz::T, dirx::T, diry::T, dirz::T,
-                          cx::T, cy::T, cz::T) where {T}
+# Parker–Youngs n points metal to gas.
+# Returns a boolean for inside the this voxels cube, distance of origin
+# along the ray in cells, and the normal of the cube.
+@inline function plic_hit(
+    ϕ0::T, phij,
+    ox::T, oy::T, oz::T,
+    dirx::T, diry::T, dirz::T,
+    cx::T, cy::T, cz::T
+) where {T}
     nϕ = calculate_normal_py(phij)
     n2 = nϕ[1]*nϕ[1] + nϕ[2]*nϕ[2] + nϕ[3]*nϕ[3]
     n2 <= eps(T) && return false, zero(T), nϕ
@@ -147,6 +152,7 @@ end
     return inside, t, nϕ
 end
 
+# Spread the heat energy into the cells along ray with a depth of skin cells.
 @inline function _deposit_along_normal!(
     Q, flags, Pabs_q::T, skin::Int,
     ix::Int, iy::Int, iz::Int,
@@ -181,6 +187,8 @@ end
     return nothing
 end
 
+# Start with a single ray at origin o, direction d, and power Pray. Walk
+# Ray with DDA until power is gone, wall is hit, or out of boundary.
 @inline function _walk_laser_ray!(
     Q, flags, ϕ,
     o0x::T, o0y::T, o0z::T, dx::T, dy::T, dz::T, Pray::T,
@@ -252,10 +260,12 @@ end
     return nothing
 end
 
-function laser_qfac(U::Units{T}, ρlat=one(T)) where {T}
-    return T(U.s / (si_ρ(U, ρlat) * U.cp * U.K * U.m^3))
+# Converts from input power (Watts) to lattice Q.
+function laser_qfac(U::Units{T}, ρ_lattice=one(T)) where {T}
+    return T(U.s / (si_ρ(U, ρ_lattice) * U.cp * U.K * U.m^3))
 end
 
+# Deposit laser energy for this domain. Is called from step function.
 function deposit_laser!(model, domain)
     L = model.laser
     (L === nothing || !L.enabled || L.P <= 0) && return nothing

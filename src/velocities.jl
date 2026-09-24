@@ -1,5 +1,13 @@
 using StaticArrays
 
+# All velocities are ordered in pairs, meaning:
+#  e₀ (this is the resting velocity)
+# +e₁
+# -e₁
+# +e₂
+# -e₂
+# +eᵢ
+# -eᵢ
 const VELOCITIES = Dict(
     :D2Q9 => SVector{3, Int}[
         SVector( 0,  0,  0),

@@ -1,105 +1,123 @@
-# Cumulative lattice-enthalpy account (into-metal Q, out-of-metal rad/evap/wall).
-const EACC_Q = 1
-const EACC_RAD = 2
-const EACC_EVAP = 3
-const EACC_WALL = 4
-const EACC_POWDER = 5
-const EACC_N = 5
+# Energy (enthalpy) account
+# E = Q - RAD - EVAP - WALL + POWDER
+const EACC_Q = 1        # Laser
+const EACC_RAD = 2      # Radiation
+const EACC_EVAP = 3     # Evaporation
+const EACC_WALL = 4     # Wall heat
+const EACC_POWDER = 5   # Powder (source) enthalpy
+const EACC_N = 5        # Length of energy account array
 
-# Metal-mass account matching energy: M = M0 + powder − evap + residual.
-const MACC_EVAP = 1
-const MACC_POWDER = 2
-const MACC_N = 2
+# Mass account 
+# M = M0 + POWDER − EVAP + residual.
+const MACC_EVAP = 1     # Evaporation
+const MACC_POWDER = 2   # Powder (source)
+const MACC_N = 2        # Length of mass account array
 
+# Represents the complete state of one grid
 mutable struct Domain{
-    CType<:AbstractFloat,
-    SType<:AbstractFloat,
-    Aρ<:AbstractArray{CType}, 
-    Au<:AbstractArray{CType},
-    Afi<:AbstractArray{SType},
-    Af<:AbstractArray{UInt8}
+    CType<:AbstractFloat,               # Compute Type, default is Float32
+    SType<:AbstractFloat,               # Store Type, default is Float32
+    Aρ<:AbstractArray{CType},           # Array for ρ (density)
+    Au<:AbstractArray{CType},           # Array for u (velocity)
+    Afi<:AbstractArray{SType},          # Array for fᵢ DDF (discrete distribution function)
+    Af<:AbstractArray{UInt8}            # Array for flags
 }
-    Nx::UInt # lattice dimension x
-    Ny::UInt # lattice dimension y
-    Nz::UInt # lattice dimension z
+    Nx::UInt                            # Lattice size x
+    Ny::UInt                            # Lattice size y
+    Nz::UInt                            # Lattice size z
 
-    Ox::Int # offset x
-    Oy::Int # offset y
-    Oz::Int # offset z
+    Ox::Int                             # Offset in x (if this is a subdomain)
+    Oy::Int                             # Offset in y (if this is a subdomain)
+    Oz::Int                             # Offset in z (if this is a subdomain)
 
-    ν::CType # kinematic shear viscosity
-    N::Int
-    ω::CType
+    ν::CType                            # Kinematic viscosity
+    N::Int                              # Number of cells
+    ω::CType                            # For BGK: 1/(3ν+1/2)
 
-    fx::CType # global force per volume x
-    fy::CType # global force per volume y
-    fz::CType # global force per volume z
+    fx::CType                           # Body force per volume in x
+    fy::CType                           # Body force per volume in y
+    fz::CType                           # Body force per volume in z
 
-    σ::CType
-    σT::CType  # dσ/dT; 0 → constant σ
-    Tσ::CType  # T_ref in σ(T) = σ + σT (T - Tσ)
+    σ::CType                            # Surface tension at reference temperature
+    σT::CType                           # dσ/dT (≠ 0 leads to Marangoni effects)
+    Tσ::CType                           # Reference temperature
 
-    ρ::Memory{CType, Aρ}
-    u::Memory{CType, Au}
-    F::Memory{CType, Au}
-    fi::Memory{SType, Afi}
-    flags::Memory{UInt8, Af}
+    ρ::Memory{CType, Aρ}                # ρ (density)
+    u::Memory{CType, Au}                # u (velocity)
+    F::Memory{CType, Au}                # F (force)
+    fi::Memory{SType, Afi}              # fᵢ (discrete distribution function)
+    flags::Memory{UInt8, Af}            # flags
 
     @static if SURFACE
-        ϕ::Memory{CType, Aρ}
-        mass::Memory{CType, Aρ}
-        massex::Memory{CType, Aρ}
-        msrc::Memory{CType, Aρ}  # feed Δmass/(ρ Δt); 0 → none
-        mp::Memory{CType, Aρ}    # unmelted powder mass (same units as mass)
-        τ_p::CType               # powder lifetime (lattice steps); 0 → msrc→mass
-        T_p::CType               # powder temperature (lattice)
+        ϕ::Memory{CType, Aρ}            # Liquid fill fraction (0 gas, 1 liquid)
+        mass::Memory{CType, Aρ}         # Liquid mass (mass ≈ ϕ*ρ)
+        massex::Memory{CType, Aρ}       # Excess mass
+        msrc::Memory{CType, Aρ}         # Mass source rate (fill fraction per lattice step)
+        mp::Memory{CType, Aρ}           # Unmelted powder mass
+        τ_p::CType                      # Powder lifetime in lattice steps
+        T_p::CType                      # Powder temperature
     end
 
     @static if TEMPERATURE
-        α::CType
-        α_s::CType            # solid Model-α at T_avg (twice CE diffusivity)
-        α_l::CType
-        α_sT::CType           # dα_s / dT_lat
-        α_lT::CType
-        γ_s::CType            # d(cp/cp_ref)/dT_lat; 0 → constant cp
-        γ_l::CType
-        ν_s::CType
-        ν_l::CType
-        ν_sT::CType           # dν_s / dT_lat
-        ν_lT::CType
-        β::CType
-        T_avg::CType
-        ω_T::CType
-        T::Memory{CType, Aρ}
-        gi::Memory{SType, Afi}
-        Q::Memory{CType, Aρ}
-        h::Memory{CType, Aρ}  # Robin h; 0 -> pure Neumann
-        Λ::CType              # latent L/cp in lattice T; 0 → no melting
-        Ts::CType             # solidus
-        Tl::CType             # liquidus (Ts=Tl → isothermal Stefan)
-        K0::CType             # Kozeny–Carman K0; 0 → no Darcy
-        fs::Memory{CType, Aρ} # solid fraction
-        Λ_v::CType            # vaporization L_v/(cp K); 0 → no evaporation
-        T_v::CType            # boiling T (lattice)
-        C_hk::CType           # Hertz–Knudsen prefactor (lattice)
-        p0v::CType            # p_atm (lattice)
-        β_v::CType            # L_v/(R_sp K) Clausius–Clapeyron
-        C_rad::CType          # εσ K³ s/(ρ cp m); Q = C_rad (T^4-T_∞^4); 0 → off
-        T_rad::CType          # far-field T for radiation (lattice)
-        Eacc::Memory{CType, Aρ}
-        H0::CType
-        E_powder::CType       # host: jet deposit × T_p
+        α::CType                        # Thermal diffusivity (mix)
+        α_s::CType                      # Thermal diffusivity (solid) (twice Chapman-Enskog diffusivity)
+        α_l::CType                      # Thermal diffusivity (liquid)
+        α_sT::CType                     # d(α_solid ) / d(T_lattice)
+        α_lT::CType                     # d(α_liquid) / d(T_lattice)
+        γ_s::CType                      # Heat capacity ratio (solid): d(cp/cp_ref)/d(T_lattice); γ = 0 leads to constant cp
+        γ_l::CType                      # Heat capacity ratio (liquid)
+        ν_s::CType                      # Kinematic viscosity (solid)
+        ν_l::CType                      # Kinematic viscosity (liquid)
+        ν_sT::CType                     # d(ν_solid ) / d(T_lattice)
+        ν_lT::CType                     # d(ν_liquid) / d(T_lattice)
+        β::CType                        # Thermal expansion coefficient (buoyancy)
+        T_avg::CType                    # Reference temperature
+        ω_T::CType                      # BGK relaxation rate for gᵢ (D3Q7 heat DDF)
+        T::Memory{CType, Aρ}            # Temperature
+        gi::Memory{SType, Afi}          # gᵢ (discrete distribution function)
+        Q::Memory{CType, Aρ}            # Volumetric heat source (ΔQ per step)
+        h::Memory{CType, Aρ}            # Robin q = Q + h (T - T∞); h = 0 leads to pure Neumann
+        
+                                        # Melting
+        Λ::CType                        # Latent heat L/cp in lattice T; 0 leads to no melting
+        Ts::CType                       # Solidus temperature
+        Tl::CType                       # Liquidus temperature (Tₛ = Tₗ leads to isothermal Stefan)
+        K0::CType                       # Kozeny–Carman Darcy drag
+        fs::Memory{CType, Aρ}           # Solid fraction (0 liquid, 1 solid)
+        
+                                        # Evaporation (Hertz-Knudsen)
+        Λ_v::CType                      # Vaporization L_v/(cp K); 0 leads to no evaporation
+        T_v::CType                      # Boiling T (lattice)
+        C_hk::CType                     # Hertz-Knudsen prefactor (lattice)
+        p0v::CType                      # p_atm (lattice)
+        β_v::CType                      # L_v/(R_sp K) Clausius–Clapeyron
+        
+                                        # Radiation
+                                        # Q_rad = C_rad (T⁴ - T_rad⁴)
+        C_rad::CType                    # SI prefactor: ε (emissivity) σ (Stefan-Boltzman) K³ (Kelvin per lattice) s (Δt) / (ρ cp m (Δx))
+        T_rad::CType                    # Far-field T for radiation (lattice)
+        
+        Eacc::Memory{CType, Aρ}         # Energy account
+        H0::CType                       # Initial Enthalpy, H ≈ H0 + Q - RAD - EVAP - WALL + POWDER
+        E_powder::CType                 # Source on the host (e.g. powder jet)
+
         @static if SURFACE
-            Macc::Memory{CType, Aρ}
-            M0::CType
-            M_powder::CType   # host: jet deposit mass
+            Macc::Memory{CType, Aρ}     # Mass account
+            M0::CType                   # Initial Mass, M ≈ M0 + POWDER - EVAP
+            M_powder::CType             # Source on the host (e.g. powder jet)
         end
     end
 
-    t::UInt64
+    t::UInt64                           # Lattice time-step counter
 end
 
-function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{CType}, ::Type{SType};
+function Domain(
+    Nx, Ny, Nz, 
+    Ox, Oy, Oz, 
+    ν, 
+    fx, fy, fz, 
+    scheme, backend, 
+    ::Type{CType}, ::Type{SType};
     σ::CType = zero(CType),
     σT::CType = zero(CType),
     Tσ::CType = one(CType),
@@ -133,7 +151,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
     nvel = length(WEIGHTS[scheme])
 
     N = Int(Nx) * Int(Ny) * Int(Nz)
-    ω = one(CType) / (CType(3) * CType(ν) + CType(1) / CType(2))
+                                                                    
+    ω = one(CType) / (CType(3) * CType(ν) + CType(1) / CType(2))    # Relaxation rate ω = 1/τ
+                                                                    # BGK / TRT⁺ rate
+                                                                    # ω = 1 / (3⋅ν + 1/2)
     AT = arraytype(backend)
 
     ρ = Memory(AT{CType}(undef, N))
@@ -174,7 +195,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
         αl = α_l == zero(CType) ? αT : α_l
         νs = ν_s == zero(CType) ? CType(ν) : ν_s
         νl = ν_l == zero(CType) ? CType(ν) : ν_l
-        ω_T = one(CType) / (CType(2) * αT + CType(1) / CType(2))
+        ω_T = one(CType) / (CType(2) * αT + CType(1) / CType(2))    # D3Q7 heat relaxation
+                                                                    # c_sT² = 1/4
+                                                                    # ω_T = 1 / (2⋅αT + 1/2)
         Tmem = Memory(AT{CType}(undef, N))
         fill!(Tmem.data, T_avg)
         gi = Memory(AT{SType}(undef, N * 7))
@@ -203,7 +226,10 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
-                αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, CType(α_sT), CType(α_lT),
+                CType(γ_s), CType(γ_l), 
+                νs, νl, CType(ν_sT), CType(ν_lT), 
+                β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
                 Macc, zero(CType), zero(CType),
@@ -231,7 +257,9 @@ function Domain(Nx, Ny, Nz, Ox, Oy, Oz, ν, fx, fy, fz, scheme, backend, ::Type{
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                αT, αs, αl, CType(α_sT), CType(α_lT), CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                αT, αs, αl, CType(α_sT), CType(α_lT), 
+                CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), 
+                β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
                 UInt64(0)
@@ -272,13 +300,14 @@ end
     Q(domain::Domain) = domain.Q
     htc(domain::Domain) = domain.h
     fs(domain::Domain) = domain.fs
-    # D3Q7 Peng c_sT² = 1/4. Model `α` sets ω_T = 1/(2α+1/2); Fourier k = α/2.
-    thermal_k(domain::Domain{CType}) where CType =
-        CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))
+    thermal_k(domain::Domain{CType}) where CType =                              # This models α is twice the lattice α,
+        CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))                    # and the D3Q7 scheme uses this model α.
+                                                                                # Later reconstruction of lattice parameters
+                                                                                # will use α/2, e.g. for Fourier's k = α/2
     thermal_k_s(domain::Domain{CType}) where CType = CType(0.5) * domain.α_s
     thermal_k_l(domain::Domain{CType}) where CType = CType(0.5) * domain.α_l
 
-    # Σ ϕ (T + Λ(1-fs)) on metal, plus mp T_p. TYPE_S omitted.
+    # Σ ϕ (T + Λ(1-fs)) on metal, plus mp T_p. TYPE_S omitted
     function enthalpy(domain::Domain{CType}) where {CType}
         flags = Array(domain.flags.data)
         TA = Array(domain.T.data)
@@ -301,7 +330,7 @@ end
                     γn = blend_phase(fsA[n], domain.γ_s, domain.γ_l)
                     s += Float64(fill) * Float64(cell_enthalpy(TA[n], fsA[n], Λ, γn))
                 end
-                s += Float64(mpA[n]) * Float64(sensible_H(Tp, domain.γ_s))
+                s += Float64(mpA[n]) * Float64(sensible_H(Tp, domain.γ_s))      # Enthalpy of unmelted powder
             else
                 γn = blend_phase(fsA[n], domain.γ_s, domain.γ_l)
                 s += Float64(cell_enthalpy(TA[n], fsA[n], Λ, γn))
@@ -310,7 +339,7 @@ end
         return CType(s)
     end
 
-    # Instantaneous Σ Q on cells that collide T (F/I, or non-solid).
+    # Instantaneous Σ Q on cells that collide T (F/I, or non-solid)
     function heat_source(domain::Domain{CType}) where {CType}
         flags = Array(domain.flags.data)
         QA = Array(domain.Q.data)
@@ -334,7 +363,7 @@ end
         return domain
     end
 
-    # H = H0 + Q - rad - evap + powder - wall + residual (streaming/BC leak).
+    # H = H0 + Q - rad - evap + powder - wall + residual (streaming/BC leak)
     function energy_budget(domain::Domain{CType}) where {CType}
         acc = Array(domain.Eacc.data)
         Q = acc[EACC_Q]
@@ -349,13 +378,14 @@ end
     end
 
     @static if SURFACE
-        # surface_3 stores massex as excess / N_liquid_neighbors.
+        # dx is neighbor coordinate x+0 (resting), x+1 or x-1
         @inline function _wrap_mass(x, dx, N)
             ifelse(dx == 0, x,
                 ifelse(dx > 0, ifelse(x == N - 1, 0, x + 1),
                                ifelse(x == 0, N - 1, x - 1)))
         end
 
+        # Count the interface/fluid cells to distribute the excess mass to
         function _massex_recipients(flags, fsA, n::Int, Nx::Int, Ny::Int, Nz::Int)
             n0 = n - 1
             x = n0 % Nx
@@ -369,13 +399,14 @@ end
                     _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
                 suj = flags[j] & (TYPE_SU | TYPE_S)
                 liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
-                liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)
+                liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)         # Count as recipient if liquid fraction (1-fs)
+                                                                                            # is greater than 1e-3 (0.1%)
                 cnt += Int(liquid)
             end
             return cnt
         end
 
-        # Σ mass + mp + massex×recipients on non-solid cells.
+        # Sum the mass on all cells (Σ mass + mp + (massex × recipients))
         function metal_mass(domain::Domain{CType}) where {CType}
             flags = Array(domain.flags.data)
             mA = Array(domain.mass.data)
@@ -403,7 +434,7 @@ end
             return domain
         end
 
-        # M = M0 + powder − evap + residual (FSLBM/BC leak).
+        # M = M0 + powder − evap + residual (FSLBM/BC leak)
         function mass_budget(domain::Domain{CType}) where {CType}
             acc = Array(domain.Macc.data)
             evap = acc[MACC_EVAP]
@@ -416,7 +447,7 @@ end
     end
 end
 
-τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + CType(1) / CType(2)
+τ(domain::Domain{CType}) where CType = CType(3) * domain.ν + one(CType) / CType(2)
 
 function increment_time_step!(domain::Domain, steps::Int)
     domain.t += steps

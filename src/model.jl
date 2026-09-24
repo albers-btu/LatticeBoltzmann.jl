@@ -1,70 +1,70 @@
 using Printf, CUDA, WriteVTK
 
 mutable struct Model{
-    CType<:AbstractFloat,
-    SType<:AbstractFloat,
-    Aρ<:AbstractArray{CType},
-    Au<:AbstractArray{CType},
-    Afi<:AbstractArray{SType},
-    Af<:AbstractArray{UInt8},
-    Q
+    CType<:AbstractFloat,                   # Compute Type, default is Float32
+    SType<:AbstractFloat,                   # Store Type, default is Float32
+    Aρ<:AbstractArray{CType},               # Array for ρ (density)
+    Au<:AbstractArray{CType},               # Array for u (velocity)
+    Afi<:AbstractArray{SType},              # Array for fᵢ DDF (discrete distribution function)
+    Af<:AbstractArray{UInt8},               # Array for flags
+    Q                                       # Number of discrete velocities: DdQ19 leads to Q = 19
 }
-    scheme::Symbol
+    scheme::Symbol                          # LBM Scheme, default is D3Q19
 
-    backend::KernelAbstractions.Backend
-    workgroup::Int
+    backend::KernelAbstractions.Backend     # Backend for the kernel execution, CPU() (default) or CUDABackend()
+    workgroup::Int                          # Determines block size on GPU (threads per block) and loop chunk size on CPU
 
-    Nx::UInt # lattice dimension x
-    Ny::UInt # lattice dimension y
-    Nz::UInt # lattice dimension z
+    Nx::UInt                                # Lattice size x
+    Ny::UInt                                # Lattice size y
+    Nz::UInt                                # Lattice size z
 
-    Dx::UInt # lattice domain x
-    Dy::UInt # lattice domain y
-    Dz::UInt # lattice domain z
+    Dx::UInt                                # Domain size x
+    Dy::UInt                                # Domain size y
+    Dz::UInt                                # Domain size z
 
-    domains::Vector{<:Domain{CType, SType}}
+    domains::Vector{<:Domain{CType, SType}} # Store of domains for this model
 
-    ρ::MemoryContainer{CType, Aρ}
-    u::MemoryContainer{CType, Au}
-    F::MemoryContainer{CType, Au}
-    fi::MemoryContainer{SType, Afi}
-    flags::MemoryContainer{UInt8, Af}
+    ρ::MemoryContainer{CType, Aρ}           # View of the ρ (density) memory
+    u::MemoryContainer{CType, Au}           # View of the u (velocity) memory
+    F::MemoryContainer{CType, Au}           # View of the f (force) memory
+    fi::MemoryContainer{SType, Afi}         # View of the fᵢ (DDF) memory
+    flags::MemoryContainer{UInt8, Af}       # View of the flags memory
 
     @static if TEMPERATURE
-        T::MemoryContainer{CType, Aρ}
-        Q::MemoryContainer{CType, Aρ}
-        h::MemoryContainer{CType, Aρ}
-        fs::MemoryContainer{CType, Aρ}
+        T::MemoryContainer{CType, Aρ}       # View of T (lattice temperature) memory
+        Q::MemoryContainer{CType, Aρ}       # View of Q (volumetric heat) memory
+        h::MemoryContainer{CType, Aρ}       # View of h (Robin BC coefficient, 0 leads to Neumann BC) memory
+        fs::MemoryContainer{CType, Aρ}      # View of fs (solid fraction) memory
     end
 
     @static if SURFACE
-        phi::MemoryContainer{CType, Aρ}
-        msrc::MemoryContainer{CType, Aρ}
-        cached_surface_0_even!::Any
-        cached_surface_0_odd!::Any
-        cached_surface_1!::Any
-        cached_surface_2_even!::Any
-        cached_surface_2_odd!::Any
-        cached_surface_3!::Any
+        ϕ::MemoryContainer{CType, Aρ}       # View of ϕ (liquid fill fraction) memory
+        msrc::MemoryContainer{CType, Aρ}    # View of msrc (mass source) memory
+        cached_surface_0_even_kernel!::Any  # Cached kernel
+        cached_surface_0_odd_kernel!::Any   # Cached kernel
+        cached_surface_1_kernel!::Any       # Cached kernel
+        cached_surface_2_even_kernel!::Any  # Cached kernel
+        cached_surface_2_odd_kernel!::Any   # Cached kernel
+        cached_surface_3_kernel!::Any       # Cached kernel
     end
 
-    weights::NTuple{Q, CType}
-    velocities::NTuple{Q, SVector{3, Int}}
+    weights::NTuple{Q, CType}               # Scheme weights
+    velocities::NTuple{Q, SVector{3, Int}}  # Scheme velocities
 
-    cached_collide_even!::Any
-    cached_collide_odd!::Any
-    cached_initialize!::Any
-    cached_moments_even!::Any
-    cached_moments_odd!::Any
-    cached_moving!::Any
-    cached_update_force_even!::Any
-    cached_update_force_odd!::Any
-    cached_reset_force!::Any
+    cached_collide_even_kernel!::Any        # Cached kernel
+    cached_collide_odd_kernel!::Any         # Cached kernel
+    cached_initialize_kernel!::Any          # Cached kernel
+    cached_moments_even_kernel!::Any        # Cached kernel
+    cached_moments_odd_kernel!::Any         # Cached kernel
+    cached_moving_kernel!::Any              # Cached kernel
+    cached_update_force_even_kernel!::Any   # Cached kernel
+    cached_update_force_odd_kernel!::Any    # Cached kernel
+    cached_reset_force_kernel!::Any         # Cached kernel
 
-    initialized::Bool
-    units::Units{CType}
-    laser::Any
-    powder_jet::Any
+    initialized::Bool                       # Flag to indicate finished initialization
+    units::Units{CType}                     # Units to convert between lattice and SI
+    laser::Any                              # Laser source (see laser.jl)
+    powder_jet::Any                         # Powder source (see powder.jl)
 end
 
 function Model(
@@ -90,15 +90,15 @@ function Model(
     latent = 0.0f0,
     Ts = nothing,
     Tl = nothing,
-    K0 = 0.0f0,
+    K0 = 0.0f0,                             # Kozeny-Carman permeability
     latent_v = 0.0f0,
     T_v = nothing,
-    M = 0.0558,
+    M = 0.0558,                             # Molar mass (kg/mol) of 316L, 55.8 kg/mol
     p_atm = 101325.0,
     emissivity = 0.0,
-    T_rad = nothing,
-    powder_τ = 0.0,
-    powder_T = nothing,
+    T_rad = nothing,                        # Far-field temperature for radiation
+    powder_τ = 0.0,                         # Unmelted powder lifetime 
+    powder_T = nothing,                     # Powder temperature
     laser = nothing,
     powder_jet = nothing,
     SType::Type{<:AbstractFloat} = CType,
@@ -114,9 +114,9 @@ function Model(
     σT = CType(lbm_σT(units, σT))
     Tσl = Tσ === nothing ? CType(T_avg) :
           Tσ isa Quantity ? CType(lbm_T(units, Tσ)) : CType(Tσ)
-    α  = CType(lbm_ν(units, α))
-    αs = α_s === nothing ? α : CType(lbm_ν(units, α_s))
-    αl = α_l === nothing ? α : CType(lbm_ν(units, α_l))
+    α  = CType(lbm_α(units, α))
+    αs = α_s === nothing ? α : CType(lbm_α(units, α_s))
+    αl = α_l === nothing ? α : CType(lbm_α(units, α_l))
     νs = ν_s === nothing ? ν : CType(lbm_ν(units, ν_s))
     νl = ν_l === nothing ? ν : CType(lbm_ν(units, ν_l))
     αsT = CType(lbm_αT(units, k_sT))
@@ -128,11 +128,11 @@ function Model(
     Λ  = CType(lbm_Λ(units, latent))
     Tsl = Ts === nothing ? CType(T_avg) :
           Ts isa Quantity ? CType(lbm_T(units, Ts)) : CType(Ts)
-    Tll = Tl === nothing ? Tsl :
+    Tll = Tl === nothing ? CType(T_avg) :
           Tl isa Quantity ? CType(lbm_T(units, Tl)) : CType(Tl)
-    K0l = K0 isa Quantity ? CType(ustrip(u"m^2", K0) / units.m^2) : CType(K0 / units.m^2)
     Tvl = T_v === nothing ? zero(CType) :
           T_v isa Quantity ? CType(lbm_T(units, T_v)) : CType(T_v)
+    K0l = K0 isa Quantity ? CType(ustrip(u"m^2", K0) / units.m^2) : CType(K0 / units.m^2)
     Λv, βv, p0l, Chk = lbm_evap(units, latent_v, M, p_atm)
     Lvsi = latent_v isa Quantity ? ustrip(u"J/kg", latent_v) : Float64(latent_v)
     if Lvsi > 0 && Tvl == 0
@@ -146,8 +146,6 @@ function Model(
     Crad = εr > 0 ? CType(lbm_rad(units, εr)) : zero(CType)
     Trad = T_rad === nothing ? CType(T_avg) :
            T_rad isa Quantity ? CType(lbm_T(units, T_rad)) : CType(T_rad)
-
-    # @info units
 
     model = Model(Nx, Ny, Nz, ν; fx, fy, fz, σ=σ, σT=σT, Tσ=Tσl, α=α, α_s=αs, α_l=αl,
                   ν_s=νs, ν_l=νl, α_sT=αsT, α_lT=αlT, γ_s=γs, γ_l=γl, ν_sT=νsT, ν_lT=νlT,
@@ -248,9 +246,9 @@ function Model(
     Ny::UInt = UInt(Ny)
     Nz::UInt = UInt(Nz)
 
-    Hx::UInt = UInt(Dx > 1) # halo offset x
-    Hy::UInt = UInt(Dy > 1) # halo offset y
-    Hz::UInt = UInt(Dz > 1) # halo offset z
+    Hx::UInt = UInt(Dx > 1) # Halo offset x
+    Hy::UInt = UInt(Dy > 1) # Halo offset y
+    Hz::UInt = UInt(Dz > 1) # Halo offset z
     
     ν = CType(ν)
     warn_lattice_stability(ν, CType(fx), CType(fy), CType(fz), Nx, Ny, Nz; SType)
@@ -523,19 +521,21 @@ function warn_lattice_stability(
     τ = C(3) * νc + C(1) / C(2)
     ω = one(C) / τ
     fmag = hypot(C(fx), C(fy), C(fz))
-    L = C(max(Int(Nx), Int(Ny), Int(Nz)))
-    Hcells = H === nothing ? L : C(H)
-    u_g = (fmag > 0 && Hcells > 0) ? sqrt(fmag * Hcells) : zero(C)
+    L = C(max(Int(Nx), Int(Ny), Int(Nz)))                           # Largest grid size in cells
+    Hcells = H === nothing ? L : C(H)                               # Height in cells
+    u_g = (fmag > 0 && Hcells > 0) ? sqrt(fmag * Hcells) : zero(C)  # Characteristic speed of falling under gravity
     u_char = u === nothing ? u_g : C(u)
     Ma = u_char / cs
 
-    if !(νc > 0)
+                                                                    # Positive kinematic viscosity
+    if !(νc > 0)                                                    # ν = 1/3 * (τ - 1/2)
         @warn "lattice ν ≤ 0 is invalid" ν=νc
     end
-    if !(τ > C(0.5)) || ω >= C(2)
+    if τ <= C(0.5) || ω >= C(2)                                     # τ leads to unstable behaviour, negative viscosity
         @warn "unstable: τ ≤ 1/2 (ω⁺ ≥ 2)" ν=νc τ ω
     elseif TRT
-        ωm = one(C) / (C(0.1875) / (one(C)/ω - C(0.5)) + C(0.5))
+        ωm = one(C) / (C(0.1875) / (one(C)/ω - C(0.5)) + C(0.5))    # ω⁻ = 1 / (Λ / (1/ω⁺ - 0.5)) + 0.5)
+                                                                    # using Λ = 3/16 ≈ 0.1875
         if ω > C(1.99)
             @info "TRT: ω⁺=$(round(Float64(ω); digits=5)) close to 2, ω⁻=$(round(Float64(ωm); digits=4)) (Λ=3/16)"
         end
@@ -560,141 +560,6 @@ function warn_lattice_stability(
     return nothing
 end
 
-# ParaView 6 / Qt6 `pqDoubleRangeWidget::valueToSliderPos` aborts if the
-# contour/color range is NaN, Inf, or min==max (divide by zero → NaN).
-@inline function _vtk_finite32(x, default=0.0f0)
-    y = Float32(x)
-    return isfinite(y) ? y : default
-end
-
-@inline function _vtk_clamp32(x, lo, hi)
-    y = _vtk_finite32(x)
-    return y < lo ? lo : (y > hi ? hi : y)
-end
-
-function _vtk_scalar(A, Nx, Ny, Nz, f=identity; lo=nothing, hi=nothing)
-    B = Array{Float32}(undef, Nx, Ny, Nz)
-    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
-        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
-        val = _vtk_finite32(f(A[n]))
-        lo !== nothing && val < lo && (val = lo)
-        hi !== nothing && val > hi && (val = hi)
-        B[x, y, z] = val
-    end
-    return B
-end
-
-# T for contours: 0 in gas so the array range is [0, Tmax], not a constant
-# 300 K (min==max crashes the isosurface slider) and not Inf.
-function _vtk_T(Tlat, flags, U, Nx, Ny, Nz)
-    B = Array{Float32}(undef, Nx, Ny, Nz)
-    Tlo = 0.0f0
-    Thi = 20000.0f0
-    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
-        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
-        if (flags[n] & TYPE_SU) == TYPE_G
-            B[x, y, z] = 0.0f0
-        else
-            B[x, y, z] = _vtk_clamp32(si_T(U, Tlat[n]), Tlo, Thi)
-        end
-    end
-    return B
-end
-
-function _vtk_fillfrac(num, den, Nx, Ny, Nz)
-    B = Array{Float32}(undef, Nx, Ny, Nz)
-    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
-        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
-        ρn = Float64(den[n])
-        mn = Float64(num[n])
-        v = (isfinite(mn) && isfinite(ρn) && ρn > 0) ? _vtk_finite32(mn / ρn) : 0.0f0
-        B[x, y, z] = v < 0.0f0 ? 0.0f0 : (v > 10.0f0 ? 10.0f0 : v)
-    end
-    return B
-end
-
-function export!(model::Model; dir::AbstractString="output")
-    start_run_log!(dir)
-    model.initialized || initialize!(model)
-    moments!(model)
-
-    mkpath(dir)
-
-    domain = model.domains[1] # not general yet
-    t = Int(domain.t)
-    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-
-    ρ_host     = Array(domain.ρ.data)
-    u_host     = Array(domain.u.data)
-    flags_host = Array(domain.flags.data)
-
-    umax = maximum(@views hypot.(u_host[:, 1], u_host[:, 2], u_host[:, 3]))
-    nbad = count(!isfinite, ρ_host) + count(!isfinite, u_host)
-    if nbad > 0
-        @warn "non-finite ρ/u at t=$t ($nbad values) — writing 0 in VTK" nbad
-    elseif umax > 0.4f0
-        @warn "max |u|=$umax at t=$t exceeds ≈0.4 (cs=$(1/sqrt(3))); unstable"
-    elseif umax > 0.15f0
-        @warn "max |u|=$umax at t=$t is high (Ma=$(umax * sqrt(3f0)))"
-    end
-
-    U = model.units
-    dx = Float32(U.m)
-    isfinite(dx) && dx > 0 || (dx = 1.0f0)
-    t_si = Float64(si_t(U, t))
-    isfinite(t_si) || (t_si = Float64(t))
-
-    xs = range(0.0f0, step=dx, length=Nx)
-    ys = range(0.0f0, step=dx, length=Ny)
-    zs = range(0.0f0, step=dx, length=Nz)
-
-    ρ3 = _vtk_scalar(ρ_host, Nx, Ny, Nz, ρ -> si_ρ(U, ρ); lo=0.0f0, hi=1.0f7)
-    p3 = _vtk_scalar(ρ_host, Nx, Ny, Nz, ρ -> si_p(U, ρ); lo=-1.0f12, hi=1.0f12)
-    ux = _vtk_scalar(view(u_host, :, 1), Nx, Ny, Nz, u -> si_u(U, u); lo=-1.0f5, hi=1.0f5)
-    uy = _vtk_scalar(view(u_host, :, 2), Nx, Ny, Nz, u -> si_u(U, u); lo=-1.0f5, hi=1.0f5)
-    uz = _vtk_scalar(view(u_host, :, 3), Nx, Ny, Nz, u -> si_u(U, u); lo=-1.0f5, hi=1.0f5)
-    # Int32: Qt6 color bars have asserted on UInt8 ranges.
-    flags3 = reshape(Int32.(flags_host), Nx, Ny, Nz)
-
-    pvd_path = joinpath(dir, "lbm")
-    # t=0 starts a new collection so a re-run does not append duplicate
-    # timesteps into an old .pvd (non-monotonic time also trips Qt6).
-    pvd = paraview_collection(pvd_path; append = t > 0 && isfile(pvd_path * ".pvd"))
-
-    vtk_grid(joinpath(dir, @sprintf("lbm_%08d", t)), xs, ys, zs) do vtk
-        # T/phi first and marked as active Scalars. ParaView 6 + Qt6 aborts in
-        # pqDoubleRangeWidget when Contour is applied to a constant field
-        # (rho, Q, S, mp are often min==max).
-        @static if TEMPERATURE
-            vtk["T"] = _vtk_T(Array(domain.T.data), flags_host, U, Nx, Ny, Nz)
-            vtk["fs"] = _vtk_scalar(Array(domain.fs.data), Nx, Ny, Nz; lo=0.0f0, hi=1.0f0)
-        end
-        @static if SURFACE
-            vtk["phi"] = _vtk_scalar(Array(domain.ϕ.data), Nx, Ny, Nz; lo=0.0f0, hi=2.0f0)
-        end
-        vtk["u"] = (ux, uy, uz)
-        vtk["rho"] = ρ3
-        vtk["p"] = p3
-        vtk["flags"] = flags3
-        @static if SURFACE
-            vtk["mp"] = _vtk_fillfrac(Array(domain.mp.data), ρ_host, Nx, Ny, Nz)
-            vtk["S"] = _vtk_scalar(Array(domain.msrc.data), Nx, Ny, Nz, S -> si_S(U, S, 1); lo=-1.0f6, hi=1.0f6)
-        end
-        @static if TEMPERATURE
-            vtk["Q"] = _vtk_scalar(Array(domain.Q.data), Nx, Ny, Nz, Qlat -> si_Q(U, Qlat, 1); lo=-1.0f15, hi=1.0f15)
-            vtk[VTKPointData()] = ("Scalars" => "T", "Vectors" => "u")
-        elseif SURFACE
-            vtk[VTKPointData()] = ("Scalars" => "phi", "Vectors" => "u")
-        else
-            vtk[VTKPointData()] = ("Vectors" => "u",)
-        end
-        pvd[t_si] = vtk
-    end
-
-    vtk_save(pvd)
-    return nothing
-end
-
 function run!(model::Model, nsteps::Int)
     nsteps > 0 || throw(ArgumentError("nsteps must be positive"))
 
@@ -713,7 +578,7 @@ end
 
 function initialize!(model::Model)
     @info "starting init"
-    kernel = model.cached_initialize!
+    kernel = model.cached_initialize_kernel!
     for domain in model.domains
         N = get_N(domain)
         @static if SURFACE
@@ -722,7 +587,7 @@ function initialize!(model::Model)
                 domain.u.data,
                 domain.fi.data,
                 domain.flags.data,
-                domain.mass.data, domain.massex.data, domain.ϕ.data,
+                domain.mass.data, domain.massex.data, domain.ϕ.data,                # SURFACE specific
                 model.weights, model.velocities,
                 Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
                 domain.gi.data, domain.T.data, domain.fs.data;
@@ -741,10 +606,11 @@ function initialize!(model::Model)
             )
         end
         @static if MOVING_BOUNDARIES
-            model.cached_moving!(
+            model.cached_moving_kernel!(
                 domain.u.data, domain.flags.data, model.velocities,
                 Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
-                ndrange = N)
+                ndrange = N
+            )
         end
     end
 
@@ -771,13 +637,14 @@ function step!(model::Model)
             advance_powder_jet!(model, domain)
             if domain.τ_p > 0
                 powder_gas_kernel!(model.backend, model.workgroup)(
-                    domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
-                    domain.τ_p, domain.T_p, domain.γ_s, domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
+                                   domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
+                                   domain.τ_p, domain.T_p, domain.γ_s,
+                                   domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
             end
         end
 
         @static if SURFACE
-            s0 = t_odd ? model.cached_surface_0_odd! : model.cached_surface_0_even!
+            s0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
             s0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
                domain.fs.data, domain.gi.data,
@@ -789,17 +656,20 @@ function step!(model::Model)
         end
 
         @static if MOVING_BOUNDARIES
-            model.cached_moving!(
+            model.cached_moving_kernel!(
                 domain.u.data, domain.flags.data, model.velocities,
                 Nd, Nx, Ny, Nz; ndrange = N)
         end
 
-        kernel = t_odd ? model.cached_collide_odd! : model.cached_collide_even!
+        kernel = t_odd ? model.cached_collide_odd_kernel! : model.cached_collide_even_kernel!
         @static if SURFACE
             kernel(domain.flags.data, domain.fi.data,
-                   domain.ρ.data, domain.u.data, domain.F.data, domain.mass.data,
+                   domain.ρ.data, domain.u.data, domain.F.data,
+                   domain.mass.data,                                                # SURFACE specific
                    domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                   domain.ϕ.data, domain.fs.data, domain.msrc.data, domain.mp.data,
+                   domain.ϕ.data,                                                   # SURFACE specific
+                   domain.fs.data,
+                   domain.msrc.data, domain.mp.data,                                # SURFACE specific
                    model.weights, model.velocities,
                    domain.ω, domain.fx, domain.fy, domain.fz,
                    domain.ω_T, domain.β, domain.T_avg, domain.σT,
@@ -809,7 +679,9 @@ function step!(model::Model)
                    domain.ν_s, domain.ν_l, domain.ν_sT, domain.ν_lT,
                    domain.Λ_v, domain.T_v, domain.C_hk, domain.p0v, domain.β_v,
                    domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
-                   Nd, Nx, Ny, Nz, domain.Eacc.data, domain.Macc.data; ndrange = N)
+                   Nd, Nx, Ny, Nz, domain.Eacc.data,
+                   domain.Macc.data;                                                # SURFACE specific
+                   ndrange = N)
         else
             kernel(domain.flags.data, domain.fi.data,
                    domain.ρ.data, domain.u.data, domain.F.data,
@@ -828,16 +700,17 @@ function step!(model::Model)
         end
 
         @static if SURFACE
-            model.cached_surface_1!(domain.flags.data, model.velocities,
-                Nd, Nx, Ny, Nz; ndrange = N)
-            s2 = t_odd ? model.cached_surface_2_odd! : model.cached_surface_2_even!
+            model.cached_surface_1_kernel!(domain.flags.data, model.velocities,
+                                           Nd, Nx, Ny, Nz; ndrange = N)
+
+            s2 = t_odd ? model.cached_surface_2_odd_kernel! : model.cached_surface_2_even_kernel!
             s2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                domain.gi.data, domain.T.data, domain.fs.data,
                model.weights, model.velocities, Nd, Nx, Ny, Nz; ndrange = N)
-            model.cached_surface_3!(
-                domain.ρ.data, domain.flags.data, domain.mass.data,
-                domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
-                Nd, Nx, Ny, Nz; ndrange = N)
+
+            model.cached_surface_3_kernel!(domain.ρ.data, domain.flags.data, domain.mass.data,
+                                           domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
+                                           Nd, Nx, Ny, Nz; ndrange = N)
         end
 
         increment_time_step!(domain, 1)
@@ -850,7 +723,7 @@ end
 function moments!(model::Model)
     for domain in model.domains
         N = get_N(domain)
-        kernel = last_collide_odd(domain) ? model.cached_moments_odd! : model.cached_moments_even!
+        kernel = last_collide_odd(domain) ? model.cached_moments_odd_kernel! : model.cached_moments_even_kernel!
         kernel(
             domain.ρ.data,
             domain.u.data,
@@ -879,7 +752,7 @@ function update_force_field!(model::Model)
     end
     for domain in model.domains
         N = get_N(domain)
-        kernel = last_collide_odd(domain) ? model.cached_update_force_odd! : model.cached_update_force_even!
+        kernel = last_collide_odd(domain) ? model.cached_update_force_odd_kernel! : model.cached_update_force_even_kernel!
         kernel(
             domain.flags.data, domain.fi.data, domain.F.data,
             model.velocities,
@@ -889,200 +762,4 @@ function update_force_field!(model::Model)
     end
     KernelAbstractions.synchronize(model.backend)
     return nothing
-end
-
-@static if SURFACE
-
-@inline function surface_0_body!(
-    t_odd::Val{odd},
-    fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi,
-    w::NTuple{Q, CType},
-    c::NTuple{Q, SVector{3, Int}},
-    fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
-    Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType
-) where {odd, Q, CType}
-    flagsn = flags[n]
-    bo = flagsn & TYPE_BO
-    su = flagsn & TYPE_SU
-    (bo == TYPE_S || su == TYPE_G) && return nothing
-
-    n0 = n - 1
-    x = n0 % Nx
-    y = (n0 ÷ Nx) % Ny
-    z = n0 ÷ (Nx * Ny)
-
-    frozen = false
-    @static if TEMPERATURE
-        frozen = is_solid_fraction(fs[n])
-    end
-
-    massn = mass[n]
-    if !frozen
-        for i in 2:Q
-            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-            massn += massex[src]
-        end
-    end
-
-    NP = (Q - 1) ÷ 2
-    fn1 = CType(fi[f_index(n, 1, N)])
-
-    if su == TYPE_F
-        if !frozen
-            for k in 1:NP
-                i = 2k
-                src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-                fp_in,  fm_in  = load_pair(fi, n, src, i, t_odd, N, CType)
-                fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
-                massn += (fp_in - fp_out) + (fm_in - fm_out)
-            end
-        end
-        mass[n] = massn
-        @static if TEMPERATURE
-            fillc = ϕ[n]
-            fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-            reconstruct_g_boundaries!(t_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
-        end
-        return nothing
-    end
-
-    if su != TYPE_I
-        mass[n] = massn
-        return nothing
-    end
-
-    # TYPE_I
-    cs = CType(1) / sqrt(CType(3))
-    @static if EQUILIBRIUM_BOUNDARIES
-        eq = (flagsn & TYPE_BO) == TYPE_E
-    else
-        eq = false
-    end
-    if frozen
-        ρn = ρ[n]
-        ρn = ρn > zero(CType) ? ρn : one(CType)
-        ux = zero(CType); uy = zero(CType); uz = zero(CType)
-        uxg = zero(CType); uyg = zero(CType); uzg = zero(CType)
-        ρ_gas = one(CType)
-        ϕin = calculate_phi(ρn, massn, flagsn)
-    elseif eq
-        ρn, ux, uy, uz = prescribed_hydro(ρ[n], u[n, 1], u[n, 2], u[n, 3], fx, fy, fz)
-        ϕin = calculate_phi(ρn, massn, flagsn)
-        σn = σ
-        @static if TEMPERATURE
-            σn = σ + σT * (T[n] - Tσ)
-            σn = ifelse(σn > zero(CType), σn, zero(CType))
-        end
-        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
-        uxg, uyg, uzg = ux, uy, uz
-    else
-        ρn = fn1
-        ux = zero(CType); uy = zero(CType); uz = zero(CType)
-        for k in 1:NP
-            i = 2k
-            src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-            fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
-            ρn += fp_out + fm_out
-            ux += CType(c[i][1])*fp_out + CType(c[i+1][1])*fm_out
-            uy += CType(c[i][2])*fp_out + CType(c[i+1][2])*fm_out
-            uz += CType(c[i][3])*fp_out + CType(c[i+1][3])*fm_out
-        end
-        invρ = one(CType) / ρn
-        ux *= invρ; uy *= invρ; uz *= invρ
-        ux = clamp(ux, -cs, cs); uy = clamp(uy, -cs, cs); uz = clamp(uz, -cs, cs)
-        ϕin = calculate_phi(ρn, massn, flagsn)
-        σn = σ
-        @static if TEMPERATURE
-            σn = σ + σT * (T[n] - Tσ)
-            σn = ifelse(σn > zero(CType), σn, zero(CType))
-        end
-        ρ_gas = gas_density_plic(σn, ϕ, ϕin, x, y, z, Nx, Ny, Nz)
-        @static if VOLUME_FORCE
-            uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
-            uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)
-            uzg = clamp(uz + fz / (CType(2) * ρn), -cs, cs)
-        else
-            uxg, uyg, uzg = ux, uy, uz
-        end
-        @static if TEMPERATURE
-            inv2ρ = one(CType) / (CType(2) * ρn)
-            if σT != zero(CType)
-                mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
-                uxg = clamp(uxg + mx * inv2ρ, -cs, cs)
-                uyg = clamp(uyg + my * inv2ρ, -cs, cs)
-                uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
-            end
-            if Λ_v > zero(CType)
-                rx, ry, rz = recoil_force(T, ϕ, n, x, y, z, Nx, Ny, Nz, Λ_v, T_v, p0v, β_v, CType)
-                uxg = clamp(uxg + rx * inv2ρ, -cs, cs)
-                uyg = clamp(uyg + ry * inv2ρ, -cs, cs)
-                uzg = clamp(uzg + rz * inv2ρ, -cs, cs)
-            end
-        end
-    end
-    uug = CType(1.5) * (uxg*uxg + uyg*uyg + uzg*uzg)
-
-    for k in 1:NP
-        i = 2k
-        cp, cm = c[i], c[i + 1]
-        srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-        srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
-        sup = flags[srcp] & TYPE_SU
-        sum_ = flags[srcm] & TYPE_SU
-        ϕp = ϕ[srcp]; ϕm = ϕ[srcm]
-
-        fp_in,  fm_in  = load_pair(fi, n, srcp, i, t_odd, N, CType)
-        fp_out, fm_out = load_outgoing_pair(fi, n, srcp, i, t_odd, N, CType)
-
-        if !frozen
-            if (sup & (TYPE_F | TYPE_I)) != 0x00
-                fluxp = fm_in - fp_out
-                massn += sup == TYPE_F ? fluxp : CType(0.5) * (ϕp + ϕin) * fluxp
-            end
-            if (sum_ & (TYPE_F | TYPE_I)) != 0x00
-                fluxm = fp_in - fm_out
-                massn += sum_ == TYPE_F ? fluxm : CType(0.5) * (ϕm + ϕin) * fluxm
-            end
-        end
-
-        fegp = feq(w[i],     ρ_gas, uxg, uyg, uzg, uug, cp, CType)
-        fegm = feq(w[i + 1], ρ_gas, uxg, uyg, uzg, uug, cm, CType)
-        fp_rec = fegm - fm_out + fegp
-        fm_rec = fegp - fp_out + fegm
-        store_reconstructed_pair!(
-            fi, n, srcp, i, fm_rec, fp_rec,
-            sup == TYPE_G, sum_ == TYPE_G, t_odd, N)
-    end
-    mass[n] = massn
-    @static if TEMPERATURE
-        fillc = ϕin
-        fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-        reconstruct_g_boundaries!(t_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
-    end
-    return nothing
-end
-
-@kernel function surface_0_even_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs, gi,
-    w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
-    fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
-    Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
-) where {Q, CType}
-    n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
-end
-
-@kernel function surface_0_odd_kernel!(
-    fi, @Const(ρ), @Const(u), @Const(flags), mass, @Const(massex), @Const(ϕ), T, fs, gi,
-    w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
-    fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
-    Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
-) where {Q, CType}
-    n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
-end
-
 end
