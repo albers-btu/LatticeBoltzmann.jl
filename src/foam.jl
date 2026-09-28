@@ -646,39 +646,6 @@ end
 
 # --- Flood fill ------------------------------------------------------------
 
-function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
-    N = Nx * Ny * Nz
-    flags = foam.flags
-    comp = foam.component
-    q = foam.queue
-    fill!(comp, Int32(0))
-    ncomp = 0
-    for seed in 1:N
-        comp[seed] != 0 && continue
-        (flags[seed] & TYPE_SU) != TYPE_G && continue
-        ncomp += 1
-        cid = Int32(ncomp)
-        comp[seed] = cid
-        qh = 1
-        qt = 1
-        q[1] = seed
-        while qh <= qt
-            n = q[qh]
-            qh += 1
-            x, y, z = _cell_xyz(n, Nx, Ny)
-            for (cx, cy, cz) in _FACE6
-                j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
-                comp[j] != 0 && continue
-                (flags[j] & TYPE_SU) != TYPE_G && continue
-                comp[j] = cid
-                qt += 1
-                q[qt] = j
-            end
-        end
-    end
-    return ncomp
-end
-
 function _face_touches_gas(flags, n::Int, Nx::Int, Ny::Int, Nz::Int)
     x, y, z = _cell_xyz(n, Nx, Ny)
     for (cx, cy, cz) in _FACE6
@@ -688,19 +655,20 @@ function _face_touches_gas(flags, n::Int, Nx::Int, Ny::Int, Nz::Int)
     return false
 end
 
-function _shell_only(flags, prev, gas_tags, n, Nx, Ny, Nz)
-    (flags[n] & TYPE_SU) == TYPE_I || return false
+# TYPE_G, or a TYPE_I shell that does not face gas and whose previous tag
+# is not already on a gas cell. The second case is a punched sphere with
+# no full cell; its punch id has to survive the fill. Shells that still
+# touch gas are labeled later by _tag_interface!.
+function _joins_component(flags, prev, gas_tags, n, Nx, Ny, Nz)
+    su = flags[n] & TYPE_SU
+    su == TYPE_G && return true
+    su == TYPE_I || return false
     _face_touches_gas(flags, n, Nx, Ny, Nz) && return false
     t = prev[n]
-    # An edge of a bubble that still has TYPE_G keeps that gas component's id.
-    # Only a shell whose tag is on no gas cell is its own component.
     return t > 0 && t ∉ gas_tags
 end
 
-# A sphere that never contains a full cell is only TYPE_I. Those cells
-# still carry the punch tag, so the component is seeded from that shell
-# instead of being dropped for lack of TYPE_G.
-function _flood_orphan_shells!(foam::FoamHost, ncomp::Int, Nx::Int, Ny::Int, Nz::Int)
+function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     N = Nx * Ny * Nz
     flags = foam.flags
     prev = foam.tag_prev
@@ -712,9 +680,11 @@ function _flood_orphan_shells!(foam::FoamHost, ncomp::Int, Nx::Int, Ny::Int, Nz:
         t = prev[n]
         t > 0 && push!(gas_tags, t)
     end
+    fill!(comp, Int32(0))
+    ncomp = 0
     for seed in 1:N
         comp[seed] != 0 && continue
-        _shell_only(flags, prev, gas_tags, seed, Nx, Ny, Nz) || continue
+        _joins_component(flags, prev, gas_tags, seed, Nx, Ny, Nz) || continue
         ncomp += 1
         cid = Int32(ncomp)
         comp[seed] = cid
@@ -728,7 +698,7 @@ function _flood_orphan_shells!(foam::FoamHost, ncomp::Int, Nx::Int, Ny::Int, Nz:
             for (cx, cy, cz) in _FACE6
                 j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
                 comp[j] != 0 && continue
-                _shell_only(flags, prev, gas_tags, j, Nx, Ny, Nz) || continue
+                _joins_component(flags, prev, gas_tags, j, Nx, Ny, Nz) || continue
                 comp[j] = cid
                 qt += 1
                 q[qt] = j
@@ -913,7 +883,6 @@ end
 function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     N = Nx * Ny * Nz
     ncomp = _flood_gas!(foam, Nx, Ny, Nz)
-    ncomp = _flood_orphan_shells!(foam, ncomp, Nx, Ny, Nz)
     fill!(foam.tag, TAG_NONE)
     if ncomp == 0
         _tag_interface!(foam.flags, foam.tag, foam.component, Nx, Ny, Nz)
