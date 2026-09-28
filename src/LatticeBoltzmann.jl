@@ -9,7 +9,7 @@ export VELOCITIES
 export velocities
 
 include("extensions.jl")
-export TRT, KBC, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE
+export TRT, KBC, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE, FOAM
 
 include("units.jl")
 export Units
@@ -42,6 +42,7 @@ include("kernels/forces.jl")
 include("kernels/init.jl")
 include("kernels/collide.jl")
 include("kernels/surface.jl")
+include("kernels/foam.jl")
 include("kernels/moments.jl")
 export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!, powder_gas_kernel!
 
@@ -57,10 +58,12 @@ export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 include("powderbed.jl")
 export PowderBed, read_powder_bed, substrate_top, paint_powder_bed!
 
+include("foam.jl")
 include("model.jl")
 export Model
 export get_D
 export run!, initialize!, moments!
+export set_foam!, bubble_stats
 export update_force_field!, reset_force_field!
 
 include("export.jl")

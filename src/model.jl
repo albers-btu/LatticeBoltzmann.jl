@@ -66,6 +66,13 @@ mutable struct Model{
     laser::Any                              # Laser source (see laser.jl)
     powder_jet::Any                         # Powder source (see powder.jl)
     n_hydro::Int                            # Hydro/interface substeps per thermal step
+    @static if FOAM
+        cached_concentration_even_kernel!::Any
+        cached_concentration_odd_kernel!::Any
+        cached_disjoining_kernel!::Any
+        cached_ϕ_correction_kernel!::Any
+        cached_foam_init_kernel!::Any
+    end
 end
 
 function Model(
@@ -236,6 +243,14 @@ function Model(
         cached_surface_3 = surface_3_kernel!(backend, workgroup)
     end
 
+    @static if FOAM
+        cached_concentration_even = concentration_even_kernel!(backend, workgroup)
+        cached_concentration_odd = concentration_odd_kernel!(backend, workgroup)
+        cached_disjoining = disjoining_kernel!(backend, workgroup)
+        cached_ϕ_correction = ϕ_correction_kernel!(backend, workgroup)
+        cached_foam_init = foam_init_kernel!(backend, workgroup)
+    end
+
     Dx = UInt(1)
     Dy = UInt(1)
     Dz = UInt(1)
@@ -373,6 +388,17 @@ function Model(
                 laser,
                 powder_jet,
                 max(1, n_hydro),
+                (@static if FOAM
+                    (
+                        cached_concentration_even,
+                        cached_concentration_odd,
+                        cached_disjoining,
+                        cached_ϕ_correction,
+                        cached_foam_init,
+                    )
+                else
+                    ()
+                end)...,
             )
         else
             Model(
@@ -404,6 +430,17 @@ function Model(
                 laser,
                 powder_jet,
                 max(1, n_hydro),
+                (@static if FOAM
+                    (
+                        cached_concentration_even,
+                        cached_concentration_odd,
+                        cached_disjoining,
+                        cached_ϕ_correction,
+                        cached_foam_init,
+                    )
+                else
+                    ()
+                end)...,
             )
         end
     else
@@ -633,6 +670,9 @@ function initialize!(model::Model)
 end
 
 function step!(model::Model)
+    @static if FOAM
+        model.n_hydro == 1 || error("FOAM v1 requires n_hydro == 1 (got $(model.n_hydro)); substep scaling is not applied")
+    end
     nsub = max(1, model.n_hydro)
     invN = 1 / nsub
     invN2 = invN * invN
@@ -668,6 +708,11 @@ function step!(model::Model)
             # Stream index across outer steps, so AA parity stays continuous.
             t_odd = isodd(Int(domain.t) * nsub + sub - 1)
             thermal = sub == nsub
+
+            @static if FOAM
+                foam_host!(model, domain)
+                model.cached_disjoining_kernel!(; ndrange = N)
+            end
 
             @static if SURFACE
                 sk0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
@@ -726,6 +771,11 @@ function step!(model::Model)
                        Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
             end
 
+            @static if FOAM
+                ck = t_odd ? model.cached_concentration_odd_kernel! : model.cached_concentration_even_kernel!
+                ck(; ndrange = N)
+            end
+
             @static if SURFACE
                 model.cached_surface_1_kernel!(domain.flags.data, model.velocities,
                                                Nd, Nx, Ny, Nz; ndrange = N)
@@ -736,6 +786,10 @@ function step!(model::Model)
                 model.cached_surface_3_kernel!(domain.ρ.data, domain.flags.data, domain.mass.data,
                                                domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                                                Nd, Nx, Ny, Nz; ndrange = N)
+            end
+
+            @static if FOAM
+                model.cached_ϕ_correction_kernel!(; ndrange = N)
             end
         end
 

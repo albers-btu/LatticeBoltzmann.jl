@@ -12,6 +12,7 @@ const EACC_N = 5        # Length of energy account array
 const MACC_EVAP = 1     # Evaporation
 const MACC_POWDER = 2   # Powder (source)
 const MACC_N = 2        # Length of mass account array
+const MAX_BUBBLES = 4096 # Bubble-id cap; device flux buffer length
 
 # Represents the complete state of one grid
 mutable struct Domain{
@@ -20,7 +21,8 @@ mutable struct Domain{
     Aρ<:AbstractArray{CType},           # Array for ρ (density)
     Au<:AbstractArray{CType},           # Array for u (velocity)
     Afi<:AbstractArray{SType},          # Array for fᵢ DDF (discrete distribution function)
-    Af<:AbstractArray{UInt8}            # Array for flags
+    Af<:AbstractArray{UInt8},           # Array for flags
+    Ai<:AbstractArray{Int32}            # Int32 witness; tag array only when FOAM
 }
     Nx::UInt                            # Lattice size x
     Ny::UInt                            # Lattice size y
@@ -108,7 +110,44 @@ mutable struct Domain{
         end
     end
 
+    @static if FOAM
+        ci::Memory{SType, Afi}          # Dissolved-gas populations (D3Q7)
+        c::Memory{CType, Aρ}            # Pre-collide concentration Σ cᵢ
+        ϕ_old::Memory{CType, Aρ}        # Liquid fill at the previous surface_3
+        ρb::Memory{CType, Aρ}           # Imposed bubble density
+        Pi::Memory{CType, Aρ}           # Disjoining pressure Π, not Π/c_s²
+        tag::Memory{Int32, Ai}          # Bubble id (0 none, −1 atmosphere)
+        flux::Memory{CType, Aρ}         # Per-id flux bin, length MAX_BUBBLES
+        D::CType                        # Concentration diffusivity
+        k_H::CType                      # Henry coefficient
+        k_Π::CType                      # Disjoining coefficient
+        q::CType                        # Concentration source
+        V_m::CType                      # R_s T / p_sat
+        γ_b::CType                      # Polytropic exponent
+        c0::CType                       # Initial dissolved concentration
+        ρ_liquid::CType                 # Reference liquid density for the inventory
+    end
+
     t::UInt64                           # Lattice time-step counter
+end
+
+# Ai is not a field when FOAM is false, so it cannot be inferred.
+@static if !FOAM
+    function Domain(
+        Nx, Ny, Nz, Ox, Oy, Oz, ν, N, ω, fx, fy, fz, σ, σT, Tσ,
+        ρ::Memory, u::Memory, F, fi::Memory, flags::Memory,
+        rest...,
+    )
+        Domain{
+            eltype(ρ.data), eltype(fi.data),
+            typeof(ρ.data), typeof(u.data), typeof(fi.data), typeof(flags.data),
+            Vector{Int32},
+        }(
+            Nx, Ny, Nz, Ox, Oy, Oz, ν, N, ω, fx, fy, fz, σ, σT, Tσ,
+            ρ, u, F, fi, flags,
+            rest...,
+        )
+    end
 end
 
 function Domain(
@@ -216,6 +255,31 @@ function Domain(
         end
     end
 
+    @static if FOAM
+        ci = Memory(AT{SType}(undef, N * 7))
+        fill!(ci.data, zero(SType))
+        c = Memory(AT{CType}(undef, N))
+        fill!(c.data, zero(CType))
+        ϕ_old = Memory(AT{CType}(undef, N))
+        fill!(ϕ_old.data, zero(CType))
+        ρb = Memory(AT{CType}(undef, N))
+        fill!(ρb.data, one(CType)) # untagged and atmosphere impose ambient density
+        Pi = Memory(AT{CType}(undef, N))
+        fill!(Pi.data, zero(CType))
+        tag = Memory(AT{Int32}(undef, N))
+        fill!(tag.data, zero(Int32))
+        flux = Memory(AT{CType}(undef, MAX_BUBBLES))
+        fill!(flux.data, zero(CType))
+        D = zero(CType)
+        k_H = zero(CType)
+        k_Π = zero(CType)
+        q = zero(CType)
+        V_m = zero(CType)
+        γ_b = one(CType)
+        c0 = zero(CType)
+        ρ_liquid = one(CType)
+    end
+
     @static if SURFACE
         @static if TEMPERATURE
             Domain(
@@ -233,6 +297,14 @@ function Domain(
                 Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
                 Eacc, zero(CType), zero(CType),
                 Macc, zero(CType), zero(CType),
+                (@static if FOAM
+                    (
+                        ci, c, ϕ_old, ρb, Pi, tag, flux,
+                        D, k_H, k_Π, q, V_m, γ_b, c0, ρ_liquid,
+                    )
+                else
+                    ()
+                end)...,
                 UInt64(0)
             )
         else
@@ -245,6 +317,14 @@ function Domain(
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp,
                 CType(τ_p), CType(T_p),
+                (@static if FOAM
+                    (
+                        ci, c, ϕ_old, ρb, Pi, tag, flux,
+                        D, k_H, k_Π, q, V_m, γ_b, c0, ρ_liquid,
+                    )
+                else
+                    ()
+                end)...,
                 UInt64(0)
             )
         end

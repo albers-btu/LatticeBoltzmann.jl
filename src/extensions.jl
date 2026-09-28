@@ -11,10 +11,15 @@ const EQUILIBRIUM_BOUNDARIES = true
 const MOVING_BOUNDARIES      = true
 const FORCE_FIELD            = true
 const TEMPERATURE            = true
+const FOAM                   = false # dissolved-gas bubbles; requires SURFACE
 
 const UPDATE_FIELDS          = SURFACE
 const APPLY_FORCE            = VOLUME_FORCE || FORCE_FIELD || TEMPERATURE
 
 @static if SURFACE && !VOLUME_FORCE
     @warn "SURFACE without VOLUME_FORCE: gravity/fx,fy,fz will be ignored"
+end
+
+@static if FOAM && !SURFACE
+    error("FOAM requires SURFACE")
 end

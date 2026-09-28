@@ -13,6 +13,9 @@ using Test, StaticArrays, CUDA
 	include("test_force_field.jl")
 	include("test_temperature.jl")
 	include("test_powder_bed.jl")
+	@static if LatticeBoltzmann.FOAM
+		include("test_foam.jl")
+	end
 
 	model = Model(64, 64, 64, 1.0; backend=CUDABackend())
 	#model = Model(64, 64, 64, 1.0)
