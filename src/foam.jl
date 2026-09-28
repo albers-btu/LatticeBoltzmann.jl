@@ -13,6 +13,8 @@ function set_foam!(model; D=0, k_H=0, k_Π=0, q=0, V_m=0, γ_b=1, c0=0, ρ_liqui
             domain.D = CT(D)
             domain.k_H = CT(k_H)
             domain.k_Π = CT(k_Π)
+            # A zero coefficient must not leave surface_0 subtracting a stale 3Π.
+            domain.k_Π == zero(CT) && fill!(domain.Pi.data, zero(CT))
             domain.q = CT(q)
             domain.V_m = CT(V_m)
             domain.γ_b = CT(γ_b)

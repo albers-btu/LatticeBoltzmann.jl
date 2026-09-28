@@ -717,6 +717,8 @@ function step!(model::Model)
                     model.cached_disjoining_kernel!(
                         domain.ϕ.data, domain.flags.data, domain.tag.data, domain.Pi.data,
                         domain.k_Π, Nx, Ny, Nz; ndrange = N)
+                else
+                    fill!(domain.Pi.data, zero(CT))
                 end
             end
 

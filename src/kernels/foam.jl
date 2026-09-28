@@ -20,11 +20,11 @@ end
 @inline function disjoining_body!(
     ϕ, flags, tag, Pi, k_Π::CType, Nx::Int, Ny::Int, Nz::Int, n::Int
 ) where {CType}
+    # Drop last step's Π before the eligibility return. surface_0 reads every TYPE_I.
+    Pi[n] = zero(CType)
     (flags[n] & TYPE_SU) != TYPE_I && return nothing
     tagn = tag[n]
     tagn <= Int32(0) && return nothing
-
-    Pi[n] = zero(CType)
 
     n0 = n - 1
     x = n0 % Nx

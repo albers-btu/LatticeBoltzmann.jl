@@ -552,3 +552,34 @@ end
 
     @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, 0.5f0, 1, 1, 4, Nx, Ny, Nz, 1f0, 0.1f0) == 0.7f0
 end
+
+@testset "stale disjoining pressure is cleared" begin
+    Nx, Ny, Nz = 4, 4, 16
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    set_foam!(model; k_Π=0.05)
+    domain = model.domains[1]
+    initialize!(model)
+    _paint_zlayers!(domain, _film_layers(Nz, 2, 5, 1, 2))
+    n = _layer_index(1, 1, 2, Nx, Ny)
+    Pi = _launch_disjoining!(model)
+    @test Pi[n] > 0
+    flags = Array(domain.flags.data)
+    tags = Array(domain.tag.data)
+    flags[n] = TYPE_F
+    tags[n] = Int32(0)
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.tag.data, tags)
+    @test Array(domain.Pi.data)[n] > 0
+    LatticeBoltzmann.step!(model)
+    @test iszero(Array(domain.Pi.data)[n])
+
+    fill!(domain.Pi.data, 0.4f0)
+    set_foam!(model; k_Π=0)
+    @test all(iszero, Array(domain.Pi.data))
+
+    stale = zeros(Float32, length(domain.Pi))
+    stale[n] = 0.4f0
+    copyto!(domain.Pi.data, stale)
+    LatticeBoltzmann.step!(model)
+    @test all(iszero, Array(domain.Pi.data))
+end
