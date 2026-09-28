@@ -56,6 +56,10 @@ const VTK_MP  = 1 << 6
 const VTK_S   = 1 << 7
 const VTK_Q   = 1 << 8
 const VTK_FLAGS = 1 << 9
+@static if FOAM
+    const VTK_C   = 1 << 10
+    const VTK_TAG = 1 << 11
+end
 
 @inline function _vtk_num(x::Float32)
     return ifelse(isfinite(x), x, 0.0f0)
@@ -114,6 +118,18 @@ end
     end
 end
 
+@static if FOAM
+@kernel function pack_vtk_foam_kernel!(buf, c, tag, N::Int, off_c::Int, off_tag::Int)
+    n = @index(Global)
+    if off_c >= 0
+        buf[off_c * N + n] = _vtk_num(Float32(c[n]))
+    end
+    if off_tag >= 0
+        buf[off_tag * N + n] = Float32(tag[n])
+    end
+end
+end
+
 function _vtk_mask(fields)
     mask = 0
     wanted = fields === nothing ? (:rho, :p, :u, :flags, :T, :fs, :phi, :mp, :S, :Q) : fields
@@ -128,6 +144,10 @@ function _vtk_mask(fields)
         name === :S   && (mask |= VTK_S)
         name === :Q   && (mask |= VTK_Q)
         name === :flags && (mask |= VTK_FLAGS)
+        @static if FOAM
+            name === :c && (mask |= VTK_C)
+            name === :tag && (mask |= VTK_TAG)
+        end
     end
     @static if !TEMPERATURE
         mask &= ~(VTK_T | VTK_FS | VTK_Q)
@@ -148,7 +168,7 @@ function _vtk_offsets(mask::Int)
         end
         return -1
     end
-    offs = (
+    base = (
         rho = take(VTK_RHO),
         p   = take(VTK_P),
         u   = take(VTK_U, 3),
@@ -160,6 +180,11 @@ function _vtk_offsets(mask::Int)
         Q   = take(VTK_Q),
         flags = take(VTK_FLAGS),
     )
+    @static if FOAM
+        offs = merge(base, (c = take(VTK_C), tag = take(VTK_TAG)))
+    else
+        offs = base
+    end
     return offs, i
 end
 
@@ -264,6 +289,14 @@ function _vtk_write(job::_VtkJob)
         end
         if offs.flags >= 0
             vtk["flags"] = Int32.(_vtk_comp(host, offs.flags, N, job.Nx, job.Ny, job.Nz))
+        end
+        @static if FOAM
+            if offs.c >= 0
+                vtk["c"] = _vtk_comp(host, offs.c, N, job.Nx, job.Ny, job.Nz)
+            end
+            if offs.tag >= 0
+                vtk["tag"] = Int32.(_vtk_comp(host, offs.tag, N, job.Nx, job.Ny, job.Nz))
+            end
         end
         @static if TEMPERATURE
             vtk[VTKPointData()] = ("Scalars" => "T", "Vectors" => "u")
@@ -382,6 +415,13 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
         Tdata, fsdata, ϕdata, mpdata, Sdata, Qdata,
         N, offs.rho, offs.p, offs.u, offs.T, offs.fs, offs.phi, offs.mp, offs.S, offs.Q, offs.flags,
         ρs, ps, us, Ts, Ss, Qs; ndrange=N)
+    @static if FOAM
+        if offs.c >= 0 || offs.tag >= 0
+            pack_vtk_foam_kernel!(model.backend, model.workgroup)(
+                dev, domain.c.data, domain.tag.data,
+                N, offs.c, offs.tag; ndrange=N)
+        end
+    end
 
     dx = Float32(U.m)
     isfinite(dx) && dx > 0 || (dx = 1.0f0)

@@ -1110,3 +1110,121 @@ end
     @test sum(row -> row[2].V_ref, rows) == 6.0
     @test sum(row -> row[2].ratio * row[2].V_ref, rows) == r * 6.0
 end
+function _vtk_find(hay::Vector{UInt8}, needle::Vector{UInt8})
+    n = length(needle)
+    last = length(hay) - n + 1
+    last < 1 && return nothing
+    for i in 1:last
+        if hay[i] == needle[1] && @view(hay[i:(i + n - 1)]) == needle
+            return i
+        end
+    end
+    return nothing
+end
+
+function _vtk_attr(tag, key)
+    m = match(Regex("\\b$(key)=\"([^\"]*)\""), tag)
+    return m === nothing ? nothing : m.captures[1]
+end
+
+function _zlib_uncompress(src::Vector{UInt8}, dst_len::Int)
+    dst = Vector{UInt8}(undef, dst_len)
+    destLen = Ref{Culong}(Culong(dst_len))
+    ret = ccall((:uncompress, "libz"), Cint,
+        (Ptr{UInt8}, Ptr{Culong}, Ptr{UInt8}, Culong),
+        dst, destLen, src, Culong(length(src)))
+    ret == 0 || error("zlib uncompress failed ($ret)")
+    Int(destLen[]) == dst_len || error("zlib uncompress wrote $(destLen[]) bytes, expected $dst_len")
+    return dst
+end
+
+# Appended VTK XML from export!. Returns the DataArray type and the point values.
+function _vtk_point_data(path, name, nvals::Int)
+    bytes = read(path)
+    needle = Vector{UInt8}("<AppendedData encoding=\"raw\">\n_")
+    at = _vtk_find(bytes, needle)
+    at === nothing && error("no appended VTK data in $path")
+    header = String(@view(bytes[1:(at - 1)]))
+    m = match(Regex("<DataArray\\b[^>]*\\bName=\"$(name)\"[^>]*>"), header)
+    m === nothing && error("VTK file has no DataArray $name")
+    tag = m.match
+    typ = _vtk_attr(tag, "type")
+    off = parse(Int, _vtk_attr(tag, "offset"))
+    nc = parse(Int, something(_vtk_attr(tag, "NumberOfComponents"), "1"))
+    T = typ == "Int32" ? Int32 : typ == "Float32" ? Float32 : error("VTK $name has type $typ")
+    ht = occursin("header_type=\"UInt32\"", header) ? UInt32 : UInt64
+    compressed = occursin("compressor=\"vtkZLibDataCompressor\"", header)
+    io = IOBuffer(bytes)
+    seek(io, at + length(needle) - 1 + off)
+    if compressed
+        nblocks = Int(read(io, ht))
+        1 <= nblocks <= 128 || error("unexpected VTK block count $nblocks")
+        blocksize = Int(read(io, ht))
+        last_blocksize = Int(read(io, ht))
+        sizes = [Int(read(io, ht)) for _ in 1:nblocks]
+        raw = UInt8[]
+        for (k, sz) in enumerate(sizes)
+            append!(raw, _zlib_uncompress(read(io, sz), k == nblocks ? last_blocksize : blocksize))
+        end
+    else
+        raw = read(io, Int(read(io, ht)))
+    end
+    n = nvals * nc
+    length(raw) == n * sizeof(T) || error("VTK $name has $(length(raw)) bytes, expected $(n * sizeof(T))")
+    vals = Vector{T}(undef, n)
+    read!(IOBuffer(raw), vals)
+    return typ, vals
+end
+
+@testset "vtk exports c and tag" begin
+    fields = (:rho, :p, :u, :phi, :flags)
+    offs, ncomp = LatticeBoltzmann._vtk_offsets(LatticeBoltzmann._vtk_mask(fields))
+    @test ncomp == 7
+    @test (offs.rho, offs.p, offs.u, offs.T, offs.fs, offs.phi, offs.mp, offs.S, offs.Q, offs.flags) ==
+        (0, 1, 2, -1, -1, 5, -1, -1, -1, 6)
+    @test offs.c == -1 && offs.tag == -1
+    both, nboth = LatticeBoltzmann._vtk_offsets(LatticeBoltzmann._vtk_mask((fields..., :c, :tag)))
+    @test nboth == 9
+    @test both.rho == 0 && both.flags == 6 && both.c == 7 && both.tag == 8
+
+    N = 16
+    model = Model(N, N, N, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    fill!(domain.flags.data, TYPE_F)
+    set_foam!(model; D=0, c0=0.25f0)
+    nucleate_bubbles!(model, [(8.5, 8.5, 8.5)], [3.5])
+    id = only(bubble_ids(model))
+    mktempdir() do dir
+        export!(model; dir, fields=(:c, :tag), sync=true)
+        paths = filter(p -> endswith(p, ".vti") || endswith(p, ".vtr"), readdir(dir; join=true))
+        @test length(paths) == 1
+        ctyp, cvals = _vtk_point_data(paths[1], "c", domain.N)
+        ttyp, tvals = _vtk_point_data(paths[1], "tag", domain.N)
+        @test ctyp == "Float32"
+        @test ttyp == "Int32"
+        @test cvals == Array(domain.c.data)
+        @test tvals == Array(domain.tag.data)
+        @test any(==(0.25f0), cvals)
+        @test any(iszero, cvals)
+        flags = Array(domain.flags.data)
+        n_gas = 0
+        n_liquid = 0
+        n_shell = 0
+        for i in eachindex(flags)
+            su = flags[i] & TYPE_SU
+            if su == TYPE_G
+                n_gas += 1
+                @test tvals[i] == id
+            elseif su == TYPE_I
+                n_shell += 1
+                @test tvals[i] == id
+            elseif su == TYPE_F
+                n_liquid += 1
+                @test tvals[i] == Int32(0)
+            end
+        end
+        @test n_gas > 0
+        @test n_shell > 0
+        @test n_liquid > 0
+    end
+end
