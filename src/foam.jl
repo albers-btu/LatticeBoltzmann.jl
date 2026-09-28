@@ -28,9 +28,9 @@ function set_foam!(model; D=0, k_H=0, k_Π=0, q=0, V_m=0, γ_b=1, c0=0, ρ_liqui
 end
 
 """
-One bubble row. `frozen` is stored for a later PR and is never read.
-`ratio` is not changed from dissolved mass. The imposed density is
-`ratio * (V_ref / V)^γ_b`.
+One bubble row. `frozen` is stored and is not read.
+The imposed density is `ratio * (V_ref / V)^γ_b`.
+Dissolved mass adds `Δm * V_m * ρ_liquid / V_ref` to `ratio`.
 """
 struct Bubble
     V::Float64
@@ -908,7 +908,25 @@ function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     return nothing
 end
 
-# γ_b = 1 is a division. pow(x, 1) is not what this PR writes.
+# Population flux is already in concentration units. Tag -1 has no row.
+function _add_dissolved_inventory!(foam::FoamHost, flux, V_m, ρ_liquid)
+    scale = Float64(V_m) * Float64(ρ_liquid)
+    scale == 0.0 && return nothing
+    nbuf = length(flux)
+    @inbounds for i in eachindex(foam.bubbles)
+        row = foam.bubbles[i]
+        row === nothing && continue
+        (1 <= i <= nbuf) || continue
+        Δm = Float64(flux[i])
+        Δm == 0.0 && continue
+        Vref = row.V_ref
+        Vref > 0 || continue
+        foam.bubbles[i] = Bubble(row.V, row.V_ref, row.ratio + Δm * scale / Vref, row.frozen)
+    end
+    return nothing
+end
+
+# γ_b = 1 is a division. pow(x, 1) is not what this writes.
 function _impose_bubble_density!(foam::FoamHost, γ_b)
     γ = Float64(γ_b)
     CType = eltype(foam.ρb)
@@ -929,8 +947,8 @@ end
 
 """
 Host section at the start of the substep. Reads post-`surface_3` flags
-from the previous substep. Writes a complete tag array and the imposed
-`ρb` before `surface_0`. `ratio` is not changed from mass.
+from the previous substep. Adds the binned dissolved flux to `ratio`,
+then writes tags and the imposed `ρb` before `surface_0`.
 """
 function foam_host!(model, domain)
     @static if FOAM
@@ -942,12 +960,13 @@ function foam_host!(model, domain)
         copyto!(foam.flags, domain.flags.data)
         copyto!(foam.ϕ, domain.ϕ.data)
         copyto!(foam.tag_prev, domain.tag.data)
+        flux = Array(domain.flux.data)
         _retag!(foam, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
+        _add_dissolved_inventory!(foam, flux, domain.V_m, domain.ρ_liquid)
+        fill!(domain.flux.data, zero(eltype(domain.flux.data)))
         _impose_bubble_density!(foam, domain.γ_b)
         copyto!(domain.tag.data, foam.tag)
         copyto!(domain.ρb.data, foam.ρb)
-        # Δm → ratio is a later PR. Drop the bin so it cannot accumulate.
-        fill!(domain.flux.data, zero(eltype(domain.flux.data)))
     end
     return nothing
 end

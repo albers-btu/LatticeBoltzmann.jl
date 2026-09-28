@@ -65,7 +65,7 @@ end
 end
 
 @inline function concentration_body!(
-    t_odd::Val{odd}, ci, cfield, flags, u,
+    t_odd::Val{odd}, ci, cfield, flags, u, tag, flux,
     ωc::CType, q::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
@@ -86,16 +86,34 @@ end
     uy = CType(u[n, 2])
     uz = CType(u[n, 3])
 
-    # Rest slot does not swap.
+    # Rest slot does not swap. Δ is the interface-to-liquid population flux.
     crest = CType(ci[f_index(n, 1, N)])
     cn = crest
+    Δ = zero(CType)
+    interface = su == TYPE_I || su == TYPE_IF || su == TYPE_IG
     for k in 1:3
         i = 2k
-        src = _axis_src(k, x, y, z, Nx, Ny, Nz)
-        fp, fm = load_pair(ci, n, src, i, t_odd, N, CType)
-        cn += fp + fm
+        cx = ifelse(k == 1, 1, 0)
+        cy = ifelse(k == 2, 1, 0)
+        cz = ifelse(k == 3, 1, 0)
+        srcp = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+        srcm = src_index(x, y, z, -cx, -cy, -cz, Nx, Ny, Nz)
+        fp_in, fm_in = load_pair(ci, n, srcp, i, t_odd, N, CType)
+        fp_out, fm_out = load_outgoing_pair(ci, n, srcp, i, t_odd, N, CType)
+        cn += fp_in + fm_in
+        # TYPE_IF is not TYPE_F. No ϕ weighting.
+        if interface && (flags[srcp] & TYPE_SU) == TYPE_F
+            Δ += fm_in - fp_out
+        end
+        if interface && (flags[srcm] & TYPE_SU) == TYPE_F
+            Δ += fp_in - fm_out
+        end
     end
     cfield[n] = cn
+    tag_n = tag[n]
+    if tag_n > Int32(0) && tag_n <= Int32(MAX_BUBBLES) && Δ != zero(CType)
+        acc_add!(flux, Int(tag_n), Δ)
+    end
 
     # TYPE_IF is not pure TYPE_F.
     qn = su == TYPE_F ? q : zero(CType)
@@ -115,21 +133,21 @@ end
 end
 
 @kernel function concentration_even_kernel!(
-    ci, cfield, @Const(flags), @Const(u),
+    ci, cfield, @Const(flags), @Const(u), @Const(tag), flux,
     ωc::CType, q::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {CType}
     n = @index(Global)
-    @inbounds concentration_body!(Val(false), ci, cfield, flags, u, ωc, q, N, Nx, Ny, Nz, Int(n))
+    @inbounds concentration_body!(Val(false), ci, cfield, flags, u, tag, flux, ωc, q, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function concentration_odd_kernel!(
-    ci, cfield, @Const(flags), @Const(u),
+    ci, cfield, @Const(flags), @Const(u), @Const(tag), flux,
     ωc::CType, q::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {CType}
     n = @index(Global)
-    @inbounds concentration_body!(Val(true), ci, cfield, flags, u, ωc, q, N, Nx, Ny, Nz, Int(n))
+    @inbounds concentration_body!(Val(true), ci, cfield, flags, u, tag, flux, ωc, q, N, Nx, Ny, Nz, Int(n))
 end
 
 # Tag 0 is the liquid film, not a stop. s sums one full Woo tDelta per crossing.
@@ -216,13 +234,51 @@ end
     @inbounds disjoining_body!(ϕ, flags, tag, Pi, k_Π, Nx, Ny, Nz, Int(n))
 end
 
-@inline function ϕ_correction_body!(::Int)
+# δ = -c Δϕ. A tag-0 TYPE_I was liquid at upload and was converted on the
+# D3Q19 stencil; credit the minimum positive tag in that same neighborhood.
+@inline function ϕ_correction_body!(
+    ϕ, ϕ_old, cfield, flags, tag, flux,
+    c::NTuple{Q, SVector{3, Int}},
+    Nx::Int, Ny::Int, Nz::Int, n::Int,
+) where {Q}
+    ϕn = ϕ[n]
+    if (flags[n] & TYPE_SU) == TYPE_I
+        CType = eltype(cfield)
+        δ = -CType(cfield[n]) * (CType(ϕn) - CType(ϕ_old[n]))
+        if δ != zero(CType)
+            tagn = tag[n]
+            if tagn > Int32(0)
+                tagn <= Int32(MAX_BUBBLES) && acc_add!(flux, Int(tagn), δ)
+            elseif tagn == Int32(0)
+                n0 = n - 1
+                x = n0 % Nx
+                y = (n0 ÷ Nx) % Ny
+                z = n0 ÷ (Nx * Ny)
+                jtag = Int32(0)
+                for i in 2:Q
+                    src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+                    ts = tag[src]
+                    if ts > Int32(0) && (jtag == Int32(0) || ts < jtag)
+                        jtag = ts
+                    end
+                end
+                if jtag > Int32(0) && jtag <= Int32(MAX_BUBBLES)
+                    acc_add!(flux, Int(jtag), δ)
+                end
+            end
+        end
+    end
+    ϕ_old[n] = ϕn
     return nothing
 end
 
-@kernel function ϕ_correction_kernel!()
+@kernel function ϕ_correction_kernel!(
+    @Const(ϕ), ϕ_old, @Const(cfield), @Const(flags), @Const(tag), flux,
+    c::NTuple{Q, SVector{3, Int}},
+    Nx::Int, Ny::Int, Nz::Int,
+) where {Q}
     n = @index(Global)
-    @inbounds ϕ_correction_body!(Int(n))
+    @inbounds ϕ_correction_body!(ϕ, ϕ_old, cfield, flags, tag, flux, c, Nx, Ny, Nz, Int(n))
 end
 
 end

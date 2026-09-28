@@ -40,7 +40,7 @@ using KernelAbstractions: CPU, synchronize
                 domain.ci.data, domain.c.data, domain.ϕ_old.data, domain.ρb.data, domain.Pi.data)
         @test all(isfinite, Array(arr))
     end
-    @test all(iszero, Array(domain.ϕ_old.data))
+    @test Array(domain.ϕ_old.data) == Array(domain.ϕ.data)
 
     model2 = Model(4, 4, 4, 0.1; backend=CPU(), n_hydro=2)
     @test_throws "FOAM v1 requires n_hydro == 1 (got 2); substep scaling is not applied" LatticeBoltzmann.step!(model2)
@@ -399,7 +399,7 @@ end
         domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
         Nd, Nx, Ny, Nz, domain.Eacc.data,
         domain.h.data, domain.Q.data, domain.ω_T,
-        domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H;
+        domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D;
         ndrange = N)
     synchronize(model.backend)
     got = domain.fi.data[LatticeBoltzmann.f_index(srcG, i, N)]
@@ -617,6 +617,16 @@ function foam_mean_c(domain)
     return sum(Float64, Array(domain.ci.data)) / domain.N
 end
 
+function _foam_max_c_err(domain, c0)
+    Nx = Int(domain.Nx); Ny = Int(domain.Ny); Nz = Int(domain.Nz)
+    err = 0.0
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = 1 + x + Nx * (y + Ny * z)
+        err = max(err, abs(Float64(foam_macro_c(domain, n, x, y, z)) - Float64(c0)))
+    end
+    return err
+end
+
 function foam_sine_amplitude(domain)
     Nx = Int(domain.Nx); Ny = Int(domain.Ny); Nz = Int(domain.Nz)
     acc = 0.0
@@ -678,11 +688,13 @@ end
     LatticeBoltzmann.step!(model) # even
     m1 = foam_mean_c(domain)
     @test m1 ≈ Float64(c0) atol=1.0e-5
+    @test _foam_max_c_err(domain, c0) < 1.0e-5
 
     LatticeBoltzmann.step!(model) # odd
     m2 = foam_mean_c(domain)
     @test m2 ≈ Float64(c0) atol=1.0e-5
     @test abs(m2 - m0) < 1.0e-5
+    @test _foam_max_c_err(domain, c0) < 1.0e-5
     @test Array(domain.gi.data) == gi0
 end
 
@@ -709,4 +721,180 @@ end
     mi0 = foam_mean_c(domainI)
     LatticeBoltzmann.step!(modelI)
     @test foam_mean_c(domainI) ≈ mi0 atol=1.0e-5
+end
+
+function _launch_surface0_even!(model)
+    domain = model.domains[1]
+    Nx = Int(domain.Nx)
+    Ny = Int(domain.Ny)
+    Nz = Int(domain.Nz)
+    model.cached_surface_0_even_kernel!(
+        domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+        domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+        domain.fs.data, domain.gi.data,
+        model.weights, model.velocities,
+        domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
+        domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
+        Int(domain.N), Nx, Ny, Nz, domain.Eacc.data,
+        domain.h.data, domain.Q.data, domain.ω_T,
+        domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D;
+        ndrange = Nx * Ny * Nz)
+    synchronize(model.backend)
+    return nothing
+end
+
+@testset "Henry reconstructs gas-facing links at k_H ρ_b / 3" begin
+    Nx = Ny = Nz = 8
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    N = Nx * Ny * Nz
+    fill!(domain.flags.data, TYPE_F)
+    set_foam!(model; D=0.03, k_H=0.001, c0=0)
+    initialize!(model)
+
+    x, y, z = 3, 3, 3
+    n = _layer_index(x, y, z, Nx, Ny)
+    src_g = LatticeBoltzmann.src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    flags = fill(TYPE_F, N)
+    flags[n] = TYPE_I
+    flags[src_g] = TYPE_G
+    copyto!(domain.flags.data, flags)
+    ϕ = ones(Float32, N)
+    ϕ[n] = 0.5f0
+    ϕ[src_g] = 0f0
+    copyto!(domain.ϕ.data, ϕ)
+    fill!(domain.ρb.data, 1f0)
+    fill!(domain.Pi.data, 0f0)
+    fill!(domain.fs.data, 0f0)
+    fill!(domain.u.data, 0f0)
+    _write_rest_feq!(domain.fi.data, Nx, Ny, Nz, 1f0)
+
+    k_H = 0.001f0
+    c_H = k_H * (1f0 / 3f0)
+    ceq = LatticeBoltzmann.ceq_axis(c_H, 0f0)
+    ceq4 = LatticeBoltzmann.ceq_axis(k_H * (1f0 / 4f0), 0f0)
+    @test ceq != ceq4
+    i = 2
+    out_slot = LatticeBoltzmann.f_index(src_g, i + 1, N)
+    gas_slot = LatticeBoltzmann.f_index(src_g, i, N)
+    sentinel = 0.17f0
+
+    function load_ci!(; outgoing=ceq)
+        fill!(domain.ci.data, sentinel)
+        domain.ci.data[out_slot] = outgoing
+        return copy(Array(domain.ci.data))
+    end
+
+    before = load_ci!()
+    gi0 = copy(Array(domain.gi.data))
+    _launch_surface0_even!(model)
+    ci = Array(domain.ci.data)
+    @test ci[gas_slot] == ceq
+    @test ci[gas_slot] != ceq4
+    ci[gas_slot] = before[gas_slot]
+    @test ci == before
+    @test Array(domain.gi.data) == gi0
+
+    # Solidified interface keeps ρ_gas = 1 and does not write ci.
+    domain.fs.data[n] = 1f0
+    before = load_ci!()
+    _launch_surface0_even!(model)
+    @test Array(domain.ci.data) == before
+    @test LatticeBoltzmann.is_solid_fraction(1f0)
+
+    domain.fs.data[n] = 0f0
+    set_foam!(model; D=0, k_H=0.001)
+    before = load_ci!()
+    _launch_surface0_even!(model)
+    @test Array(domain.ci.data) == before
+
+    set_foam!(model; D=0.03, k_H=0)
+    before = load_ci!()
+    _launch_surface0_even!(model)
+    @test Array(domain.ci.data) == before
+end
+
+function _launch_ϕ_correction!(model)
+    domain = model.domains[1]
+    Nx = Int(domain.Nx)
+    Ny = Int(domain.Ny)
+    Nz = Int(domain.Nz)
+    model.cached_ϕ_correction_kernel!(
+        domain.ϕ.data, domain.ϕ_old.data, domain.c.data,
+        domain.flags.data, domain.tag.data, domain.flux.data,
+        model.velocities, Nx, Ny, Nz; ndrange = Nx * Ny * Nz)
+    synchronize(model.backend)
+    return Array(domain.flux.data)
+end
+
+@testset "fill change bins onto a face or an edge neighbor" begin
+    Nx = Ny = Nz = 8
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    x, y, z = 3, 3, 3
+    n = _layer_index(x, y, z, Nx, Ny)
+    face = LatticeBoltzmann.src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    edge = LatticeBoltzmann.src_index(x, y, z, 1, 1, 0, Nx, Ny, Nz)
+    @test face != edge
+
+    function paint!(tagged)
+        N = Nx * Ny * Nz
+        flags = fill(TYPE_F, N)
+        flags[n] = TYPE_I
+        ϕ = ones(Float32, N)
+        ϕ_old = ones(Float32, N)
+        cfield = zeros(Float32, N)
+        tag = zeros(Int32, N)
+        ϕ[n] = 0.5f0
+        ϕ_old[n] = 1f0
+        cfield[n] = 0.4f0
+        tag[tagged] = Int32(1)
+        copyto!(domain.flags.data, flags)
+        copyto!(domain.ϕ.data, ϕ)
+        copyto!(domain.ϕ_old.data, ϕ_old)
+        copyto!(domain.c.data, cfield)
+        copyto!(domain.tag.data, tag)
+        fill!(domain.flux.data, 0)
+        return nothing
+    end
+
+    paint!(face)
+    flux = _launch_ϕ_correction!(model)
+    @test flux[1] == 0.2f0
+    @test all(iszero, @view flux[2:end])
+
+    paint!(edge)
+    flux = _launch_ϕ_correction!(model)
+    @test flux[1] == 0.2f0
+    @test all(iszero, @view flux[2:end])
+end
+
+@testset "dissolved gas grows one bubble" begin
+    N = 32
+    R0 = 3.0
+    Δc = 0.5
+    D = 0.03
+    k_H = 0.001
+    V_m = 3.0
+    model = Model(N, N, N, 0.25; backend=CPU(), σ=0, n_hydro=1)
+    domain = model.domains[1]
+    flags = fill(TYPE_F, N * N * N)
+    for z in 0:(N - 1), y in 0:(N - 1), x in 0:(N - 1)
+        if x == 0 || y == 0 || z == 0 || x == N - 1 || y == N - 1 || z == N - 1
+            flags[1 + x + N * y + N * N * z] = TYPE_S
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    nucleate_bubbles!(model, [(N / 2, N / 2, N / 2)], [R0])
+    set_foam!(model; D=D, k_H=k_H, k_Π=0, q=0, V_m=V_m, γ_b=1,
+              c0=k_H / 3 + Δc, ρ_liquid=1)
+    initialize!(model)
+    id = only(bubble_ids(model))
+    R_i = (3 * bubble_volume(model, id) / (4π))^(1 / 3)
+    for _ in 1:200
+        LatticeBoltzmann.step!(model)
+    end
+    R_f = (3 * bubble_volume(model, id) / (4π))^(1 / 3)
+    @test R_f > R_i
+    @test bubble_ids(model) == [id]
 end

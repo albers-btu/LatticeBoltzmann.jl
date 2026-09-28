@@ -672,6 +672,11 @@ function initialize!(model::Model)
     KernelAbstractions.synchronize(model.backend)
     @static if FOAM
         _restore_punch_blockers!(model)
+        KernelAbstractions.synchronize(model.backend)
+        for domain in model.domains
+            copyto!(domain.ϕ_old.data, domain.ϕ.data)
+            fill!(domain.flux.data, zero(eltype(domain.flux.data)))
+        end
     end
     model.initialized = true
     @static if TEMPERATURE
@@ -755,7 +760,7 @@ function step!(model::Model)
                     domain.Λ_v, domain.T_v, p0v, domain.β_v,
                     Nd, Nx, Ny, Nz, domain.Eacc.data,
                     domain.h.data, domain.Q.data, domain.ω_T,
-                    domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H; ndrange = N)
+                    domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D; ndrange = N)
                 end
             end
 
@@ -808,6 +813,7 @@ function step!(model::Model)
                 if domain.D > zero(domain.D)
                     ck = t_odd ? model.cached_concentration_odd_kernel! : model.cached_concentration_even_kernel!
                     ck(domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,
+                       domain.tag.data, domain.flux.data,
                        omega_c_from_D(domain.D), domain.q,
                        Nd, Nx, Ny, Nz; ndrange = N)
                 end
@@ -826,7 +832,10 @@ function step!(model::Model)
             end
 
             @static if FOAM
-                model.cached_ϕ_correction_kernel!(; ndrange = N)
+                model.cached_ϕ_correction_kernel!(
+                    domain.ϕ.data, domain.ϕ_old.data, domain.c.data,
+                    domain.flags.data, domain.tag.data, domain.flux.data,
+                    model.velocities, Nx, Ny, Nz; ndrange = N)
             end
         end
 

@@ -227,7 +227,6 @@ end
 
 @static if FOAM
 
-# ci and k_H are accepted for the later Henry write. This copy does not touch ci.
 @inline function surface_0_body!(
     t_odd::Val{odd},
     fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi,
@@ -236,7 +235,7 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType,
-    ci, ρb, Pi, k_H::CType
+    ci, ρb, Pi, k_H::CType, D::CType
 ) where {odd, Q, CType}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
@@ -402,6 +401,29 @@ end
             fi, n, srcp, i, fm_rec, fp_rec,
             sup == TYPE_G, sum_ == TYPE_G, t_odd, N)
     end
+    # D3Q7 axes are hydro indices 2, 4, 6. Do not walk the D3Q19 pairs.
+    # 5th store argument is the minus reconstruction, 6th the plus.
+    if !solidified && k_H > zero(CType) && D > zero(CType)
+        c_H = k_H * CType(ρb[n]) * (CType(1) / CType(3))
+        for k in 1:3
+            i = 2k
+            cp, cm = c[i], c[i + 1]
+            srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+            srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
+            sup = flags[srcp] & TYPE_SU
+            sum_ = flags[srcm] & TYPE_SU
+            (sup == TYPE_G || sum_ == TYPE_G) || continue
+            u_ax = CType(cp[1]) * uxg + CType(cp[2]) * uyg + CType(cp[3]) * uzg
+            ceq_p = ceq_axis(c_H, u_ax)
+            ceq_m = ceq_axis(c_H, -u_ax)
+            fp_out, fm_out = load_outgoing_pair(ci, n, srcp, i, t_odd, N, CType)
+            cp_rec = ceq_m - fm_out + ceq_p
+            cm_rec = ceq_p - fp_out + ceq_m
+            store_reconstructed_pair!(
+                ci, n, srcp, i, cm_rec, cp_rec,
+                sup == TYPE_G, sum_ == TYPE_G, t_odd, N)
+        end
+    end
     mass[n] = massn
     @static if TEMPERATURE
         fillc = ϕn
@@ -417,10 +439,10 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
-    ci, ρb, Pi, k_H::CType
+    ci, ρb, Pi, k_H::CType, D::CType
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, ρb, Pi, k_H)
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, ρb, Pi, k_H, D)
 end
 
 @kernel function surface_0_odd_kernel!(
@@ -429,10 +451,10 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
-    ci, ρb, Pi, k_H::CType
+    ci, ρb, Pi, k_H::CType, D::CType
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, ρb, Pi, k_H)
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, ρb, Pi, k_H, D)
 end
 
 end
