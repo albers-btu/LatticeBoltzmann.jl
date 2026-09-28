@@ -64,6 +64,7 @@ mutable struct FoamHost{CType<:AbstractFloat}
     ρb::Vector{CType}
     component::Vector{Int32}
     queue::Vector{Int}
+    blockers::Vector{Int}               # Class-0 cells painted only for initialize!
 end
 
 function FoamHost{CType}(N::Int) where {CType<:AbstractFloat}
@@ -77,6 +78,7 @@ function FoamHost{CType}(N::Int) where {CType<:AbstractFloat}
         fill(one(CType), N),
         zeros(Int32, N),
         Vector{Int}(undef, N),
+        Int[],
     )
 end
 
@@ -264,12 +266,27 @@ function _pick(rng::_MixRNG, n::Int)
     return Int(_mix!(rng) % UInt64(n)) + 1
 end
 
+# Minimum image on a periodic axis. The fill wraps through src_index.
+function _wrap_delta(d::Float64, L::Float64)
+    return d - L * round(d / L)
+end
+
+function _wrap_pos(x::Float64, L::Int)
+    y = mod(x, Float64(L))
+    return y == Float64(L) ? 0.0 : y
+end
+
+function _wrap_idx(i::Int, n::Int)
+    return mod(i - 1, n) + 1
+end
+
 """
     poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1) -> Vector{NTuple{3,Float64}}
 
-Bridson sample in `[0, Nx) × [0, Ny) × [0, Nz)`. Centers are at least
-`rmin` apart. For nuclei of radius `R`, pass `rmin = R + 1` so the shells
-do not touch. Does not write flags or the bubble table.
+Bridson sample in the periodic box `[0, Nx) × [0, Ny) × [0, Nz)`.
+Centers are at least `rmin` apart, including across the periodic faces.
+For nuclei of radius `R`, pass `rmin >= 2R + 1` so the radius-`R` shells
+do not intersect. Does not write flags or the bubble table.
 """
 function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
     Nx = Int(Nx); Ny = Int(Ny); Nz = Int(Nz)
@@ -287,22 +304,23 @@ function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
     pts = NTuple{3,Float64}[]
     active = Int[]
     rmin2 = rmin * rmin
+    Lx = Float64(Nx); Ly = Float64(Ny); Lz = Float64(Nz)
 
     function grid_index(p)
-        ix = clamp(floor(Int, p[1] / cell) + 1, 1, gx)
-        iy = clamp(floor(Int, p[2] / cell) + 1, 1, gy)
-        iz = clamp(floor(Int, p[3] / cell) + 1, 1, gz)
+        ix = _wrap_idx(floor(Int, p[1] / cell) + 1, gx)
+        iy = _wrap_idx(floor(Int, p[2] / cell) + 1, gy)
+        iz = _wrap_idx(floor(Int, p[3] / cell) + 1, gz)
         return ix, iy, iz
     end
     function far_enough(p)
         ix, iy, iz = grid_index(p)
         for dz in -2:2, dy in -2:2, dx in -2:2
-            jx = ix + dx; jy = iy + dy; jz = iz + dz
-            (1 <= jx <= gx && 1 <= jy <= gy && 1 <= jz <= gz) || continue
-            k = grid[jx, jy, jz]
+            k = grid[_wrap_idx(ix + dx, gx), _wrap_idx(iy + dy, gy), _wrap_idx(iz + dz, gz)]
             k == 0 && continue
             q = pts[k]
-            dxp = p[1] - q[1]; dyp = p[2] - q[2]; dzp = p[3] - q[3]
+            dxp = _wrap_delta(p[1] - q[1], Lx)
+            dyp = _wrap_delta(p[2] - q[2], Ly)
+            dzp = _wrap_delta(p[3] - q[3], Lz)
             if dxp * dxp + dyp * dyp + dzp * dzp < rmin2
                 return false
             end
@@ -318,26 +336,23 @@ function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
         return k
     end
 
-    accept!((_unit(rng) * Nx, _unit(rng) * Ny, _unit(rng) * Nz))
+    accept!((_unit(rng) * Lx, _unit(rng) * Ly, _unit(rng) * Lz))
     ktry = 30
     while !isempty(active) && length(pts) < n
         ai = _pick(rng, length(active))
         base = pts[active[ai]]
         found = false
         for _try in 1:ktry
-            # Uniform direction, radius in [rmin, 2 rmin].
+            # Uniform direction, radius in [rmin, 2 rmin], then wrap.
             z = 2 * _unit(rng) - 1
             φ = 2π * _unit(rng)
             s = sqrt(max(0.0, 1 - z * z))
             rad = rmin * (1 + _unit(rng))
             cand = (
-                base[1] + rad * s * cos(φ),
-                base[2] + rad * s * sin(φ),
-                base[3] + rad * z,
+                _wrap_pos(base[1] + rad * s * cos(φ), Nx),
+                _wrap_pos(base[2] + rad * s * sin(φ), Ny),
+                _wrap_pos(base[3] + rad * z, Nz),
             )
-            if cand[1] < 0 || cand[1] >= Nx || cand[2] < 0 || cand[2] >= Ny || cand[3] < 0 || cand[3] >= Nz
-                continue
-            end
             if far_enough(cand)
                 accept!(cand)
                 found = true
@@ -391,12 +406,17 @@ end
 
 # Liquid is outside the sphere. The normal points toward the gas
 # (toward the center), and α = d − R is the plane offset along that normal.
+# A center that sits on the cell center has no radial direction; bisect
+# along −z anyway so the cell is not forced to ϕ = 0.
 function _cap_phi(cx, cy, cz, x, y, z, R)
     dx = (x + 0.5) - cx
     dy = (y + 0.5) - cy
     dz = (z + 0.5) - cz
     d = sqrt(dx * dx + dy * dy + dz * dz)
-    d < 1e-12 && return 0.0
+    if d < 1e-12
+        nrm = SVector{3,Float64}(0.0, 0.0, -1.0)
+        return clamp(_invert_plic(-R, nrm), 0.0, 1.0)
+    end
     nrm = SVector{3,Float64}(-dx / d, -dy / d, -dz / d)
     return clamp(_invert_plic(d - R, nrm), 0.0, 1.0)
 end
@@ -407,12 +427,24 @@ function _cell_of_point(c, N)
     return floor(Int, c)
 end
 
+function _drop_blocker!(foam, n)
+    bs = foam.blockers
+    for k in eachindex(bs)
+        bs[k] == n || continue
+        bs[k] = bs[end]
+        pop!(bs)
+        return nothing
+    end
+    return nothing
+end
+
 function _reject_punch_cell!(foam, n, cx, cy, cz)
     fl = foam.flags[n]
     if (fl & TYPE_S) != 0
         throw(ArgumentError("nucleate_bubbles! center ($cx, $cy, $cz) overlaps TYPE_S"))
     end
-    if foam.tag[n] > 0 || (fl & TYPE_SU) == TYPE_G || (fl & TYPE_SU) == TYPE_I
+    # Tag 0 and TYPE_I is a class-0 blocker, not a nucleus. A later sphere may claim it.
+    if foam.tag[n] > 0 || (fl & TYPE_SU) == TYPE_G
         throw(ArgumentError("nucleate_bubbles! center ($cx, $cy, $cz) overlaps an existing nucleus"))
     end
     return nothing
@@ -445,6 +477,7 @@ function _punch_sphere!(foam::FoamHost, center, R::Float64, Nx::Int, Ny::Int, Nz
         cls == 0 && continue
         n = _xyz_n(x, y, z, Nx, Ny)
         _reject_punch_cell!(foam, n, cx, cy, cz)
+        _drop_blocker!(foam, n)
         push!(cells, n)
         if cls == 1
             push!(phis, 0.0)
@@ -473,6 +506,7 @@ function _punch_sphere!(foam::FoamHost, center, R::Float64, Nx::Int, Ny::Int, Nz
     vel = velocities(:D3Q19)
     extra = Int[]
     extraϕ = Float64[]
+    extra_out = Bool[]
     seen = Set(cells)
     for (k, n) in enumerate(cells)
         gas[k] || continue
@@ -482,18 +516,30 @@ function _punch_sphere!(foam::FoamHost, center, R::Float64, Nx::Int, Ny::Int, Nz
             (foam.flags[j] & TYPE_SU) == TYPE_F || continue
             j in seen && continue
             _reject_punch_cell!(foam, j, cx, cy, cz)
+            _drop_blocker!(foam, j)
             push!(seen, j)
             xj, yj, zj = _cell_xyz(j, Nx, Ny)
             push!(extra, j)
-            # Fully outside the sphere: ϕ = 1 so the blocker adds no gas
-            # volume. A cut neighbor still gets the cap.
             cls = _cube_class(cx, cy, cz, xj, yj, zj, R)
+            # Class 0 is outside the sphere. ϕ = 1 and it is not part of the
+            # bubble; initialize! would otherwise rewrite the interior.
+            push!(extra_out, cls == 0)
             push!(extraϕ, cls == 0 ? 1.0 : _cap_phi(cx, cy, cz, xj, yj, zj, R))
         end
     end
+    shell = Int[]
+    shellϕ = Float64[]
     for (k, n) in enumerate(extra)
-        foam.flags[n] = (foam.flags[n] & ~TYPE_SU) | TYPE_I
-        foam.ϕ[n] = CT(extraϕ[k])
+        if extra_out[k]
+            foam.flags[n] = (foam.flags[n] & ~TYPE_SU) | TYPE_I
+            foam.ϕ[n] = one(CT)
+            push!(foam.blockers, n)
+        else
+            foam.flags[n] = (foam.flags[n] & ~TYPE_SU) | TYPE_I
+            foam.ϕ[n] = CT(extraϕ[k])
+            push!(shell, n)
+            push!(shellϕ, extraϕ[k])
+        end
     end
 
     id = _alloc_bubble_id!(foam)
@@ -502,14 +548,28 @@ function _punch_sphere!(foam::FoamHost, center, R::Float64, Nx::Int, Ny::Int, Nz
         foam.tag[n] = id
         V += 1 - phis[k]
     end
-    for (k, n) in enumerate(extra)
-        ϕk = extraϕ[k]
+    for (k, n) in enumerate(shell)
+        ϕk = shellϕ[k]
         foam.tag[n] = id
-        foam.ϕ[n] = CT(ϕk)
         V += 1 - ϕk
     end
     foam.bubbles[Int(id)] = Bubble(V, V, 1.0, false)
     return id
+end
+
+function _table_snapshot(foam::FoamHost)
+    return (copy(foam.bubbles), copy(foam.free_ids), copy(foam.blockers))
+end
+
+function _restore_table!(foam::FoamHost, snap)
+    rows, free, blockers = snap
+    empty!(foam.bubbles)
+    append!(foam.bubbles, rows)
+    empty!(foam.free_ids)
+    append!(foam.free_ids, free)
+    empty!(foam.blockers)
+    append!(foam.blockers, blockers)
+    return nothing
 end
 
 """
@@ -539,14 +599,49 @@ function nucleate_bubbles!(model, centers::AbstractVector, radii::AbstractVector
         copyto!(foam.ϕ, domain.ϕ.data)
         copyto!(foam.tag, domain.tag.data)
         Nx = Int(domain.Nx); Ny = Int(domain.Ny); Nz = Int(domain.Nz)
-        for (center, radius) in zip(centers, radii)
-            _punch_sphere!(foam, center, Float64(radius), Nx, Ny, Nz)
+        # A later center can throw. The device grid is still the pre-batch
+        # state until every sphere has been accepted.
+        snap = _table_snapshot(foam)
+        try
+            for (center, radius) in zip(centers, radii)
+                _punch_sphere!(foam, center, Float64(radius), Nx, Ny, Nz)
+            end
+        catch
+            _restore_table!(foam, snap)
+            copyto!(foam.flags, domain.flags.data)
+            copyto!(foam.ϕ, domain.ϕ.data)
+            copyto!(foam.tag, domain.tag.data)
+            rethrow()
         end
         copyto!(domain.flags.data, foam.flags)
         copyto!(domain.ϕ.data, foam.ϕ)
         copyto!(domain.tag.data, foam.tag)
         return model
     end
+end
+
+# Class-0 D3Q19 neighbors are TYPE_I only so initialize_body! does not
+# rewrite interior gas. Once that has run, they are liquid again.
+function _restore_punch_blockers!(model)
+    @static if FOAM
+        foam = model.foam
+        isempty(foam.blockers) && return nothing
+        domain = model.domains[1]
+        copyto!(foam.flags, domain.flags.data)
+        copyto!(foam.ϕ, domain.ϕ.data)
+        copyto!(foam.tag, domain.tag.data)
+        CT = eltype(foam.ϕ)
+        for n in foam.blockers
+            foam.flags[n] = (foam.flags[n] & ~TYPE_SU) | TYPE_F
+            foam.ϕ[n] = one(CT)
+            foam.tag[n] = TAG_NONE
+        end
+        copyto!(domain.flags.data, foam.flags)
+        copyto!(domain.ϕ.data, foam.ϕ)
+        copyto!(domain.tag.data, foam.tag)
+        empty!(foam.blockers)
+    end
+    return nothing
 end
 
 # --- Flood fill ------------------------------------------------------------
@@ -575,6 +670,65 @@ function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
                 j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
                 comp[j] != 0 && continue
                 (flags[j] & TYPE_SU) != TYPE_G && continue
+                comp[j] = cid
+                qt += 1
+                q[qt] = j
+            end
+        end
+    end
+    return ncomp
+end
+
+function _face_touches_gas(flags, n::Int, Nx::Int, Ny::Int, Nz::Int)
+    x, y, z = _cell_xyz(n, Nx, Ny)
+    for (cx, cy, cz) in _FACE6
+        j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+        (flags[j] & TYPE_SU) == TYPE_G && return true
+    end
+    return false
+end
+
+function _shell_only(flags, prev, gas_tags, n, Nx, Ny, Nz)
+    (flags[n] & TYPE_SU) == TYPE_I || return false
+    _face_touches_gas(flags, n, Nx, Ny, Nz) && return false
+    t = prev[n]
+    # An edge of a bubble that still has TYPE_G keeps that gas component's id.
+    # Only a shell whose tag is on no gas cell is its own component.
+    return t > 0 && t ∉ gas_tags
+end
+
+# A sphere that never contains a full cell is only TYPE_I. Those cells
+# still carry the punch tag, so the component is seeded from that shell
+# instead of being dropped for lack of TYPE_G.
+function _flood_orphan_shells!(foam::FoamHost, ncomp::Int, Nx::Int, Ny::Int, Nz::Int)
+    N = Nx * Ny * Nz
+    flags = foam.flags
+    prev = foam.tag_prev
+    comp = foam.component
+    q = foam.queue
+    gas_tags = Set{Int32}()
+    for n in 1:N
+        (flags[n] & TYPE_SU) == TYPE_G || continue
+        t = prev[n]
+        t > 0 && push!(gas_tags, t)
+    end
+    for seed in 1:N
+        comp[seed] != 0 && continue
+        _shell_only(flags, prev, gas_tags, seed, Nx, Ny, Nz) || continue
+        ncomp += 1
+        cid = Int32(ncomp)
+        comp[seed] = cid
+        qh = 1
+        qt = 1
+        q[1] = seed
+        while qh <= qt
+            n = q[qh]
+            qh += 1
+            x, y, z = _cell_xyz(n, Nx, Ny)
+            for (cx, cy, cz) in _FACE6
+                j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+                comp[j] != 0 && continue
+                _shell_only(flags, prev, gas_tags, j, Nx, Ny, Nz) || continue
                 comp[j] = cid
                 qt += 1
                 q[qt] = j
@@ -693,10 +847,12 @@ function _assign_components!(foam::FoamHost, parents, atm, ncomp::Int)
     return comp_tag, meta
 end
 
-function _tag_interface!(flags, tag, Nx, Ny, Nz)
+function _tag_interface!(flags, tag, comp, Nx, Ny, Nz)
     N = Nx * Ny * Nz
     for n in 1:N
         (flags[n] & TYPE_SU) == TYPE_I || continue
+        # Orphan-shell cells already hold the component id.
+        comp[n] != 0 && continue
         x, y, z = _cell_xyz(n, Nx, Ny)
         best = TAG_NONE
         npos = 0
@@ -757,9 +913,10 @@ end
 function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     N = Nx * Ny * Nz
     ncomp = _flood_gas!(foam, Nx, Ny, Nz)
+    ncomp = _flood_orphan_shells!(foam, ncomp, Nx, Ny, Nz)
     fill!(foam.tag, TAG_NONE)
     if ncomp == 0
-        _tag_interface!(foam.flags, foam.tag, Nx, Ny, Nz)
+        _tag_interface!(foam.flags, foam.tag, foam.component, Nx, Ny, Nz)
         for i in 1:length(foam.bubbles)
             foam.bubbles[i] === nothing && continue
             _release_bubble_id!(foam, i)
@@ -775,7 +932,7 @@ function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
         c == 0 && continue
         tag[n] = comp_tag[c]
     end
-    _tag_interface!(foam.flags, tag, Nx, Ny, Nz)
+    _tag_interface!(foam.flags, tag, comp, Nx, Ny, Nz)
     _commit_rows!(foam, meta, N)
     return nothing
 end

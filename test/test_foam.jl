@@ -54,17 +54,32 @@ function _no_surface_transition(flags)
     return true
 end
 
-@testset "poisson disk centers stay at least rmin apart" begin
-    R = 4.0
-    rmin = R + 1
-    pts = poisson_disk_centers(32, 32, 32, rmin, 6; seed=1)
-    @test length(pts) == 6
-    for i in 1:length(pts), j in 1:(i - 1)
+@testset "poisson disk nuclei stay one id each" begin
+    N = 32
+    R = 3.0
+    rmin = 2R + 1
+    n = 4
+    pts = poisson_disk_centers(N, N, N, rmin, n; seed=1)
+    @test length(pts) == n
+    for i in 1:n, j in 1:(i - 1)
         dx = pts[i][1] - pts[j][1]
         dy = pts[i][2] - pts[j][2]
         dz = pts[i][3] - pts[j][3]
+        dx -= N * round(dx / N)
+        dy -= N * round(dy / N)
+        dz -= N * round(dz / N)
         @test dx * dx + dy * dy + dz * dz >= rmin * rmin - 1e-8
     end
+    model = Model(N, N, N, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    fill!(domain.flags.data, TYPE_F)
+    nucleate_bubbles!(model, pts, fill(R, n))
+    @test bubble_count(model) == n
+    initialize!(model)
+    LatticeBoltzmann.step!(model)
+    ids = bubble_ids(model)
+    @test length(ids) == n
+    @test length(unique(ids)) == n
 end
 
 @testset "one punched sphere keeps its id" begin
@@ -86,10 +101,11 @@ end
 
     flags0 = Array(domain.flags.data)
     ϕ0 = Array(domain.ϕ.data)
-    i_shell = findfirst(i -> (flags0[i] & TYPE_SU) == TYPE_I, eachindex(flags0))
+    i_shell = findfirst(i -> (flags0[i] & TYPE_SU) == TYPE_I && 0 < ϕ0[i] < 1, eachindex(flags0))
     @test i_shell !== nothing
     ϕ_shell = ϕ0[i_shell]
-    @test 0 < ϕ_shell < 1
+    Vref0 = model.foam.bubbles[Int(id)].V_ref
+    @test Vref0 == V0
 
     initialize!(model)
     flags1 = Array(domain.flags.data)
@@ -104,6 +120,7 @@ end
     @test bubble_count(model) == 1
     @test bubble_ids(model) == [id]
     @test bubble_ratio(model, id) == 1
+    @test model.foam.bubbles[Int(id)].V_ref == Vref0
     ρb = Array(domain.ρb.data)
     @test all(==(one(eltype(ρb))), ρb)
     # The fill at the start of the last step read the previous surface_3.
@@ -159,6 +176,42 @@ end
         @test tags[i] <= 0
     end
     @test ngas > 0
+end
+
+@testset "failed punch rolls the table back" begin
+    N = 16
+    model = Model(N, N, N, 0.1; backend=CPU())
+    domain = model.domains[1]
+    fill!(domain.flags.data, TYPE_F)
+    solid = 2 + 2 * N + 2 * N * N + 1
+    domain.flags.data[solid] = TYPE_S
+    @test_throws ArgumentError nucleate_bubbles!(
+        model, [(8.5, 8.5, 8.5), (2.5, 2.5, 2.5)], [2.5, 2.0])
+    @test bubble_count(model) == 0
+    flags = Array(domain.flags.data)
+    @test flags[solid] == TYPE_S
+    @test !any(i -> (flags[i] & TYPE_SU) == TYPE_G, eachindex(flags))
+    @test !any(i -> (flags[i] & TYPE_SU) == TYPE_I, eachindex(flags))
+end
+
+@testset "shell-only nucleus keeps its id" begin
+    N = 12
+    R = 0.4
+    model = Model(N, N, N, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    fill!(domain.flags.data, TYPE_F)
+    nucleate_bubbles!(model, [(6.5, 6.5, 6.5)], [R])
+    @test bubble_count(model) == 1
+    id = only(bubble_ids(model))
+    flags = Array(domain.flags.data)
+    ϕ = Array(domain.ϕ.data)
+    @test !any(i -> (flags[i] & TYPE_SU) == TYPE_G, eachindex(flags))
+    center = 6 + 6 * N + 6 * N * N + 1
+    @test (flags[center] & TYPE_SU) == TYPE_I
+    @test 0 < ϕ[center] < 1
+    initialize!(model)
+    LatticeBoltzmann.step!(model)
+    @test bubble_ids(model) == [id]
 end
 
 @testset "TYPE_F box has zero bubbles" begin

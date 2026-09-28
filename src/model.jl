@@ -658,6 +658,9 @@ function initialize!(model::Model)
     end
 
     KernelAbstractions.synchronize(model.backend)
+    @static if FOAM
+        _restore_punch_blockers!(model)
+    end
     model.initialized = true
     @static if TEMPERATURE
         reset_energy_budget!(model)
