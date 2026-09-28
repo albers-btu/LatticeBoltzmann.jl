@@ -713,7 +713,11 @@ function step!(model::Model)
 
             @static if FOAM
                 foam_host!(model, domain)
-                model.cached_disjoining_kernel!(; ndrange = N)
+                if domain.k_Π != zero(CT)
+                    model.cached_disjoining_kernel!(
+                        domain.ϕ.data, domain.flags.data, domain.tag.data, domain.Pi.data,
+                        domain.k_Π, Nx, Ny, Nz; ndrange = N)
+                end
             end
 
             @static if SURFACE

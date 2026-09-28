@@ -405,3 +405,150 @@ end
     got = domain.fi.data[LatticeBoltzmann.f_index(srcG, i, N)]
     @test got == expected
 end
+
+function _layer_index(x, y, z, Nx, Ny)
+    return x + y * Nx + z * Nx * Ny + 1
+end
+
+# One z-slab per entry: flag, tag, ϕ. x and y are uniform, so the Parker–Youngs
+# normal of a flat cut is ±z and three crossings is a center-to-center gap of 3.
+function _paint_zlayers!(domain, layers)
+    Nx = Int(domain.Nx)
+    Ny = Int(domain.Ny)
+    Nz = Int(domain.Nz)
+    length(layers) == Nz || error("expected $Nz layers")
+    N = Nx * Ny * Nz
+    flags = fill(TYPE_F, N)
+    ϕ = ones(Float32, N)
+    tag = zeros(Int32, N)
+    for z in 0:(Nz - 1)
+        fl, tg, ϕz = layers[z + 1]
+        for y in 0:(Ny - 1), x in 0:(Nx - 1)
+            n = _layer_index(x, y, z, Nx, Ny)
+            flags[n] = fl
+            tag[n] = Int32(tg)
+            ϕ[n] = ϕz
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.ϕ.data, ϕ)
+    copyto!(domain.tag.data, tag)
+    fill!(domain.Pi.data, 0)
+    return flags, ϕ, tag
+end
+
+function _launch_disjoining!(model)
+    domain = model.domains[1]
+    Nx = Int(domain.Nx)
+    Ny = Int(domain.Ny)
+    Nz = Int(domain.Nz)
+    model.cached_disjoining_kernel!(
+        domain.ϕ.data, domain.flags.data, domain.tag.data, domain.Pi.data,
+        domain.k_Π, Nx, Ny, Nz; ndrange = Nx * Ny * Nz)
+    synchronize(model.backend)
+    return Array(domain.Pi.data)
+end
+
+function _film_layers(Nz, z1, z2, tag1, tag2; film_tag=0)
+    layers = [(TYPE_F, 0, 1.0f0) for _ in 1:Nz]
+    # Gas on the outer face of each interface. The Parker–Youngs stencil is ±1.
+    z1 > 0 && (layers[z1] = (TYPE_G, tag1, 0.0f0))
+    z2 < Nz - 1 && (layers[z2 + 2] = (TYPE_G, tag2, 0.0f0))
+    layers[z1 + 1] = (TYPE_I, tag1, 0.5f0)
+    layers[z2 + 1] = (TYPE_I, tag2, 0.5f0)
+    for z in (z1 + 1):(z2 - 1)
+        layers[z + 1] = (TYPE_F, film_tag, 1.0f0)
+    end
+    return layers
+end
+
+function _expect_pi(ϕ, kΠ, n, j, x, y, z, Nx, Ny, Nz)
+    nϕ = calculate_normal_py(LatticeBoltzmann.gather_phi_d3q27(ϕ, ϕ[n], x, y, z, Nx, Ny, Nz))
+    δs = abs(plic_cube(ϕ[n], nϕ))
+    δo = abs(plic_cube(ϕ[j], nϕ))
+    # Axis-aligned march: three crossings, each tDelta = 1.
+    d = max(3.0f0 - δs - δo, 0.0f0)
+    return kΠ * (4.0f0 - d), nϕ, d
+end
+
+@testset "disjoining across a liquid film" begin
+    Nx, Ny, Nz = 4, 4, 16
+    kΠ = 0.05f0
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    set_foam!(model; k_Π=kΠ)
+    domain = model.domains[1]
+    # Interfaces at z=2 and z=5: two TYPE_F, tag-0 cells between them.
+    layers = _film_layers(Nz, 2, 5, 1, 2)
+    _paint_zlayers!(domain, layers)
+    fill!(domain.ρ.data, 1.3f0)
+    fill!(domain.ρb.data, 1.0f0)
+    ϕ_before = Array(domain.ϕ.data)
+    ρ_before = Array(domain.ρ.data)
+    Pi = _launch_disjoining!(model)
+    @test Array(domain.ϕ.data) == ϕ_before
+    @test Array(domain.ρ.data) == ρ_before
+
+    n_if = 0
+    for z in (2, 5), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = _layer_index(x, y, z, Nx, Ny)
+        zhit = z == 2 ? 5 : 2
+        j = _layer_index(x, y, zhit, Nx, Ny)
+        expect, nϕ, d = _expect_pi(ϕ_before, kΠ, n, j, x, y, z, Nx, Ny, Nz)
+        @test abs(nϕ[1]) < 1f-5 && abs(nϕ[2]) < 1f-5
+        @test abs(nϕ[3]) > 0.99f0
+        @test 0 <= d < 4
+        @test Pi[n] ≈ expect atol=1f-4
+        @test Pi[n] > 0
+        ρg = LatticeBoltzmann.gas_density_plic(0f0, ϕ_before, ϕ_before[n], x, y, z, Nx, Ny, Nz, 1f0, Pi[n])
+        ρg0 = LatticeBoltzmann.gas_density_plic(0f0, ϕ_before, ϕ_before[n], x, y, z, Nx, Ny, Nz, 1f0, 0f0)
+        @test ρg0 == 1f0
+        @test ρg ≈ ρg0 - 3f0 * Pi[n] atol=1f-5
+        n_if += 1
+    end
+    @test n_if == 2 * Nx * Ny
+    for z in 0:(Nz - 1)
+        z == 2 && continue
+        z == 5 && continue
+        @test all(iszero, (Pi[_layer_index(x, y, z, Nx, Ny)] for y in 0:(Ny - 1) for x in 0:(Nx - 1)))
+    end
+
+    # Same id on both sides: the other interface is skipped, not a hit.
+    _paint_zlayers!(domain, _film_layers(Nz, 2, 5, 1, 1))
+    @test all(iszero, _launch_disjoining!(model))
+
+    # Five liquid cells: the other interface is past s = 4.
+    _paint_zlayers!(domain, _film_layers(Nz, 2, 8, 1, 2))
+    @test all(iszero, _launch_disjoining!(model))
+
+    # Atmosphere in the film ends the walk before the other bubble.
+    layers_atm = _film_layers(Nz, 2, 5, 1, 2; film_tag=-1)
+    _paint_zlayers!(domain, layers_atm)
+    @test all(iszero, _launch_disjoining!(model))
+
+    # Constant fill: Parker–Youngs normal is zero.
+    N = Nx * Ny * Nz
+    flags = fill(TYPE_F, N)
+    ϕ = fill(0.5f0, N)
+    tag = zeros(Int32, N)
+    n0 = _layer_index(1, 1, 4, Nx, Ny)
+    flags[n0] = TYPE_I
+    tag[n0] = Int32(1)
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.ϕ.data, ϕ)
+    copyto!(domain.tag.data, tag)
+    fill!(domain.Pi.data, 0)
+    Pi0 = _launch_disjoining!(model)
+    @test Pi0[n0] == 0
+    @test all(iszero, Pi0)
+
+    # k_Π = 0 skips the launch. Live rows keep the two ids, so a launch would write Π.
+    set_foam!(model; k_Π=0)
+    initialize!(model)
+    _paint_zlayers!(domain, _film_layers(Nz, 2, 5, 1, 2))
+    push!(model.foam.bubbles, LatticeBoltzmann.Bubble(4.0, 4.0, 1.0, false))
+    push!(model.foam.bubbles, LatticeBoltzmann.Bubble(4.0, 4.0, 1.0, false))
+    LatticeBoltzmann.step!(model)
+    @test all(iszero, Array(domain.Pi.data))
+
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, 0.5f0, 1, 1, 4, Nx, Ny, Nz, 1f0, 0.1f0) == 0.7f0
+end
