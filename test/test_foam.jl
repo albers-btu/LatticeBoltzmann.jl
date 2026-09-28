@@ -1045,3 +1045,68 @@ end
     end
     @test _liquid_tags_are_zero(foam)
 end
+
+function _paint_device_gas!(domain, Nx, Ny, cells_ids)
+    N = length(domain.flags)
+    flags = fill(TYPE_F, N)
+    ϕ = fill(1.0f0, N)
+    tag = zeros(Int32, N)
+    y = z = 1
+    for (x, id) in cells_ids
+        n = x + y * Nx + z * Nx * Ny + 1
+        flags[n] = TYPE_G
+        ϕ[n] = 0
+        tag[n] = Int32(id)
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.ϕ.data, ϕ)
+    copyto!(domain.tag.data, tag)
+    return nothing
+end
+
+@testset "merge weights flux from both parents" begin
+    Nx, Ny, Nz = 10, 4, 4
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU())
+    domain = model.domains[1]
+    set_foam!(model; V_m=2, ρ_liquid=1)
+    _paint_device_gas!(domain, Nx, Ny, [(2, 5), (3, 5), (4, 2), (5, 2)])
+    _put_row!(model.foam, 5, 1.0, 4.0, 1.0)
+    _put_row!(model.foam, 2, 1.0, 4.0, 3.0)
+    flux = Array(domain.flux.data)
+    flux[5] = 0.5f0
+    flux[2] = 1.0f0
+    copyto!(domain.flux.data, flux)
+    scale = 2.0
+    r5 = 1.0 + 0.5 * scale / 4.0
+    r2 = 3.0 + 1.0 * scale / 4.0
+    LatticeBoltzmann.foam_host!(model, domain)
+    rows = _live_rows(model.foam)
+    @test length(rows) == 1
+    id, row = only(rows)
+    @test id == 2
+    @test row.V_ref == 8.0
+    @test row.ratio == (r5 * 4.0 + r2 * 4.0) / 8.0
+    @test row.ratio * row.V_ref == 1.0 * 4.0 + 3.0 * 4.0 + scale * (0.5 + 1.0)
+    @test all(iszero, Array(domain.flux.data))
+end
+
+@testset "split shares the flux-updated ratio" begin
+    Nx, Ny, Nz = 10, 4, 4
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU())
+    domain = model.domains[1]
+    set_foam!(model; V_m=2, ρ_liquid=1)
+    _paint_device_gas!(domain, Nx, Ny, [(2, 3), (4, 3), (5, 3)])
+    _put_row!(model.foam, 3, 9.0, 6.0, 2.0)
+    flux = Array(domain.flux.data)
+    flux[3] = 1.5f0
+    copyto!(domain.flux.data, flux)
+    scale = 2.0
+    r = 2.0 + 1.5 * scale / 6.0
+    LatticeBoltzmann.foam_host!(model, domain)
+    rows = _live_rows(model.foam)
+    @test length(rows) == 2
+    @test any(row -> row[1] == 3, rows)
+    @test all(row -> row[2].ratio == r, rows)
+    @test sum(row -> row[2].V_ref, rows) == 6.0
+    @test sum(row -> row[2].ratio * row[2].V_ref, rows) == r * 6.0
+end
