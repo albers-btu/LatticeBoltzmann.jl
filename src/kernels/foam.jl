@@ -34,13 +34,4 @@ end
     @inbounds ϕ_correction_body!(Int(n))
 end
 
-@inline function foam_init_body!(::Int)
-    return nothing
-end
-
-@kernel function foam_init_kernel!()
-    n = @index(Global)
-    @inbounds foam_init_body!(Int(n))
-end
-
 end

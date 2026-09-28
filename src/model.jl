@@ -71,7 +71,6 @@ mutable struct Model{
         cached_concentration_odd_kernel!::Any
         cached_disjoining_kernel!::Any
         cached_ϕ_correction_kernel!::Any
-        cached_foam_init_kernel!::Any
     end
 end
 
@@ -248,7 +247,6 @@ function Model(
         cached_concentration_odd = concentration_odd_kernel!(backend, workgroup)
         cached_disjoining = disjoining_kernel!(backend, workgroup)
         cached_ϕ_correction = ϕ_correction_kernel!(backend, workgroup)
-        cached_foam_init = foam_init_kernel!(backend, workgroup)
     end
 
     Dx = UInt(1)
@@ -394,7 +392,6 @@ function Model(
                         cached_concentration_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
-                        cached_foam_init,
                     )
                 else
                     ()
@@ -436,7 +433,6 @@ function Model(
                         cached_concentration_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
-                        cached_foam_init,
                     )
                 else
                     ()
