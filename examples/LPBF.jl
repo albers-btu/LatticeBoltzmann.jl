@@ -1,8 +1,8 @@
-# Autogenous 316L weld: one pass, no powder. 2 kW, 0.5 mm 1/e² spot.
-# SI box is independent of Δx: change `si_dx` only to refine.
+# 316L LPBF single track on input/powder_bed.h5.
+# 200 W, 100 µm 1/e² spot, 1 m/s. Plate + powder come from the HDF5 bed.
 # Heat: PLIC + Fresnel (multi-bounce). Evaporation, recoil, radiation, gravity.
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
-# σ is capped below the physical 1.6 N/m — see the note after Units.
+# σ stays the physical 1.6 N/m; n_hydro shortens the flow step so σ_lat stays small.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
 # isosurface slider. Open lbm.pvd and rays.pvd (colour rays by power).
@@ -19,37 +19,26 @@ using ProgressMeter
 using Logging
 
 @assert SURFACE && TEMPERATURE
-start_run_log!("output_melt_pool")
+start_run_log!("output_LPBF")
 
 # --- user: scan ---
-n_layers      = 1          # one weld line
+n_layers      = 1          # one LPBF track
 bidirectional = false      # always x0 → x1
 si_dwell      = 0.0u"s"
-si_freeze     = 0.5u"s"    # laser off after the pass so the pool can solidify
-use_powder    = false      # autogenous; jet stays off the whole pass
+si_freeze     = 2.0e-3u"s" # laser off; a few pool diffusion times, not the weld's 0.5 s
+use_powder    = false      # powder is already in the HDF5 bed, not a jet
 
-# --- user: box / resolution (SI; Δx does not change the box or the spot) ---
-# 8 × 6 mm in xy. Pad 4 mm + 2 mm gas so a 2 kW keyhole can open in z without
-# hitting the Robin floor or the top lid. Refine with `si_dx` only.
-# If input/powder_bed.h5 exists, that bed replaces this box (its dx, size, plate).
-si_Lx     = 8.0e-3u"m"
-si_Ly     = 6.0e-3u"m"
-si_H      = 4.0e-3u"m"                  # substrate thickness (z = 2 … Hfill)
-si_gas    = 2.0e-3u"m"                  # TYPE_G above the expected bead
-si_dx     = 40.0e-6u"m"
-si_end_margin = 1.2e-3u"m"              # scan start/stop from each x-wall
-
+# The grid, plate, and powder come from the DEM bed. dx is the file's cell size.
 const bed_path = joinpath(@__DIR__, "..", "input", "powder_bed.h5")
-const bed = isfile(bed_path) ? read_powder_bed(bed_path) : nothing
-if bed !== nothing
-    si_dx = bed.dx * u"m"
-    si_Lx = size(bed.phi, 1) * bed.dx * u"m"
-    si_Ly = size(bed.phi, 2) * bed.dy * u"m"
-    zsub = max(1, substrate_top(bed))
-    si_H  = zsub * bed.dz * u"m"
-    # The file is ~1 mm wide. A 2 mm gas cap would dwarf it.
-    si_gas = min(si_gas, 40 * bed.dz * u"m")
-end
+isfile(bed_path) || error("LPBF example needs $bed_path")
+const bed = read_powder_bed(bed_path)
+si_dx = bed.dx * u"m"
+si_Lx = size(bed.phi, 1) * bed.dx * u"m"
+si_Ly = size(bed.phi, 2) * bed.dy * u"m"
+zsub  = max(1, substrate_top(bed))
+si_H  = zsub * bed.dz * u"m"
+si_gas = 40 * bed.dz * u"m"            # ~0.2 mm of gas above this ~1 mm bed
+si_end_margin = 0.15e-3u"m"            # a bit more than the 50 µm beam radius
 
 si_ρ      = 8000u"kg/m^3"
 si_cp     = 500u"J/kg/K"
@@ -67,11 +56,11 @@ si_Lv     = 7.45e6u"J/kg"
 si_Tv     = 3086.0u"K"
 si_M      = 0.0558u"kg/mol"
 si_K0     = 1.0e-10u"m^2"
-si_P      = 2000.0u"W"
+si_P      = 200.0u"W"                   # typical 316L LPBF single track
 si_h_sub  = 2.0e4u"W/m^2/K"             # Robin backing; ∞ was Dirichlet T_init
-si_d_spot = 0.5e-3u"m"
-si_v      = 8.0e-3u"m/s"
-si_δ      = 0.24e-3u"m"
+si_d_spot = 100.0e-6u"m"                # 1/e² diameter, ~70–120 µm in LPBF
+si_v      = 1.0u"m/s"
+si_δ      = 30.0e-6u"m"                 # absorption depth, about one d50
 si_mdot   = 0.0u"g/minute"              # no powder
 si_eta    = 1.0
 si_g      = 9.81u"m/s^2"
@@ -234,7 +223,7 @@ end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "316L autogenous weld" bed_path=(bed === nothing ? nothing : bed_path) use_powder n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_cells scan_mm=(1e3*m*abs(x1-x0)) v_lat nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_v si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
+@info "316L LPBF single track" bed_path n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) spot_um=(1e6*ustrip(u"m", si_d_spot)) w_cells scan_mm=(1e3*m*abs(x1-x0)) v_mps=ustrip(u"m/s", si_v) v_lat line_J_per_mm=(ustrip(u"W", si_P) / ustrip(u"m/s", si_v) / 1e3) nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
@@ -281,7 +270,7 @@ model.powder_jet = PowderJet(units; mdot = 0.0u"kg/s", w = 0.6 * si_d_spot,
                              v = 1.0u"m/s", x = x0, y = y_las, z = z_noz,
                              nparcels = 1, enabled = false)
 LatticeBoltzmann.initialize!(model)
-export!(model; dir="output_melt_pool")
+export!(model; dir="output_LPBF")
 
 function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
                      nsteps_pass, nsteps_dwell, nsteps_freeze, nsteps_powder_delay, nsteps_total,
@@ -292,10 +281,10 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
     x_now = x0
     mlups_ema = NaN
     αema = 0.2
-    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="weld ", showspeed=true)
+    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="LPBF ", showspeed=true)
 
     function report!(layer, x_las)
-        export!(model; dir="output_melt_pool")
+        export!(model; dir="output_LPBF")
         nliq, depth, bead, Tmax_K, Tmin_K, umax, _, zI, xl = track_metrics(
             Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
             Nx, Ny, Nz, Hfill, x_las, y_las, model.units)
@@ -388,4 +377,4 @@ b = energy_budget(d)
 m = mass_budget(d)
 U = model.units
 dx = Float64(U.m)
-@info "autogenous weld report" nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full
+@info "LPBF single-track report" nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) A0 nskin Q_full
