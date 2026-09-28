@@ -28,7 +28,9 @@ si_dwell      = 0.0u"s"
 si_freeze     = 2.0e-3u"s" # laser off; a few pool diffusion times, not the weld's 0.5 s
 use_powder    = false      # powder is already in the HDF5 bed, not a jet
 
-# The grid, plate, and powder come from the DEM bed. dx is the file's cell size.
+# The grid is the DEM file (one domain cell per file cell). This bed is a
+# short track, about 2.1 × 0.53 × 0.35 mm. Plate is file z = 41 (~0.20 mm);
+# powder sits on it through the top layer.
 const bed_path = joinpath(@__DIR__, "..", "input", "powder_bed.h5")
 isfile(bed_path) || error("LPBF example needs $bed_path")
 const bed = read_powder_bed(bed_path)
@@ -37,7 +39,7 @@ si_Lx = size(bed.phi, 1) * bed.dx * u"m"
 si_Ly = size(bed.phi, 2) * bed.dy * u"m"
 zsub  = max(1, substrate_top(bed))
 si_H  = zsub * bed.dz * u"m"
-si_gas = 40 * bed.dz * u"m"            # ~0.2 mm of gas above this ~1 mm bed
+si_gas = 40 * bed.dz * u"m"            # ~0.20 mm of gas above the powder
 si_end_margin = 0.15e-3u"m"            # a bit more than the 50 µm beam radius
 
 si_ρ      = 8000u"kg/m^3"
@@ -120,8 +122,8 @@ si_ν_l = 6.0e-7u"m^2/s"                 # liquid 316L; KBC is what makes this �
 si_ν_s = 1.0e-4u"m^2/s"
 si_ν_lT = -2.0e-10u"m^2/s/K"
 lbm_α_true = 0.1
-# Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx so the
-# SI box and the SI spot stay put when you refine.
+# Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx.
+# paint_powder_bed! strides with the file's Nx, Ny, so the domain must match.
 L     = max(4, round(Int, ustrip(u"m", si_H) / ustrip(u"m", si_dx)))
 m     = ustrip(u"m", si_H) / L
 Nx    = max(16, round(Int, ustrip(u"m", si_Lx) / m))
@@ -130,6 +132,8 @@ Hfill = L + 2
 if bed !== nothing
     # File z = 1 sits on the Robin wall (domain z = 2).
     Hfill = 1 + substrate_top(bed)
+    (Nx, Ny) == (size(bed.phi, 1), size(bed.phi, 2)) ||
+        error("domain $(Nx)×$(Ny) does not match powder file $(size(bed.phi))")
 end
 s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
 lbm_u = 0.05
@@ -166,6 +170,8 @@ end
 kg_cell = ρ_m * m^3
 σ_lat_phys = ustrip(u"N/m", si_σ_phys) * s^2 / kg_cell
 n_hydro = max(1, ceil(Int, sqrt(max(σ_lat_phys, 0.0) / Float64(σ_lat_cap))))
+# An even count reuses one temperature slot, so the pool does not conduct.
+iseven(n_hydro) && (n_hydro += 1)
 si_σ  = si_σ_phys
 si_σT = si_σT_phys
 
@@ -193,6 +199,8 @@ model = Model(Nx, Ny, Nz, units;
 Tm      = Float32(lbm_T(units, si_Tm))
 T_init  = Float32(lbm_T(units, si_T_init))
 w_cells = w_m / Float64(units.m)
+# Same ray pitch as DED: half a cell across the 4w bundle, not a fixed 11×11.
+nrays = max(11, ceil(Int, 4 * w_cells / 0.5))
 v_lat   = Float32(ustrip(u"m/s", si_v) * units.s / units.m)
 y_las   = Float32(Ny + 1) / 2
 # Scan ends in metres, not a fixed cell count — otherwise refining eats the
@@ -223,7 +231,7 @@ end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "316L LPBF single track" bed_path n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) spot_um=(1e6*ustrip(u"m", si_d_spot)) w_cells scan_mm=(1e3*m*abs(x1-x0)) v_mps=ustrip(u"m/s", si_v) v_lat line_J_per_mm=(ustrip(u"W", si_P) / ustrip(u"m/s", si_v) / 1e3) nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
+@info "316L LPBF single track" bed_path n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) spot_um=(1e6*ustrip(u"m", si_d_spot)) w_cells nrays scan_mm=(1e3*m*abs(x1-x0)) v_mps=ustrip(u"m/s", si_v) v_lat line_J_per_mm=(ustrip(u"W", si_P) / ustrip(u"m/s", si_v) / 1e3) nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
@@ -265,7 +273,7 @@ copyto!(model.domains[1].h.data, hh)
 d = model.domains[1]
 model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
-                    nrays = 11, max_bounce = 8, every = qevery, skin = nskin)
+                    nrays = nrays, max_bounce = 8, every = qevery, skin = nskin)
 model.powder_jet = PowderJet(units; mdot = 0.0u"kg/s", w = 0.6 * si_d_spot,
                              v = 1.0u"m/s", x = x0, y = y_las, z = z_noz,
                              nparcels = 1, enabled = false)

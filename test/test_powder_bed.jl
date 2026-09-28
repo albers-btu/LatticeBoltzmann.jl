@@ -6,8 +6,8 @@ using LatticeBoltzmann
     @test isfile(path)
     bed = read_powder_bed(path)
     Nx, Ny, Nz = size(bed.phi)
-    @test (Nx, Ny, Nz) == (184, 184, 78)
-    @test bed.dx ≈ 4.920566682130076e-6
+    @test (Nx, Ny, Nz) == (435, 109, 72)
+    @test bed.dx ≈ 4.911264239267441e-6
     @test bed.origin[1] == 0 && bed.origin[2] == 0
     @test all(0 .<= bed.phi .<= 1)
     @test bed.substrate !== nothing
