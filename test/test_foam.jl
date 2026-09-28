@@ -1,5 +1,5 @@
 using Test, LatticeBoltzmann
-using KernelAbstractions: CPU
+using KernelAbstractions: CPU, synchronize
 
 @testset "foam allocation and no-op step" begin
     @test FOAM
@@ -121,8 +121,12 @@ end
     @test bubble_ids(model) == [id]
     @test bubble_ratio(model, id) == 1
     @test model.foam.bubbles[Int(id)].V_ref == Vref0
+    row = model.foam.bubbles[Int(id)]
+    imposed = Float32(row.ratio * (row.V_ref / row.V))
     ρb = Array(domain.ρb.data)
-    @test all(==(one(eltype(ρb))), ρb)
+    tags = Array(domain.tag.data)
+    @test any(>(0), tags)
+    @test all(i -> tags[i] > 0 ? ρb[i] == imposed : ρb[i] == one(eltype(ρb)), eachindex(ρb))
     # The fill at the start of the last step read the previous surface_3.
     @test _no_surface_transition(model.foam.flags)
 end
@@ -224,4 +228,180 @@ end
     @test bubble_count(model) == 0
     @test all(iszero, Array(domain.tag.data))
     @test _no_surface_transition(model.foam.flags)
+end
+
+@testset "imposed gas density" begin
+    N = 11
+    ϕ = zeros(Float32, N * N * N)
+    R = 3.0f0
+    mid = (N - 1) / 2
+    for z in 0:(N - 1), y in 0:(N - 1), x in 0:(N - 1)
+        d = sqrt((x - mid)^2 + (y - mid)^2 + (z - mid)^2)
+        ϕ[x + y * N + z * N * N + 1] = clamp(d - R + 0.5f0, 0f0, 1f0)
+    end
+    n = findfirst(v -> 0f0 < v < 1f0, ϕ)
+    @test n !== nothing
+    n0 = n - 1
+    x = n0 % N
+    y = (n0 ÷ N) % N
+    z = n0 ÷ (N * N)
+    ϕ0 = ϕ[n]
+    σ = 0.05f0
+    phij = LatticeBoltzmann.gather_phi_d3q27(ϕ, ϕ0, x, y, z, N, N, N)
+    κ = calculate_curvature(phij)
+    @test abs(κ) > 1f-3
+    expect = clamp(1f0 - 6f0 * σ * κ, 0.2f0, 2f0)
+    @test LatticeBoltzmann.gas_density_plic(σ, ϕ, ϕ0, x, y, z, N, N, N, 1f0, 0f0) == expect
+    @test LatticeBoltzmann.gas_density_plic(σ, ϕ, ϕ0, x, y, z, N, N, N) == expect
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 1.2f0, 0f0) == 1.2f0
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 5f0, 0f0) == 2f0
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 0f0, 0f0) == 0.2f0
+end
+
+@testset "doubling volume halves imposed density" begin
+    foam = LatticeBoltzmann.FoamHost{Float32}(4)
+    ratio = 1.5
+    V = 8.0
+    push!(foam.bubbles, LatticeBoltzmann.Bubble(V, V, ratio, false))
+    foam.tag[1] = Int32(1)
+    foam.tag[2] = Int32(-1)
+    foam.tag[3] = Int32(0)
+    foam.tag[4] = Int32(1)
+    LatticeBoltzmann._impose_bubble_density!(foam, 1.0f0)
+    @test foam.ρb[1] == Float32(ratio)
+    @test foam.ρb[4] == Float32(ratio)
+    @test foam.ρb[2] == 1f0
+    @test foam.ρb[3] == 1f0
+    foam.bubbles[1] = LatticeBoltzmann.Bubble(2V, V, ratio, false)
+    LatticeBoltzmann._impose_bubble_density!(foam, 1.0f0)
+    @test foam.ρb[1] == Float32(ratio / 2)
+    @test foam.ρb[4] == Float32(ratio / 2)
+    @test foam.bubbles[1].ratio == ratio
+    @test foam.ρb[2] == 1f0
+    @test foam.ρb[3] == 1f0
+end
+
+function _write_rest_feq!(fi, Nx, Ny, Nz, ρ::Float32)
+    N = Nx * Ny * Nz
+    w = weights(:D3Q19, Float32)
+    c = velocities(:D3Q19)
+    z = 0f0
+    uu = 0f0
+    for zz in 0:(Nz - 1), yy in 0:(Ny - 1), xx in 0:(Nx - 1)
+        n = xx + yy * Nx + zz * Nx * Ny + 1
+        fi[LatticeBoltzmann.f_index(n, 1, N)] = LatticeBoltzmann.feq(w[1], ρ, z, z, z, uu, c[1], Float32)
+        for k in 1:((length(c) - 1) ÷ 2)
+            i = 2k
+            src = LatticeBoltzmann.src_index(xx, yy, zz, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+            fp = LatticeBoltzmann.feq(w[i], ρ, z, z, z, uu, c[i], Float32)
+            fm = LatticeBoltzmann.feq(w[i + 1], ρ, z, z, z, uu, c[i + 1], Float32)
+            fi[LatticeBoltzmann.f_index(src, i, N)] = fp
+            fi[LatticeBoltzmann.f_index(n, i + 1, N)] = fm
+        end
+    end
+    return nothing
+end
+
+function _flat_gas_volume(ϕ, tag, id)
+    V = 0.0
+    for i in eachindex(ϕ)
+        tag[i] == id || continue
+        ϕn = Float64(ϕ[i])
+        ϕn = ϕn < 0 ? 0.0 : (ϕn > 1 ? 1.0 : ϕn)
+        V += 1 - ϕn
+    end
+    return V
+end
+
+@testset "flat bubble reconstructs at the imposed density" begin
+    Nx = Ny = Nz = 8
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    set_foam!(model; γ_b=1)
+    domain = model.domains[1]
+    fill!(domain.flags.data, TYPE_F)
+    nucleate_bubbles!(model, [(4.0, 4.0, 4.0)], [1.5])
+    id = only(bubble_ids(model))
+    empty!(model.foam.blockers)
+
+    flags = fill(TYPE_F, Nx * Ny * Nz)
+    ϕ = ones(Float32, Nx * Ny * Nz)
+    tag = zeros(Int32, Nx * Ny * Nz)
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = x + y * Nx + z * Nx * Ny + 1
+        if z == 2 || z == 5
+            flags[n] = TYPE_I
+            ϕ[n] = 0.5f0
+            tag[n] = id
+        elseif z == 3 || z == 4
+            flags[n] = TYPE_G
+            ϕ[n] = 0f0
+            tag[n] = id
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.ϕ.data, ϕ)
+    copyto!(domain.tag.data, tag)
+    V = _flat_gas_volume(ϕ, tag, id)
+    model.foam.bubbles[Int(id)] = LatticeBoltzmann.Bubble(V, V, 1.5, false)
+
+    initialize!(model)
+    ϕ1 = Array(domain.ϕ.data)
+    tag1 = Array(domain.tag.data)
+    V = _flat_gas_volume(ϕ1, tag1, id)
+    model.foam.bubbles[Int(id)] = LatticeBoltzmann.Bubble(V, V, 1.5, false)
+    LatticeBoltzmann.foam_host!(model, domain)
+    row = model.foam.bubbles[Int(id)]
+    @test row.ratio == 1.5
+    @test row.V_ref == V
+    @test row.V == V
+    imposed = Float32(row.ratio * (row.V_ref / row.V))
+    @test imposed == 1.5f0
+
+    ρb = Array(domain.ρb.data)
+    tags = Array(domain.tag.data)
+    flags1 = Array(domain.flags.data)
+    nI = nothing
+    srcG = nothing
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = x + y * Nx + z * Nx * Ny + 1
+        (flags1[n] & TYPE_SU) == TYPE_I || continue
+        src = LatticeBoltzmann.src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+        (flags1[src] & TYPE_SU) == TYPE_G || continue
+        nI = n
+        srcG = src
+        break
+    end
+    @test nI !== nothing
+    @test tags[nI] == id
+    @test ρb[nI] == 1.5f0
+    @test all(i -> tags[i] > 0 ? ρb[i] == 1.5f0 : ρb[i] == 1f0, eachindex(ρb))
+
+    N = Nx * Ny * Nz
+    _write_rest_feq!(domain.fi.data, Nx, Ny, Nz, 1f0)
+    i = 6 # +z
+    fp_out = domain.fi.data[LatticeBoltzmann.f_index(srcG, i + 1, N)]
+    w = model.weights
+    c = model.velocities
+    ρG = 1.5f0
+    z = 0f0
+    uu = 0f0
+    fegp = LatticeBoltzmann.feq(w[i], ρG, z, z, z, uu, c[i], Float32)
+    fegm = LatticeBoltzmann.feq(w[i + 1], ρG, z, z, z, uu, c[i + 1], Float32)
+    expected = fegp - fp_out + fegm
+
+    Nd = Int(domain.N)
+    model.cached_surface_0_even_kernel!(
+        domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+        domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+        domain.fs.data, domain.gi.data,
+        model.weights, model.velocities,
+        domain.fx, domain.fy, domain.fz, domain.σ, domain.σT, domain.Tσ,
+        domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
+        Nd, Nx, Ny, Nz, domain.Eacc.data,
+        domain.h.data, domain.Q.data, domain.ω_T,
+        domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H;
+        ndrange = N)
+    synchronize(model.backend)
+    got = domain.fi.data[LatticeBoltzmann.f_index(srcG, i, N)]
+    @test got == expected
 end

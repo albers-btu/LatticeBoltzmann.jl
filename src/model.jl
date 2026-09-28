@@ -718,6 +718,7 @@ function step!(model::Model)
 
             @static if SURFACE
                 sk0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
+                @static if !FOAM
                 sk0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                     domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
                     domain.fs.data, domain.gi.data,
@@ -726,6 +727,18 @@ function step!(model::Model)
                     domain.Λ_v, domain.T_v, p0v, domain.β_v,
                     Nd, Nx, Ny, Nz, domain.Eacc.data,
                     domain.h.data, domain.Q.data, domain.ω_T; ndrange = N)
+                end
+                @static if FOAM
+                sk0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+                    domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+                    domain.fs.data, domain.gi.data,
+                    model.weights, model.velocities,
+                    fx, fy, fz, σ, σT, domain.Tσ,
+                    domain.Λ_v, domain.T_v, p0v, domain.β_v,
+                    Nd, Nx, Ny, Nz, domain.Eacc.data,
+                    domain.h.data, domain.Q.data, domain.ω_T,
+                    domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H; ndrange = N)
+                end
             end
 
             @static if MOVING_BOUNDARIES

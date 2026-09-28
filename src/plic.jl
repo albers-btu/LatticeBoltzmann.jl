@@ -211,3 +211,13 @@ end
     # 6σκ > 1 makes ρ_g ≤ 0 and feq invalid. Floor (and cap) the jump.
     return clamp(one(T) - T(6) * σ * κ, T(0.2), T(2))
 end
+
+@static if FOAM
+# σ == 0 is a pressurized bubble, not ambient. Do not return 1.
+@inline function gas_density_plic(σ::T, ϕ, ϕ0::T, x, y, z, Nx, Ny, Nz, ρb::T, Π::T) where {T}
+    σ == zero(T) && return clamp(ρb - T(3) * Π, T(0.2), T(2))
+    phij = gather_phi_d3q27(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
+    κ = calculate_curvature(phij)
+    return clamp(ρb - T(6) * σ * κ - T(3) * Π, T(0.2), T(2))
+end
+end

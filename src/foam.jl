@@ -27,8 +27,8 @@ end
 
 """
 One bubble row. `frozen` is stored for a later PR and is never read.
-`ratio` is not multiplied by `V_ref / V`; that factor is the imposed
-density, and this PR still writes `ρb = 1`.
+`ratio` is not changed from dissolved mass. The imposed density is
+`ratio * (V_ref / V)^γ_b`.
 """
 struct Bubble
     V::Float64
@@ -906,10 +906,29 @@ function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     return nothing
 end
 
+# γ_b = 1 is a division. pow(x, 1) is not what this PR writes.
+function _impose_bubble_density!(foam::FoamHost, γ_b)
+    γ = Float64(γ_b)
+    CType = eltype(foam.ρb)
+    fill!(foam.ρb, one(CType))
+    @inbounds for n in eachindex(foam.tag)
+        t = Int(foam.tag[n])
+        t > 0 || continue
+        row = _live_bubble(foam, t)
+        row === nothing && continue
+        V = row.V
+        V > 0 || continue
+        vr_over_v = row.V_ref / V
+        factor = γ == 1.0 ? vr_over_v : vr_over_v^γ
+        foam.ρb[n] = CType(row.ratio * factor)
+    end
+    return nothing
+end
+
 """
 Host section at the start of the substep. Reads post-`surface_3` flags
-from the previous substep. Writes a complete tag array and `ρb = 1`
-(ideal-gas `ρb` is a later PR) before `surface_0`.
+from the previous substep. Writes a complete tag array and the imposed
+`ρb` before `surface_0`. `ratio` is not changed from mass.
 """
 function foam_host!(model, domain)
     @static if FOAM
@@ -922,7 +941,7 @@ function foam_host!(model, domain)
         copyto!(foam.ϕ, domain.ϕ.data)
         copyto!(foam.tag_prev, domain.tag.data)
         _retag!(foam, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
-        fill!(foam.ρb, one(eltype(foam.ρb)))
+        _impose_bubble_density!(foam, domain.γ_b)
         copyto!(domain.tag.data, foam.tag)
         copyto!(domain.ρb.data, foam.ρb)
         # Δm → ratio is a later PR. Drop the bin so it cannot accumulate.
