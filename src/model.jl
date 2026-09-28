@@ -780,7 +780,6 @@ function step!(model::Model)
             end
 
             @static if FOAM
-                # ω_c = 2 at D = 0. Do not launch that wall, and do not clamp.
                 if domain.D > zero(domain.D)
                     ck = t_odd ? model.cached_concentration_odd_kernel! : model.cached_concentration_even_kernel!
                     ck(domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,

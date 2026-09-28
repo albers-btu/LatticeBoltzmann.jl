@@ -2,15 +2,11 @@ using KernelAbstractions
 
 @static if FOAM
 
-# Absolute dissolved-gas equilibrium: c = Σ c_i.
-# Not geq_T, which subtracts w_i so Σ g = T − 1.
-# w0 = 1/4, w_axis = 1/8, c_sT² = 1/4. D3Q19 model.weights are not used.
 @inline ceq_rest(c::CType) where {CType} = CType(0.25) * c
 
 @inline ceq_axis(c::CType, ucomp::CType) where {CType} =
     CType(0.125) * c * (one(CType) + ucomp * CType(4))
 
-# D = (1/4) (1/ω − 1/2). Not omega_T_from_alpha (that takes 2α) and not clamp_omega.
 @inline function omega_c_from_D(D::CType) where {CType}
     return one(CType) / (CType(4) * D + CType(0.5))
 end
@@ -52,7 +48,7 @@ end
     x = n0 % Nx
     y = (n0 ÷ Nx) % Ny
     z = n0 ÷ (Nx * Ny)
-    # First step! is even, so the slots match store_feq!(..., Val(false)).
+    # Val(false): the first step is even.
     store_ceq!(ci, n, x, y, z, c0,
                CType(u[n, 1]), CType(u[n, 2]), CType(u[n, 3]),
                N, Nx, Ny, Nz, Val(false))
@@ -78,7 +74,6 @@ end
         return nothing
     end
     su = flagsn & TYPE_SU
-    # TYPE_GI is not a concentration state: surface_1 writes it after this kernel.
     if !(su == TYPE_F || su == TYPE_I || su == TYPE_IF || su == TYPE_IG)
         return nothing
     end
@@ -91,6 +86,7 @@ end
     uy = CType(u[n, 2])
     uz = CType(u[n, 3])
 
+    # Rest slot does not swap.
     crest = CType(ci[f_index(n, 1, N)])
     cn = crest
     for k in 1:3
@@ -101,7 +97,7 @@ end
     end
     cfield[n] = cn
 
-    # w0 q + 6 w_axis q = q, and only on pure liquid. TYPE_IF carries both F and I.
+    # TYPE_IF is not pure TYPE_F.
     qn = su == TYPE_F ? q : zero(CType)
     om = one(CType) - ωc
     ci[f_index(n, 1, N)] = eltype(ci)(om * crest + ωc * ceq_rest(cn) + CType(0.25) * qn)
