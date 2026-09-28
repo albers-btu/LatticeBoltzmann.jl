@@ -71,6 +71,7 @@ mutable struct Model{
         cached_concentration_odd_kernel!::Any
         cached_disjoining_kernel!::Any
         cached_ϕ_correction_kernel!::Any
+        cached_concentration_init_kernel!::Any
         foam::FoamHost{CType}               # Host bubble table and reusable D2H buffers
     end
 end
@@ -248,6 +249,7 @@ function Model(
         cached_concentration_odd = concentration_odd_kernel!(backend, workgroup)
         cached_disjoining = disjoining_kernel!(backend, workgroup)
         cached_ϕ_correction = ϕ_correction_kernel!(backend, workgroup)
+        cached_concentration_init = concentration_init_kernel!(backend, workgroup)
     end
 
     Dx = UInt(1)
@@ -393,6 +395,7 @@ function Model(
                         cached_concentration_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
+                        cached_concentration_init,
                         FoamHost{CType}(Int(domains[1].N)),
                     )
                 else
@@ -435,6 +438,7 @@ function Model(
                         cached_concentration_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
+                        cached_concentration_init,
                         FoamHost{CType}(Int(domains[1].N)),
                     )
                 else
@@ -636,6 +640,14 @@ function initialize!(model::Model)
                 domain.gi.data, domain.T.data, domain.fs.data;
                 ndrange = N
             )
+            @static if FOAM
+                model.cached_concentration_init_kernel!(
+                    domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,
+                    domain.c0,
+                    Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+                    ndrange = N
+                )
+            end
         else
             kernel(
                 domain.ρ.data,
@@ -793,8 +805,12 @@ function step!(model::Model)
             end
 
             @static if FOAM
-                ck = t_odd ? model.cached_concentration_odd_kernel! : model.cached_concentration_even_kernel!
-                ck(; ndrange = N)
+                if domain.D > zero(domain.D)
+                    ck = t_odd ? model.cached_concentration_odd_kernel! : model.cached_concentration_even_kernel!
+                    ck(domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,
+                       omega_c_from_D(domain.D), domain.q,
+                       Nd, Nx, Ny, Nz; ndrange = N)
+                end
             end
 
             @static if SURFACE
