@@ -71,6 +71,7 @@ mutable struct Model{
         cached_concentration_odd_kernel!::Any
         cached_disjoining_kernel!::Any
         cached_ϕ_correction_kernel!::Any
+        foam::FoamHost{CType}               # Host bubble table and reusable D2H buffers
     end
 end
 
@@ -392,6 +393,7 @@ function Model(
                         cached_concentration_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
+                        FoamHost{CType}(Int(domains[1].N)),
                     )
                 else
                     ()
@@ -433,6 +435,7 @@ function Model(
                         cached_concentration_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
+                        FoamHost{CType}(Int(domains[1].N)),
                     )
                 else
                     ()
