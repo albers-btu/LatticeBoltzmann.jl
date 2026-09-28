@@ -737,16 +737,13 @@ function _collect_parents(foam::FoamHost, ncomp::Int, N::Int)
     return parents, atm
 end
 
-# PR3 merge/split does not conserve Σ ratio·V_ref. Each child keeps the
-# minimum old id's ratio and sets V_ref to its own current V. A 1–1
-# transition keeps the old id and the old V_ref. Gas that overlaps neither
-# a live id nor tag -1 is atmosphere, not a new bubble: nucleation is the
-# only source of positive ids (split children are the one exception, so
-# two components do not share a row).
+# Connected overlaps are one transition. 1–1 keeps the id, ratio, and V_ref.
+# A merge keeps the minimum old id; ratio is the V_ref-weighted average and
+# V_ref is the sum, so Σ(ratio * V_ref) is unchanged. A split copies ratio
+# and sets V_ref,child = V_ref * V_child / Σ V; the lowest component keeps
+# the parent id. Overlap with tag -1 drops those rows. Orphan gas stays -1.
 function _assign_components!(foam::FoamHost, parents, atm, ncomp::Int)
     comp_tag = fill(TAG_ATM, ncomp)
-    merged = falses(ncomp)
-    # A component that also overlaps tag -1 has burst: those rows are dropped.
     doomed = Set{Int32}()
     for c in 1:ncomp
         atm[c] || continue
@@ -755,68 +752,73 @@ function _assign_components!(foam::FoamHost, parents, atm, ncomp::Int)
         end
     end
 
-    groups = Dict{Int32,Vector{Int}}()
+    comp_parents = [Int32[] for _ in 1:ncomp]
+    id_comps = Dict{Int32,Vector{Int}}()
     for c in 1:ncomp
-        (atm[c] || isempty(parents[c])) && continue
-        live = Int32[]
+        atm[c] && continue
         for id in parents[c]
-            id in doomed || push!(live, id)
-        end
-        if isempty(live)
-            comp_tag[c] = TAG_ATM
-            continue
-        end
-        keep = minimum(live)
-        if length(live) > 1
-            merged[c] = true
-        end
-        comp_tag[c] = keep
-        push!(get!(groups, keep, Int[]), c)
-    end
-
-    # Non-min parents of a merge are not kept. A component that still
-    # claimed one of them gets a fresh id (split away from the merge).
-    absorbed = Set{Int32}()
-    for c in 1:ncomp
-        merged[c] || continue
-        keep = comp_tag[c]
-        for id in parents[c]
-            (id == keep || id in doomed) && continue
-            push!(absorbed, id)
+            id in doomed && continue
+            push!(comp_parents[c], id)
+            push!(get!(id_comps, id, Int[]), c)
         end
     end
 
-    meta = Dict{Int32,Tuple{Int8,Float64,Float64}}()
-    for id in absorbed
-        cs = pop!(groups, id, nothing)
-        cs === nothing && continue
-        row = _live_bubble(foam, id)
-        r = row === nothing ? 1.0 : row.ratio
-        for c in cs
-            nid = _alloc_bubble_id!(foam)
-            comp_tag[c] = nid
-            meta[nid] = (Int8(2), r, 0.0)
-        end
-    end
-
-    for (id, cs) in groups
-        row = _live_bubble(foam, id)
-        r = row === nothing ? 1.0 : row.ratio
-        vr = row === nothing ? 0.0 : row.V_ref
-        css = sort(cs)
-        if length(css) == 1
-            c = css[1]
-            comp_tag[c] = id
-            meta[id] = (merged[c] ? Int8(2) : Int8(1), r, vr)
-        else
-            for (k, c) in enumerate(css)
-                cid = k == 1 ? id : _alloc_bubble_id!(foam)
-                comp_tag[c] = cid
-                meta[cid] = (Int8(2), r, vr)
+    seen = falses(ncomp)
+    groups = Tuple{Vector{Int32},Float64,Float64}[]
+    for c0 in 1:ncomp
+        seen[c0] && continue
+        isempty(comp_parents[c0]) && continue
+        comps = Int[]
+        olds = Int32[]
+        old_seen = Set{Int32}()
+        stack = [c0]
+        seen[c0] = true
+        while !isempty(stack)
+            c = pop!(stack)
+            push!(comps, c)
+            for id in comp_parents[c]
+                id in old_seen && continue
+                push!(old_seen, id)
+                push!(olds, id)
+                for c2 in id_comps[id]
+                    seen[c2] && continue
+                    seen[c2] = true
+                    push!(stack, c2)
+                end
             end
         end
+        sort!(comps)
+        sort!(olds)
+        if length(olds) == 1
+            row = _live_bubble(foam, olds[1])
+            ratio = row === nothing ? 0.0 : row.ratio
+            sum_vr = row === nothing ? 0.0 : row.V_ref
+        else
+            sum_vr = 0.0
+            sum_rvr = 0.0
+            for id in olds
+                row = _live_bubble(foam, id)
+                row === nothing && continue
+                sum_vr += row.V_ref
+                sum_rvr += row.ratio * row.V_ref
+            end
+            if sum_vr > 0
+                ratio = sum_rvr / sum_vr
+            else
+                row = _live_bubble(foam, olds[1])
+                ratio = row === nothing ? 0.0 : row.ratio
+            end
+        end
+        keep = olds[1]
+        new_ids = Int32[]
+        for (k, c) in enumerate(comps)
+            cid = k == 1 ? keep : _alloc_bubble_id!(foam)
+            comp_tag[c] = cid
+            push!(new_ids, cid)
+        end
+        push!(groups, (new_ids, ratio, sum_vr))
     end
-    return comp_tag, meta
+    return comp_tag, groups
 end
 
 function _tag_interface!(flags, tag, comp, Nx, Ny, Nz)
@@ -851,7 +853,7 @@ function _tag_interface!(flags, tag, comp, Nx, Ny, Nz)
     return nothing
 end
 
-function _commit_rows!(foam::FoamHost, meta, N::Int)
+function _commit_rows!(foam::FoamHost, groups, N::Int)
     nb = length(foam.bubbles)
     vol = zeros(Float64, nb)
     tag = foam.tag
@@ -864,15 +866,25 @@ function _commit_rows!(foam::FoamHost, meta, N::Int)
         vol[t] += 1 - ϕn
     end
     used = falses(nb)
-    for (id, (kind, r, vr)) in meta
-        i = Int(id)
-        V = vol[i]
-        if !(V > 0)
-            continue
+    for (new_ids, ratio, sum_vr) in groups
+        live = Int32[]
+        for id in new_ids
+            i = Int(id)
+            1 <= i <= nb && vol[i] > 0 && push!(live, id)
         end
-        used[i] = true
-        # kind 2: merge or split. V_ref = this child's V, not the parent's.
-        foam.bubbles[i] = kind == Int8(1) ? Bubble(V, vr, r, false) : Bubble(V, V, r, false)
+        isempty(live) && continue
+        sumV = 0.0
+        for id in live
+            sumV += vol[Int(id)]
+        end
+        nchild = length(live)
+        for id in live
+            i = Int(id)
+            V = vol[i]
+            vr = nchild == 1 ? sum_vr : sum_vr * V / sumV
+            used[i] = true
+            foam.bubbles[i] = Bubble(V, vr, ratio, false)
+        end
     end
     for i in 1:nb
         used[i] && continue
@@ -895,7 +907,7 @@ function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
         return nothing
     end
     parents, atm = _collect_parents(foam, ncomp, N)
-    comp_tag, meta = _assign_components!(foam, parents, atm, ncomp)
+    comp_tag, groups = _assign_components!(foam, parents, atm, ncomp)
     comp = foam.component
     tag = foam.tag
     for n in 1:N
@@ -904,7 +916,7 @@ function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
         tag[n] = comp_tag[c]
     end
     _tag_interface!(foam.flags, tag, comp, Nx, Ny, Nz)
-    _commit_rows!(foam, meta, N)
+    _commit_rows!(foam, groups, N)
     return nothing
 end
 

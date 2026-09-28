@@ -898,3 +898,150 @@ end
     @test R_f > R_i
     @test bubble_ids(model) == [id]
 end
+
+function _blank_foam(Nx, Ny, Nz)
+    foam = LatticeBoltzmann.FoamHost{Float32}(Nx * Ny * Nz)
+    fill!(foam.flags, TYPE_F)
+    fill!(foam.ϕ, one(Float32))
+    return foam
+end
+
+function _paint_gas!(foam, Nx, Ny, cells, id)
+    for (x, y, z) in cells
+        n = x + y * Nx + z * Nx * Ny + 1
+        foam.flags[n] = TYPE_G
+        foam.ϕ[n] = 0
+        foam.tag_prev[n] = Int32(id)
+    end
+    return nothing
+end
+
+function _put_row!(foam, id, V, V_ref, ratio)
+    while length(foam.bubbles) < id
+        push!(foam.bubbles, nothing)
+    end
+    foam.bubbles[id] = LatticeBoltzmann.Bubble(V, V_ref, ratio, false)
+    return nothing
+end
+
+function _live_rows(foam)
+    out = Tuple{Int,LatticeBoltzmann.Bubble}[]
+    for (i, row) in enumerate(foam.bubbles)
+        row === nothing && continue
+        push!(out, (i, row))
+    end
+    return out
+end
+
+function _liquid_tags_are_zero(foam)
+    for i in eachindex(foam.tag)
+        (foam.flags[i] & TYPE_SU) == TYPE_F || continue
+        foam.tag[i] == 0 || return false
+    end
+    return true
+end
+
+# Host retag only. Ids 5 and 2 touch along x; the survivor is 2, not a new id.
+@testset "merge keeps min_id_not_upstream" begin
+    Nx, Ny, Nz = 10, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    _paint_gas!(foam, Nx, Ny, [(2, y, z), (3, y, z)], 5)
+    _paint_gas!(foam, Nx, Ny, [(4, y, z), (5, y, z)], 2)
+    _put_row!(foam, 5, 1.0, 4.0, 1.0)
+    _put_row!(foam, 2, 1.0, 4.0, 3.0)
+    before = 1.0 * 4.0 + 3.0 * 4.0
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    rows = _live_rows(foam)
+    @test length(rows) == 1
+    id, row = only(rows)
+    @test id == 2
+    @test row.ratio == (1.0 * 4.0 + 3.0 * 4.0) / (4.0 + 4.0)
+    @test row.V_ref == 8.0
+    @test row.ratio * row.V_ref == before
+    @test foam.bubbles[5] === nothing
+    @test _liquid_tags_are_zero(foam)
+    for x in (2, 3, 4, 5)
+        @test foam.tag[x + y * Nx + z * Nx * Ny + 1] == Int32(2)
+    end
+end
+
+@testset "split copies ratio and rescales V_ref" begin
+    Nx, Ny, Nz = 10, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    # One cell, a liquid wall, then two cells. Parent V_ref is not Σ V.
+    _paint_gas!(foam, Nx, Ny, [(2, y, z)], 3)
+    _paint_gas!(foam, Nx, Ny, [(4, y, z), (5, y, z)], 3)
+    _put_row!(foam, 3, 9.0, 6.0, 2.0)
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    rows = _live_rows(foam)
+    @test length(rows) == 2
+    @test any(r -> r[1] == 3, rows)
+    @test all(r -> r[2].ratio == 2.0, rows)
+    @test sum(r -> r[2].V_ref, rows) == 6.0
+    @test sum(r -> r[2].ratio * r[2].V_ref, rows) == 2.0 * 6.0
+    small = only(r for r in rows if r[2].V == 1.0)
+    large = only(r for r in rows if r[2].V == 2.0)
+    @test small[2].V_ref == 6.0 * 1.0 / 3.0
+    @test large[2].V_ref == 6.0 * 2.0 / 3.0
+    @test _liquid_tags_are_zero(foam)
+end
+
+@testset "erased bubble drops its row" begin
+    Nx, Ny, Nz = 10, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    keep = [(2, y, z), (3, y, z)]
+    gone = [(6, y, z), (7, y, z)]
+    _paint_gas!(foam, Nx, Ny, keep, 1)
+    _paint_gas!(foam, Nx, Ny, gone, 2)
+    for (x, yy, zz) in gone
+        n = x + yy * Nx + zz * Nx * Ny + 1
+        foam.flags[n] = TYPE_F
+        foam.ϕ[n] = 1
+    end
+    _put_row!(foam, 1, 2.0, 5.0, 1.5)
+    _put_row!(foam, 2, 2.0, 5.0, 9.0)
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    rows = _live_rows(foam)
+    @test length(rows) == 1
+    id, row = only(rows)
+    @test id == 1
+    @test row.ratio == 1.5
+    @test row.V_ref == 5.0
+    @test foam.bubbles[2] === nothing
+    @test _liquid_tags_are_zero(foam)
+    for (x, yy, zz) in gone
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == 0
+    end
+end
+
+@testset "bubble joined to atmosphere is dropped" begin
+    Nx, Ny, Nz = 12, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    joined = [(2, y, z), (3, y, z)]
+    atm = [(4, y, z), (5, y, z)]
+    spectator = [(8, y, z), (9, y, z)]
+    _paint_gas!(foam, Nx, Ny, joined, 1)
+    _paint_gas!(foam, Nx, Ny, atm, -1)
+    _paint_gas!(foam, Nx, Ny, spectator, 2)
+    _put_row!(foam, 1, 2.0, 4.0, 1.5)
+    _put_row!(foam, 2, 2.0, 7.0, 2.5)
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    rows = _live_rows(foam)
+    @test length(rows) == 1
+    id, row = only(rows)
+    @test id == 2
+    @test row.ratio == 2.5
+    @test row.V_ref == 7.0
+    @test foam.bubbles[1] === nothing
+    for (x, yy, zz) in vcat(joined, atm)
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(-1)
+    end
+    for (x, yy, zz) in spectator
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(2)
+    end
+    @test _liquid_tags_are_zero(foam)
+end
