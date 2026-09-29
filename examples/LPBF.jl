@@ -1,5 +1,6 @@
 # 316L LPBF single track on input/powder_bed.h5.
 # 200 W, 100 µm 1/e² spot, 1 m/s. Plate + powder come from the HDF5 bed.
+# Process numbers are loaded from input/ (material_316L, LPBF_build, LPBF_laser, LPBF_powder).
 # Heat: PLIC + Fresnel (multi-bounce). Evaporation, recoil, radiation, gravity.
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
 # σ stays the physical 1.6 N/m; n_hydro shortens the flow step so σ_lat stays small.
@@ -21,56 +22,28 @@ using Logging
 @assert SURFACE && TEMPERATURE
 start_run_log!("output_LPBF")
 
-# --- user: scan ---
-n_layers      = 1          # one LPBF track
-bidirectional = false      # always x0 → x1
-si_dwell      = 0.0u"s"
-si_freeze     = 2.0e-3u"s" # laser off; a few pool diffusion times, not the weld's 0.5 s
-use_powder    = false      # powder is already in the HDF5 bed, not a jet
+# Process settings. Edit the files in input/; names stay in this scope.
+# LPBF_build.jl is loaded after the bed, because si_gas uses bed.dz.
+const input_dir = joinpath(@__DIR__, "..", "input")
+include(joinpath(input_dir, "material_316L.jl"))
+include(joinpath(input_dir, "LPBF_laser.jl"))
+include(joinpath(input_dir, "LPBF_powder.jl"))
 
 # The grid is the DEM file (one domain cell per file cell). This bed is a
 # short track, about 2.1 × 0.53 × 0.35 mm. Plate is file z = 41 (~0.20 mm);
 # powder sits on it through the top layer.
-const bed_path = joinpath(@__DIR__, "..", "input", "powder_bed.h5")
+const bed_path = joinpath(input_dir, "powder_bed.h5")
 isfile(bed_path) || error("LPBF example needs $bed_path")
 const bed = read_powder_bed(bed_path)
-si_dx = bed.dx * u"m"
-si_Lx = size(bed.phi, 1) * bed.dx * u"m"
-si_Ly = size(bed.phi, 2) * bed.dy * u"m"
+si_dx = bed.dx * u"m"                   # cell size (the file's dx)
+si_Lx = size(bed.phi, 1) * bed.dx * u"m"  # domain length, from the file
+si_Ly = size(bed.phi, 2) * bed.dy * u"m"  # domain width, from the file
 zsub  = max(1, substrate_top(bed))
-si_H  = zsub * bed.dz * u"m"
-si_gas = 40 * bed.dz * u"m"            # ~0.20 mm of gas above the powder
-si_end_margin = 0.15e-3u"m"            # a bit more than the 50 µm beam radius
+si_H  = zsub * bed.dz * u"m"            # substrate thickness, from the file
+include(joinpath(input_dir, "LPBF_build.jl"))
 
-si_ρ      = 8000u"kg/m^3"
-si_cp     = 500u"J/kg/K"
-si_cp_sT  = 0.20u"J/kg/K^2"             # cp(T) = cp + cpT (T - Tm)
-si_cp_lT  = 0.08u"J/kg/K^2"
-# k(T) = k(Tm) + kT (T - Tm). k_s is at Tm so k(T_init) stays ~15 W/m/K.
-si_Tm     = 1673.0u"K"
-si_T_init = 300.0u"K"
-si_k_sT   = 0.013u"W/m/K^2"
-si_k_lT   = 0.005u"W/m/K^2"
-si_k_s    = 15.0u"W/m/K" + si_k_sT * (si_Tm - si_T_init)
-si_k_l    = 30.0u"W/m/K"
-si_Lheat  = 2.8e5u"J/kg"
-si_Lv     = 7.45e6u"J/kg"
-si_Tv     = 3086.0u"K"
-si_M      = 0.0558u"kg/mol"
-si_K0     = 1.0e-10u"m^2"
-si_P      = 200.0u"W"                   # typical 316L LPBF single track
-si_h_sub  = 2.0e4u"W/m^2/K"             # Robin backing; ∞ was Dirichlet T_init
-si_d_spot = 100.0e-6u"m"                # 1/e² diameter, ~70–120 µm in LPBF
-si_v      = 1.0u"m/s"
-si_δ      = 30.0e-6u"m"                 # absorption depth, about one d50
-si_mdot   = 0.0u"g/minute"              # no powder
-si_eta    = 1.0
-si_g      = 9.81u"m/s^2"
-si_β      = 1.2e-4u"K^-1"               # volumetric expansion; lattice β = β_SI * K
-# 316L near Tm is ~1.6 N/m and dσ/dT ~ −4.3e-4 N/m/K. Lattice CSF cannot
-# hold that at this Δx,Δt (σ_lat would be O(1)). Capped after Units.
-si_σ_phys = 1.6u"N/m"
-si_σT_phys = -4.3e-4u"N/m/K"
+# Lattice CSF cannot hold the physical σ at this Δx, Δt (σ_lat would be O(1)).
+# Capped after Units.
 σ_lat_cap = 0.03f0
 q_max     = 0.04f0
 
@@ -118,9 +91,6 @@ n_layers >= 1 || throw(ArgumentError("n_layers must be ≥ 1"))
 
 α_l_si = si_k_l / (si_ρ * si_cp)
 α_s_si = si_k_s / (si_ρ * si_cp)
-si_ν_l = 6.0e-7u"m^2/s"                 # liquid 316L; KBC is what makes this ω survivable
-si_ν_s = 1.0e-4u"m^2/s"
-si_ν_lT = -2.0e-10u"m^2/s/K"
 lbm_α_true = 0.1
 # Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx.
 # paint_powder_bed! strides with the file's Nx, Ny, so the domain must match.
@@ -137,7 +107,7 @@ if bed !== nothing
 end
 s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
 lbm_u = 0.05
-si_u = (lbm_u * m / s) * u"m/s"
+si_u = (lbm_u * m / s) * u"m/s"       # reference speed that sets Δt; follows si_dx and si_k_l
 
 units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
               K=ustrip(u"K", si_Tm), cp=si_cp)
@@ -145,7 +115,7 @@ units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
 w_m    = 0.5 * ustrip(u"m", si_d_spot)
 I_peak = 2 * ustrip(u"W", si_P) / (π * w_m^2)
 δ_m    = ustrip(u"m", si_δ)
-A0     = fresnel_absorptance(1.0f0, 3.27f0, 4.48f0)
+A0     = fresnel_absorptance(1.0f0, fresnel_n, fresnel_k)
 nskin  = max(3, round(Int, δ_m / m))
 Q_si   = A0 * I_peak / (nskin * m)
 Q_full = Float32(lbm_Q(units, Q_si * u"W/m^3"))
@@ -172,8 +142,8 @@ kg_cell = ρ_m * m^3
 n_hydro = max(1, ceil(Int, sqrt(max(σ_lat_phys, 0.0) / Float64(σ_lat_cap))))
 # An even count reuses one temperature slot, so the pool does not conduct.
 iseven(n_hydro) && (n_hydro += 1)
-si_σ  = si_σ_phys
-si_σT = si_σT_phys
+si_σ  = si_σ_phys                      # surface tension passed to the model; edit si_σ_phys
+si_σT = si_σT_phys                      # dσ/dT passed to the model; edit si_σT_phys
 
 model = Model(Nx, Ny, Nz, units;
               ν = si_ν_l,
@@ -191,8 +161,8 @@ model = Model(Nx, Ny, Nz, units;
               Ts = si_Tm, Tl = si_Tm, K0 = si_K0,
               latent_v = si_Lv, T_v = si_Tv, M = si_M,
               T_avg = Float32(lbm_T(units, si_Tm)),
-              emissivity = 0.4, T_rad = si_T_init,
-              powder_τ = 0.0u"s", powder_T = si_T_init,
+              emissivity = emissivity, T_rad = si_T_init,
+              powder_τ = powder_τ, powder_T = si_T_init,
               n_hydro = n_hydro,
               backend = CUDABackend())
 
@@ -219,7 +189,7 @@ nsteps_total = n_layers * nsteps_pass + max(0, n_layers - 1) * nsteps_dwell + ns
 qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))
 # Frame spacing from one pass, not the whole job — otherwise n_layers=3
 # writes 3× fewer VTK/progress samples and the beam looks 3× faster.
-every   = max(qevery, max(1, nsteps_pass ÷ 40))
+every   = max(qevery, max(1, nsteps_pass ÷ 80))
 dx_noz  = Float32(max(0.5e-3 / m, 2 * w_cells))   # ≥0.5 mm along the track
 z_noz   = Float32(Nz) - 1.4f0
 z_aim   = Float32(Hfill)

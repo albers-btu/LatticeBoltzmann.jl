@@ -1,5 +1,6 @@
 # 316L directed-energy deposition: one weld line, coaxial powder, clean plate.
 # 1000 W, 2 mm 1/e² spot, 10 mm/s, 8 g/min. No powder-bed file.
+# Process numbers are loaded from input/ (material_316L, DED_build, DED_laser, DED_powder).
 # Heat: PLIC + Fresnel (multi-bounce). Evaporation, recoil, radiation, gravity.
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
 # σ stays the physical 1.6 N/m; n_hydro shortens the flow step so σ_lat stays small.
@@ -27,53 +28,14 @@ using Logging
 @assert SURFACE && TEMPERATURE
 start_run_log!("output_DED")
 
-# --- user: scan ---
-n_layers      = 1          # one weld line
-bidirectional = false      # always x0 → x1
-si_dwell      = 0.0u"s"
-si_freeze     = 0.2u"s"    # laser and powder off; the bead freezes
-use_powder    = true
+# Process settings. Edit the files in input/; names stay in this scope.
+const input_dir = joinpath(@__DIR__, "..", "input")
+include(joinpath(input_dir, "material_316L.jl"))
+include(joinpath(input_dir, "DED_build.jl"))
+include(joinpath(input_dir, "DED_laser.jl"))
+include(joinpath(input_dir, "DED_powder.jl"))
 
-# --- user: box / resolution (SI; Δx does not change the box or the spot) ---
-# 12.8 × 6.4 mm, 3.2 mm plate, 2.4 mm of gas for the bead and the coaxial
-# flight. Refine with `si_dx` only. This example does not read a powder bed.
-si_Lx     = 12.8e-3u"m"
-si_Ly     = 6.4e-3u"m"
-si_H      = 3.2e-3u"m"                  # bare substrate (z = 2 … Hfill)
-si_gas    = 2.4e-3u"m"                  # bead plus nozzle flight
-si_dx     = 80.0e-6u"m"
-si_end_margin = 2.0e-3u"m"              # spot radius is 1 mm; stay off the walls
-
-si_ρ      = 8000u"kg/m^3"
-si_cp     = 500u"J/kg/K"
-si_cp_sT  = 0.20u"J/kg/K^2"             # cp(T) = cp + cpT (T - Tm)
-si_cp_lT  = 0.08u"J/kg/K^2"
-# k(T) = k(Tm) + kT (T - Tm). k_s is at Tm so k(T_init) stays ~15 W/m/K.
-si_Tm     = 1673.0u"K"
-si_T_init = 300.0u"K"
-si_k_sT   = 0.013u"W/m/K^2"
-si_k_lT   = 0.005u"W/m/K^2"
-si_k_s    = 15.0u"W/m/K" + si_k_sT * (si_Tm - si_T_init)
-si_k_l    = 30.0u"W/m/K"
-si_Lheat  = 2.8e5u"J/kg"
-si_Lv     = 7.45e6u"J/kg"
-si_Tv     = 3086.0u"K"
-si_M      = 0.0558u"kg/mol"
-si_K0     = 1.0e-10u"m^2"
-si_P      = 1000.0u"W"                  # 100 J/mm at 10 mm/s
-si_h_sub  = 2.0e4u"W/m^2/K"             # Robin backing; ∞ was Dirichlet T_init
-si_d_spot = 2.0e-3u"m"                  # 1/e² diameter, coaxial DED
-si_v      = 10.0e-3u"m/s"
-si_δ      = 0.15e-3u"m"                 # numerical skin on a bare plate
-si_mdot   = 8.0u"g/minute"              # nozzle feed; the pool keeps what melts
-si_d_powder = 2.4e-3u"m"                # 1/e² diameter of the coaxial stream
-si_v_powder = 2.0u"m/s"
-si_eta    = 1.0                         # gas cap sized for the full feed
-si_g      = 9.81u"m/s^2"
-si_β      = 1.2e-4u"K^-1"               # volumetric expansion; lattice β = β_SI * K
-# 316L near Tm is ~1.6 N/m and dσ/dT ~ −4.3e-4 N/m/K.
-si_σ_phys = 1.6u"N/m"
-si_σT_phys = -4.3e-4u"N/m/K"
+# Lattice caps. n_hydro brings the physical σ down so σ_lat stays ≤ σ_lat_cap.
 σ_lat_cap = 0.03f0
 q_max     = 0.04f0
 
@@ -120,9 +82,6 @@ n_layers >= 1 || throw(ArgumentError("n_layers must be ≥ 1"))
 
 α_l_si = si_k_l / (si_ρ * si_cp)
 α_s_si = si_k_s / (si_ρ * si_cp)
-si_ν_l = 6.0e-7u"m^2/s"                 # liquid 316L; KBC is what makes this ω survivable
-si_ν_s = 1.0e-4u"m^2/s"
-si_ν_lT = -2.0e-10u"m^2/s/K"
 lbm_α_true = 0.1
 # Pad cells fix Δx through Units(si_H; x=L). Nx, Ny follow the same Δx so the
 # SI box and the SI spot stay put when you refine.
@@ -133,7 +92,7 @@ Ny    = max(16, round(Int, ustrip(u"m", si_Ly) / m))
 Hfill = L + 2
 s = lbm_α_true * m^2 / ustrip(u"m^2/s", α_l_si)
 lbm_u = 0.05
-si_u = (lbm_u * m / s) * u"m/s"
+si_u = (lbm_u * m / s) * u"m/s"       # reference speed that sets Δt; follows si_dx and si_k_l
 
 units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
               K=ustrip(u"K", si_Tm), cp=si_cp)
@@ -141,7 +100,7 @@ units = Units(si_H, si_u, si_ρ; x=L, u=lbm_u, ρ=1, T=Float32,
 w_m    = 0.5 * ustrip(u"m", si_d_spot)
 I_peak = 2 * ustrip(u"W", si_P) / (π * w_m^2)
 δ_m    = ustrip(u"m", si_δ)
-A0     = fresnel_absorptance(1.0f0, 3.27f0, 4.48f0)
+A0     = fresnel_absorptance(1.0f0, fresnel_n, fresnel_k)
 nskin  = max(3, round(Int, δ_m / m))
 Q_si   = A0 * I_peak / (nskin * m)
 Q_full = Float32(lbm_Q(units, Q_si * u"W/m^3"))
@@ -166,8 +125,8 @@ n_hydro = max(1, ceil(Int, sqrt(max(σ_lat_phys, 0.0) / Float64(σ_lat_cap))))
 # first step the liquid does not conduct into the plate and stays molten.
 # An odd count alternates the slot and heat flows. σ_lat is still under the cap.
 iseven(n_hydro) && (n_hydro += 1)
-si_σ  = si_σ_phys
-si_σT = si_σT_phys
+si_σ  = si_σ_phys                      # surface tension passed to the model; edit si_σ_phys
+si_σT = si_σT_phys                      # dσ/dT passed to the model; edit si_σT_phys
 
 model = Model(Nx, Ny, Nz, units;
               ν = si_ν_l,
@@ -185,8 +144,8 @@ model = Model(Nx, Ny, Nz, units;
               Ts = si_Tm, Tl = si_Tm, K0 = si_K0,
               latent_v = si_Lv, T_v = si_Tv, M = si_M,
               T_avg = Float32(lbm_T(units, si_Tm)),
-              emissivity = 0.4, T_rad = si_T_init,
-              powder_τ = 2.0e-3u"s", powder_T = si_T_init,
+              emissivity = emissivity, T_rad = si_T_init,
+              powder_τ = powder_τ, powder_T = si_T_init,
               n_hydro = n_hydro,
               backend = CUDABackend())
 
@@ -211,7 +170,7 @@ nsteps_freeze = si_freeze > 0u"s" ?
 nsteps_total = n_layers * nsteps_pass + max(0, n_layers - 1) * nsteps_dwell + nsteps_freeze
 
 qevery  = max(1, round(Int, 0.25f0 / max(v_lat, Float32(1e-8))))
-every   = max(qevery, max(1, nsteps_pass ÷ 40))
+every   = max(qevery, max(1, nsteps_pass ÷ 80))
 z_noz   = Float32(Nz) - 1.4f0
 z_aim   = Float32(Hfill)
 σlat    = model.domains[1].σ
