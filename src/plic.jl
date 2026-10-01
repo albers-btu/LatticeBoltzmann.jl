@@ -214,10 +214,16 @@ end
 
 @static if FOAM
 # σ == 0 is a pressurized bubble, not ambient. Do not return 1.
+# Floor 0.8: a floor of 0.2 rarefied the film to liquid ρ ≈ 0.56. With
+# the floor at 0.6 and D = 0.02 the same films still fell to ρ ≈ 0.74
+# once a pore had taken on far more mass than its volume (ratio ~ 140)
+# and then pinched. Ceiling 1.6 limits that push. The open mold still
+# freezes: its rebound sits near ρb ≈ 1.5 and curvature brings the
+# imposed density back inside this window.
 @inline function gas_density_plic(σ::T, ϕ, ϕ0::T, x, y, z, Nx, Ny, Nz, ρb::T, Π::T) where {T}
-    σ == zero(T) && return clamp(ρb - T(3) * Π, T(0.2), T(2))
+    σ == zero(T) && return clamp(ρb - T(3) * Π, T(0.8), T(1.6))
     phij = gather_phi_d3q27(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
     κ = calculate_curvature(phij)
-    return clamp(ρb - T(6) * σ * κ - T(3) * Π, T(0.2), T(2))
+    return clamp(ρb - T(6) * σ * κ - T(3) * Π, T(0.8), T(1.6))
 end
 end

@@ -142,6 +142,11 @@ end
     elseif (flagsn & TYPE_SU) == TYPE_G
         u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
         ϕn = zero(CType)
+        # Unset fi is 0. The free-surface reconstruction then does
+        # feq - 0 + feq and the interface picks up a spurious velocity,
+        # which advects heat into the melt under the surface. Local only:
+        # store_feq! also writes the neighbor and pinches the pore.
+        store_feq_local!(fi, n, one(CType), zero(CType), zero(CType), zero(CType), w, c, N)
     else
         if (flagsn & TYPE_SU) == TYPE_I && (ϕn < 0 || ϕn > 1)
             ϕn = CType(0.5)
@@ -156,8 +161,9 @@ end
 
     @static if TEMPERATURE
         if (flagsn & TYPE_SU) == TYPE_G
-            store_geq!(gi, n, x, y, z, T[n], zero(CType), zero(CType), zero(CType),
-                       N, Nx, Ny, Nz, Val(false), CType)
+            # store_geq! writes the neighbor through store_pair. The melt
+            # already stored its own geq there.
+            store_geq_local!(gi, n, T[n], N)
         end
     end
 

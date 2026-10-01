@@ -117,6 +117,21 @@ end
     return nothing
 end
 
+# Same equilibrium as store_feq!, written only into this cell. store_pair also
+# writes the neighbor. On a gas cell that races with the interface cell's own
+# equilibrium and pinches the pore. The free-surface rule reads f_out from the
+# gas cell, so those local slots have to be feq rather than 0.
+@inline function store_feq_local!(
+    fi, n, ρn::CType, ux::CType, uy::CType, uz::CType,
+    w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}}, N::Int
+) where {Q, CType}
+    uu = CType(1.5) * (ux * ux + uy * uy + uz * uz)
+    @inbounds for i in 1:Q
+        fi[f_index(n, i, N)] = eltype(fi)(feq(w[i], ρn, ux, uy, uz, uu, c[i], CType))
+    end
+    return nothing
+end
+
 @inline function equilibrium_boundary!(
     t_odd::Val{odd}, fi, ρ, u, w, c, fx, fy, fz,
     N, Nx, Ny, Nz, n, x, y, z, ::Type{CType}

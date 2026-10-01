@@ -11,7 +11,7 @@ const EQUILIBRIUM_BOUNDARIES = true
 const MOVING_BOUNDARIES      = true
 const FORCE_FIELD            = true
 const TEMPERATURE            = true
-const FOAM                   = false # dissolved-gas bubbles; requires SURFACE
+const FOAM                   = true # dissolved-gas bubbles; requires SURFACE
 
 const UPDATE_FIELDS          = SURFACE
 const APPLY_FORCE            = VOLUME_FORCE || FORCE_FIELD || TEMPERATURE

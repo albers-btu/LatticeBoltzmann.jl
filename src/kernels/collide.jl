@@ -73,8 +73,12 @@ using KernelAbstractions
             ux *= invρ; uy *= invρ; uz *= invρ
             @static if TEMPERATURE
                 ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
+                uxT = ux; uyT = uy; uzT = uz
+                if K0 > zero(CType) && is_solid_fraction(fs[n])
+                    uxT = zero(CType); uyT = zero(CType); uzT = zero(CType)
+                end
                 fxn, fyn, fzn, _ = collide_temperature!(
-                    t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
+                    t_odd, gi, T, Qin, hT, flags, flagsn, fs, uxT, uyT, uzT,
                     fxn, fyn, fzn, fx, fy, fz,
                     ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, one(CType))
             end
@@ -508,8 +512,14 @@ end # not SURFACE
                 acc_add!(Eacc, EACC_POWDER, Sn * ρn * sensible_H(T_p, γ_s))
                 acc_add!(Macc, MACC_POWDER, Sn * ρn)
             end
+            # Solidified cells still hold the population momentum that Darcy
+            # has not killed yet. Conduct at rest; the force below uses ux.
+            uxT = ux; uyT = uy; uzT = uz
+            if K0 > zero(CType) && is_solid_fraction(fs[n])
+                uxT = zero(CType); uyT = zero(CType); uzT = zero(CType)
+            end
             fxn, fyn, fzn, mevap = collide_temperature!(
-                t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
+                t_odd, gi, T, Qin, hT, flags, flagsn, fs, uxT, uyT, uzT,
                 fxn, fyn, fzn, fx, fy, fz,
                 ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, fillc)
             debit != zero(CType) && (Qin[n] += debit)

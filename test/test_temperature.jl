@@ -476,7 +476,8 @@ end
     @test T ≈ Tm
     @test fl ≈ 0.3f0 / Λ
     dx, dy, dz = LatticeBoltzmann.darcy_force(1.0f0, 0.1f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 1.0f-3)
-    @test dx ≈ -0.2f0
+    # drag = ρ kills population momentum in one Guo step; 2ρ only reflects it
+    @test dx ≈ -0.1f0
     @test dy == 0 && dz == 0
     dx, dy, dz = LatticeBoltzmann.darcy_force(0.0f0, 0.1f0, 0.0f0, 0.0f0, 1.0f0, 0.1f0, 1.0f-3)
     @test abs(dx) < 1.0f-5

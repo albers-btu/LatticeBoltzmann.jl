@@ -64,8 +64,71 @@ end
     @inbounds concentration_init_body!(ci, cfield, flags, u, c0, N, Nx, Ny, Nz, Int(n))
 end
 
+# Paper eq. 27, before the concentration collide. surface_0 has already
+# staged the Henry slot drop in flux; the host parks that sum on the
+# TYPE_F rests and clears flux before this runs. What remains is the
+# liquid-side transfer, and the same Δ leaves the interface rest so the
+# bath depletes at the rate the pore grows.
+@inline function concentration_flux_body!(
+    t_odd::Val{odd}, ci, flags, tag, flux,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n,
+) where {odd}
+    flagsn = flags[n]
+    su = flagsn & TYPE_SU
+    if !(su == TYPE_I || su == TYPE_IF || su == TYPE_IG)
+        return nothing
+    end
+    CType = eltype(ci)
+    n0 = n - 1
+    x = n0 % Nx
+    y = (n0 ÷ Nx) % Ny
+    z = n0 ÷ (Nx * Ny)
+    Δ = zero(CType)
+    for k in 1:3
+        i = 2k
+        cx = ifelse(k == 1, 1, 0)
+        cy = ifelse(k == 2, 1, 0)
+        cz = ifelse(k == 3, 1, 0)
+        srcp = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+        srcm = src_index(x, y, z, -cx, -cy, -cz, Nx, Ny, Nz)
+        fp_in, fm_in = load_pair(ci, n, srcp, i, t_odd, N, CType)
+        fp_out, fm_out = load_outgoing_pair(ci, n, srcp, i, t_odd, N, CType)
+        # TYPE_IF is not TYPE_F. No ϕ weighting.
+        if (flags[srcp] & TYPE_SU) == TYPE_F
+            Δ += fm_in - fp_out
+        end
+        if (flags[srcm] & TYPE_SU) == TYPE_F
+            Δ += fp_in - fm_out
+        end
+    end
+    tag_n = tag[n]
+    if tag_n > Int32(0) && tag_n <= Int32(MAX_BUBBLES) && Δ != zero(CType)
+        acc_add!(flux, Int(tag_n), Δ)
+        # Do not subtract Δ on this cell. The shell is the Dirichlet boundary;
+        # pulling its rest in pinched an open-mold pore. The host spreads
+        # the same sum across the TYPE_F rests after this kernel.
+    end
+    return nothing
+end
+
+@kernel function concentration_flux_even_kernel!(
+    ci, @Const(flags), @Const(tag), flux,
+    N::Int, Nx::Int, Ny::Int, Nz::Int,
+)
+    n = @index(Global)
+    @inbounds concentration_flux_body!(Val(false), ci, flags, tag, flux, N, Nx, Ny, Nz, Int(n))
+end
+
+@kernel function concentration_flux_odd_kernel!(
+    ci, @Const(flags), @Const(tag), flux,
+    N::Int, Nx::Int, Ny::Int, Nz::Int,
+)
+    n = @index(Global)
+    @inbounds concentration_flux_body!(Val(true), ci, flags, tag, flux, N, Nx, Ny, Nz, Int(n))
+end
+
 @inline function concentration_body!(
-    t_odd::Val{odd}, ci, cfield, flags, u, tag, flux,
+    t_odd::Val{odd}, ci, cfield, flags, u,
     ωc::CType, q::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n,
 ) where {odd, CType}
@@ -86,34 +149,19 @@ end
     uy = CType(u[n, 2])
     uz = CType(u[n, 3])
 
-    # Rest slot does not swap. Δ is the interface-to-liquid population flux.
+    # Rest slot does not swap.
     crest = CType(ci[f_index(n, 1, N)])
     cn = crest
-    Δ = zero(CType)
-    interface = su == TYPE_I || su == TYPE_IF || su == TYPE_IG
     for k in 1:3
         i = 2k
         cx = ifelse(k == 1, 1, 0)
         cy = ifelse(k == 2, 1, 0)
         cz = ifelse(k == 3, 1, 0)
         srcp = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
-        srcm = src_index(x, y, z, -cx, -cy, -cz, Nx, Ny, Nz)
         fp_in, fm_in = load_pair(ci, n, srcp, i, t_odd, N, CType)
-        fp_out, fm_out = load_outgoing_pair(ci, n, srcp, i, t_odd, N, CType)
         cn += fp_in + fm_in
-        # TYPE_IF is not TYPE_F. No ϕ weighting.
-        if interface && (flags[srcp] & TYPE_SU) == TYPE_F
-            Δ += fm_in - fp_out
-        end
-        if interface && (flags[srcm] & TYPE_SU) == TYPE_F
-            Δ += fp_in - fm_out
-        end
     end
     cfield[n] = cn
-    tag_n = tag[n]
-    if tag_n > Int32(0) && tag_n <= Int32(MAX_BUBBLES) && Δ != zero(CType)
-        acc_add!(flux, Int(tag_n), Δ)
-    end
 
     # TYPE_IF is not pure TYPE_F.
     qn = su == TYPE_F ? q : zero(CType)
@@ -133,21 +181,21 @@ end
 end
 
 @kernel function concentration_even_kernel!(
-    ci, cfield, @Const(flags), @Const(u), @Const(tag), flux,
+    ci, cfield, @Const(flags), @Const(u),
     ωc::CType, q::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {CType}
     n = @index(Global)
-    @inbounds concentration_body!(Val(false), ci, cfield, flags, u, tag, flux, ωc, q, N, Nx, Ny, Nz, Int(n))
+    @inbounds concentration_body!(Val(false), ci, cfield, flags, u, ωc, q, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function concentration_odd_kernel!(
-    ci, cfield, @Const(flags), @Const(u), @Const(tag), flux,
+    ci, cfield, @Const(flags), @Const(u),
     ωc::CType, q::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int,
 ) where {CType}
     n = @index(Global)
-    @inbounds concentration_body!(Val(true), ci, cfield, flags, u, tag, flux, ωc, q, N, Nx, Ny, Nz, Int(n))
+    @inbounds concentration_body!(Val(true), ci, cfield, flags, u, ωc, q, N, Nx, Ny, Nz, Int(n))
 end
 
 # Tag 0 is the liquid film, not a stop. s sums one full Woo tDelta per crossing.
@@ -202,7 +250,6 @@ end
             tMaxZ += tDeltaZ
             j = src_index(xj, yj, zj, 0, 0, stepZ, Nx, Ny, Nz)
         end
-        !(s < CType(4)) && return nothing
         j0 = j - 1
         xj = j0 % Nx
         yj = (j0 ÷ Nx) % Ny
@@ -216,6 +263,9 @@ end
         elseif tg != tagn
             su = fl & TYPE_SU
             if tg > Int32(0) && (su == TYPE_I || su == TYPE_G)
+                # d is the interface gap, not the cell-center ray parameter.
+                # A hit on the step where s reaches 4 can still have d < 4
+                # once both PLIC offsets are removed (paper eq. 30).
                 δo = su == TYPE_I ? abs(plic_cube(CType(ϕ[j]), nϕ)) : zero(CType)
                 d = s - δself - δo
                 d < zero(CType) && (d = zero(CType))
@@ -223,6 +273,7 @@ end
                 return nothing
             end
         end
+        s < CType(4) || return nothing
     end
     return nothing
 end

@@ -35,7 +35,11 @@ end
 ) where {CType}
     K0 <= zero(CType) && return zero(CType), zero(CType), zero(CType)
     fl = one(CType) - fsn
-    maxd = CType(2) * ρn
+    # F = -drag u with feq at u + F/(2ρ) maps the population velocity to
+    # u' = (1 - drag/ρ) u. drag = 2ρ stores a zero half-force velocity and
+    # reflects the populations (u' = -u); that momentum advects heat while
+    # the stored speed stays ~0. drag = ρ kills the populations in one step.
+    maxd = ρn
     if fl < CType(1e-3)
         return -maxd * ux, -maxd * uy, -maxd * uz
     end

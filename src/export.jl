@@ -207,6 +207,7 @@ struct _VtkJob
     t::Int
     t_si::Float64
     dx::Float32
+    us::Float32                 # m/s per lattice velocity; Mach check divides this back out
     Nx::Int
     Ny::Int
     Nz::Int
@@ -258,7 +259,10 @@ function _vtk_write(job::_VtkJob)
         ux = _vtk_comp(host, offs.u, N, job.Nx, job.Ny, job.Nz)
         uy = _vtk_comp(host, offs.u + 1, N, job.Nx, job.Ny, job.Nz)
         uz = _vtk_comp(host, offs.u + 2, N, job.Nx, job.Ny, job.Nz)
-        umax = maximum(hypot.(ux, uy, uz))
+        # Packed u is in m/s. The 0.15 / 0.4 limits are lattice speeds.
+        umax_si = maximum(hypot.(ux, uy, uz))
+        scale = job.us > 0 ? job.us : 1.0f0
+        umax = umax_si / scale
         if umax > 0.4f0
             @warn "max |u|=$umax at t=$(job.t) exceeds 0.4 (cₛ = $(1/sqrt(3))); unstable"
         elseif umax > 0.15f0
@@ -434,7 +438,7 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
     if !use_async
         host = Array{Float32}(undef, N * ncomp)
         copyto!(host, @view(dev[1:(N * ncomp)]))
-        _vtk_write(_VtkJob(dir, t, t_si, dx, Nx, Ny, Nz, host, offs, 0, nothing, nothing))
+        _vtk_write(_VtkJob(dir, t, t_si, dx, us, Nx, Ny, Nz, host, offs, 0, nothing, nothing))
         return nothing
     end
 
@@ -458,6 +462,6 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
     done = CUDA.CuEvent()
     CUDA.record(done, cs)
     _VTK_COPY_EV[] = done
-    put!(_VTK_JOBS, _VtkJob(dir, t, t_si, dx, Nx, Ny, Nz, host, offs, slot_i, done, CUDA.context()))
+    put!(_VTK_JOBS, _VtkJob(dir, t, t_si, dx, us, Nx, Ny, Nz, host, offs, slot_i, done, CUDA.context()))
     return nothing
 end

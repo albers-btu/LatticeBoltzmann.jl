@@ -28,9 +28,12 @@ function set_foam!(model; D=0, k_H=0, k_Π=0, q=0, V_m=0, γ_b=1, c0=0, ρ_liqui
 end
 
 """
-One bubble row. `frozen` is stored and is not read.
+One bubble row. `frozen` is set when every interface cell of this id is
+solid (`is_solid_fraction`: liquid fraction below 10⁻³) and is never cleared.
+A frozen row keeps its ratio and its id: dissolved flux is ignored, it does
+not merge, and gas that touches atmosphere does not delete it.
 The imposed density is `ratio * (V_ref / V)^γ_b`.
-Dissolved mass adds `Δm * V_m * ρ_liquid / V_ref` to `ratio`.
+While the row is liquid, dissolved mass adds `Δm * V_m * ρ_liquid / V_ref` to `ratio`.
 """
 struct Bubble
     V::Float64
@@ -199,6 +202,15 @@ function bubble_ratio(model, id)
     return _require_bubble(model, id).ratio
 end
 
+"""
+    bubble_frozen(model, id) -> Bool
+
+True after every interface cell of `id` has solidified. Stays true.
+"""
+function bubble_frozen(model, id)
+    return _require_bubble(model, id).frozen
+end
+
 function _require_bubble(model, id)
     _require_foam(model)
     @static if FOAM
@@ -284,24 +296,47 @@ end
 
 """
     poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1) -> Vector{NTuple{3,Float64}}
+    poisson_disk_centers(Nx, Ny, Nz, rmin; seed=1, margin=0) -> Vector{NTuple{3,Float64}}
 
-Bridson sample in the periodic box `[0, Nx) × [0, Ny) × [0, Nz)`.
-Centers are at least `rmin` apart, including across the periodic faces.
-For nuclei of radius `R`, pass `rmin >= 2R + 1` so the radius-`R` shells
-do not intersect. Does not write flags or the bubble table.
+Bridson sample. Centers are at least `rmin` apart. The five-argument
+method fills the periodic box `[0, Nx) × [0, Ny) × [0, Nz)` and errors
+if it cannot place `n` points. The four-argument method places as many
+as fit. `margin > 0` insets that box to `[margin, N − margin)` and drops
+the periodic images, so a closed solid wall can sit in the margin.
+For nuclei of radius `R`, pass `rmin >= 2R + 1` so the shells do not
+intersect, and `margin >= R + 2.5` so the punch stays off the wall cells.
+Does not write flags or the bubble table.
 """
-function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
+function poisson_disk_centers(Nx, Ny, Nz, rmin, n::Integer; seed=1)
+    pts = _poisson_disk_centers(Nx, Ny, Nz, rmin; seed=seed, margin=0.0, nmax=Int(n))
+    if length(pts) < Int(n)
+        error("poisson_disk_centers placed $(length(pts))/$n centers at rmin=$rmin")
+    end
+    return pts
+end
+
+function poisson_disk_centers(Nx, Ny, Nz, rmin; seed=1, margin::Real=0)
+    return _poisson_disk_centers(Nx, Ny, Nz, rmin; seed=seed, margin=Float64(margin), nmax=typemax(Int))
+end
+
+function _poisson_disk_centers(Nx, Ny, Nz, rmin; seed=1, margin::Float64, nmax::Int)
     Nx = Int(Nx); Ny = Int(Ny); Nz = Int(Nz)
-    n = Int(n)
-    n >= 0 || throw(ArgumentError("poisson_disk_centers n must be non-negative (got $n)"))
-    n == 0 && return NTuple{3,Float64}[]
+    nmax >= 0 || throw(ArgumentError("poisson_disk_centers n must be non-negative (got $nmax)"))
+    nmax == 0 && return NTuple{3,Float64}[]
     rmin = Float64(rmin)
     rmin > 0 || throw(ArgumentError("poisson_disk_centers rmin must be positive (got $rmin)"))
+    margin >= 0 || throw(ArgumentError("poisson_disk_centers margin must be non-negative (got $margin)"))
+    periodic = margin == 0
+    x0, x1 = margin, Float64(Nx) - margin
+    y0, y1 = margin, Float64(Ny) - margin
+    z0, z1 = margin, Float64(Nz) - margin
+    (x0 < x1 && y0 < y1 && z0 < z1) ||
+        throw(ArgumentError("poisson_disk_centers margin=$margin leaves no interior in $(Nx)×$(Ny)×$(Nz)"))
     rng = _MixRNG(seed)
     cell = rmin / sqrt(3.0)
-    gx = max(1, ceil(Int, Nx / cell))
-    gy = max(1, ceil(Int, Ny / cell))
-    gz = max(1, ceil(Int, Nz / cell))
+    gx = max(1, ceil(Int, (x1 - x0) / cell))
+    gy = max(1, ceil(Int, (y1 - y0) / cell))
+    gz = max(1, ceil(Int, (z1 - z0) / cell))
     grid = zeros(Int, gx, gy, gz)
     pts = NTuple{3,Float64}[]
     active = Int[]
@@ -309,20 +344,29 @@ function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
     Lx = Float64(Nx); Ly = Float64(Ny); Lz = Float64(Nz)
 
     function grid_index(p)
-        ix = _wrap_idx(floor(Int, p[1] / cell) + 1, gx)
-        iy = _wrap_idx(floor(Int, p[2] / cell) + 1, gy)
-        iz = _wrap_idx(floor(Int, p[3] / cell) + 1, gz)
-        return ix, iy, iz
+        ix = floor(Int, (p[1] - x0) / cell) + 1
+        iy = floor(Int, (p[2] - y0) / cell) + 1
+        iz = floor(Int, (p[3] - z0) / cell) + 1
+        if periodic
+            return _wrap_idx(ix, gx), _wrap_idx(iy, gy), _wrap_idx(iz, gz)
+        end
+        return clamp(ix, 1, gx), clamp(iy, 1, gy), clamp(iz, 1, gz)
     end
     function far_enough(p)
         ix, iy, iz = grid_index(p)
         for dz in -2:2, dy in -2:2, dx in -2:2
-            k = grid[_wrap_idx(ix + dx, gx), _wrap_idx(iy + dy, gy), _wrap_idx(iz + dz, gz)]
+            jx, jy, jz = ix + dx, iy + dy, iz + dz
+            if periodic
+                jx, jy, jz = _wrap_idx(jx, gx), _wrap_idx(jy, gy), _wrap_idx(jz, gz)
+            elseif !(1 <= jx <= gx && 1 <= jy <= gy && 1 <= jz <= gz)
+                continue
+            end
+            k = grid[jx, jy, jz]
             k == 0 && continue
             q = pts[k]
-            dxp = _wrap_delta(p[1] - q[1], Lx)
-            dyp = _wrap_delta(p[2] - q[2], Ly)
-            dzp = _wrap_delta(p[3] - q[3], Lz)
+            dxp = periodic ? _wrap_delta(p[1] - q[1], Lx) : p[1] - q[1]
+            dyp = periodic ? _wrap_delta(p[2] - q[2], Ly) : p[2] - q[2]
+            dzp = periodic ? _wrap_delta(p[3] - q[3], Lz) : p[3] - q[3]
             if dxp * dxp + dyp * dyp + dzp * dzp < rmin2
                 return false
             end
@@ -337,24 +381,32 @@ function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
         grid[ix, iy, iz] = k
         return k
     end
+    function inside(p)
+        return x0 <= p[1] < x1 && y0 <= p[2] < y1 && z0 <= p[3] < z1
+    end
 
-    accept!((_unit(rng) * Lx, _unit(rng) * Ly, _unit(rng) * Lz))
+    accept!((x0 + _unit(rng) * (x1 - x0), y0 + _unit(rng) * (y1 - y0), z0 + _unit(rng) * (z1 - z0)))
     ktry = 30
-    while !isempty(active) && length(pts) < n
+    while !isempty(active) && length(pts) < nmax
         ai = _pick(rng, length(active))
         base = pts[active[ai]]
         found = false
         for _try in 1:ktry
-            # Uniform direction, radius in [rmin, 2 rmin], then wrap.
+            # Uniform direction, radius in [rmin, 2 rmin].
             z = 2 * _unit(rng) - 1
             φ = 2π * _unit(rng)
             s = sqrt(max(0.0, 1 - z * z))
             rad = rmin * (1 + _unit(rng))
             cand = (
-                _wrap_pos(base[1] + rad * s * cos(φ), Nx),
-                _wrap_pos(base[2] + rad * s * sin(φ), Ny),
-                _wrap_pos(base[3] + rad * z, Nz),
+                base[1] + rad * s * cos(φ),
+                base[2] + rad * s * sin(φ),
+                base[3] + rad * z,
             )
+            if periodic
+                cand = (_wrap_pos(cand[1], Nx), _wrap_pos(cand[2], Ny), _wrap_pos(cand[3], Nz))
+            elseif !inside(cand)
+                continue
+            end
             if far_enough(cand)
                 accept!(cand)
                 found = true
@@ -363,10 +415,29 @@ function poisson_disk_centers(Nx, Ny, Nz, rmin, n; seed=1)
         end
         found || deleteat!(active, ai)
     end
-    if length(pts) < n
-        error("poisson_disk_centers placed $(length(pts))/$n centers at rmin=$rmin")
-    end
-    return pts[1:n]
+    return pts
+end
+
+"""
+    seed_poisson_bubbles!(model, R; rmin=2R+1, margin=R+2.5, seed=1)
+
+Punch a Poisson-disk packing of radius-`R` nuclei into the domain.
+Flags must already be painted (liquid in the interior, solid on the wall).
+`rmin` is the center spacing. `margin` keeps each punch off the wall.
+"""
+function seed_poisson_bubbles!(model, R; rmin=nothing, margin=nothing, seed=1)
+    R = Float64(R)
+    R > 0 || throw(ArgumentError("seed_poisson_bubbles! radius must be positive (got $R)"))
+    rmin === nothing && (rmin = 2R + 1)
+    margin === nothing && (margin = R + 2.5)
+    length(model.domains) == 1 ||
+        throw(ArgumentError("seed_poisson_bubbles! v1 supports a single domain"))
+    domain = model.domains[1]
+    pts = poisson_disk_centers(Int(domain.Nx), Int(domain.Ny), Int(domain.Nz), rmin;
+                               seed=seed, margin=Float64(margin))
+    isempty(pts) && throw(ArgumentError("seed_poisson_bubbles! placed no centers at rmin=$rmin"))
+    nucleate_bubbles!(model, pts, fill(R, length(pts)))
+    return pts
 end
 
 # --- Punch ----------------------------------------------------------------
@@ -583,6 +654,10 @@ liquid volume outside the plane at distance `R` from the center. One table
 row per ball, `ratio = 1`, `V_ref` = punched gas volume. Populations are
 left for `initialize!`. A center in `TYPE_S`, or a ball that overlaps
 another nucleus or a solid cell, throws.
+
+After `initialize!`, use `spawn_bubbles!`. This punch leaves the class-0
+neighbors as temporary interface cells so `initialize_body!` does not
+rewrite the interior, and it does not rebuild populations.
 """
 function nucleate_bubbles!(model, centers::AbstractVector, radii::AbstractVector)
     @static if !FOAM
@@ -646,6 +721,123 @@ function _restore_punch_blockers!(model)
     return nothing
 end
 
+# A spawned pore was liquid. Its populations are a liquid equilibrium, and
+# the new interface reads the gas cell on the next surface pass. Write a
+# rest equilibrium into the new gas cells only. Class-0 blockers are already
+# liquid again, so they are left alone. Neighbor AA slots that happen to
+# sit on the new gas cell are replaced; the compact this is aimed at is
+# still near ρ = 1, u = 0, so that replacement is the same equilibrium.
+function _equilibrate_spawned!(model, domain, flags_before::Vector{UInt8})
+    flags = Array(domain.flags.data)
+    ϕ = Array(domain.ϕ.data)
+    ρ = domain.ρ.data
+    u = domain.u.data
+    mass = domain.mass.data
+    T = domain.T.data
+    fi = domain.fi.data
+    gi = domain.gi.data
+    N = length(flags)
+    CT = eltype(ρ)
+    oneρ = one(CT)
+    zeroρ = zero(CT)
+    w = model.weights
+    vel = model.velocities
+    @inbounds for n in eachindex(flags)
+        su0 = flags_before[n] & TYPE_SU
+        su1 = flags[n] & TYPE_SU
+        su0 == su1 && continue
+        if su1 == TYPE_G
+            ρ[n] = oneρ
+            u[n, 1] = zeroρ
+            u[n, 2] = zeroρ
+            u[n, 3] = zeroρ
+            mass[n] = zeroρ
+            store_feq_local!(fi, n, oneρ, zeroρ, zeroρ, zeroρ, w, vel, N)
+            @static if TEMPERATURE
+                store_geq_local!(gi, n, CT(T[n]), N)
+            end
+        elseif su1 == TYPE_I
+            mass[n] = CT(ϕ[n]) * CT(ρ[n])
+        end
+    end
+    # The punch is not a fill change. ϕ_correction would otherwise credit
+    # −c Δϕ onto the new row.
+    copyto!(domain.ϕ_old.data, domain.ϕ.data)
+    return nothing
+end
+
+"""
+    spawn_bubbles!(model, centers, radii) -> Vector{Int32}
+
+Punch spheres **after** `initialize!` and return the new ids. Same geometry
+as `nucleate_bubbles!`, then the class-0 blockers are turned back into
+liquid and each new gas cell is written as a rest equilibrium at ρ = 1.
+The shell keeps its temperature and solid fraction; its mass is set to
+`ϕ ρ`. A center in `TYPE_S`, or a ball that overlaps another pore, throws
+and leaves the grid as it was.
+"""
+function spawn_bubbles!(model, centers::AbstractVector, radii::AbstractVector)
+    @static if !FOAM
+        throw(ArgumentError("FOAM is false"))
+    else
+        model.initialized ||
+            throw(ArgumentError("spawn_bubbles! runs after initialize!; use nucleate_bubbles! before it"))
+        length(model.domains) == 1 ||
+            throw(ArgumentError("spawn_bubbles! v1 supports a single domain"))
+        domain = model.domains[1]
+        before = Set(bubble_ids(model))
+        flags_before = Array(domain.flags.data)
+        nucleate_bubbles!(model, centers, radii)
+        _restore_punch_blockers!(model)
+        _equilibrate_spawned!(model, domain, flags_before)
+        spawned = Int32[]
+        for id in bubble_ids(model)
+            id in before || push!(spawned, id)
+        end
+        return spawned
+    end
+end
+
+"""
+    add_dissolved!(model, δ)
+
+Add a dissolved-concentration source. `δ[n]` is added to the rest
+population of cell `n` and to `c`. The rest slot does not stream, so the
+next concentration collide carries the mass. Gas and solid cells are
+skipped. `δ` follows the same linear index as `flags`.
+"""
+function add_dissolved!(model, δ::AbstractVector)
+    @static if !FOAM
+        throw(ArgumentError("FOAM is false"))
+    else
+        model.initialized ||
+            throw(ArgumentError("add_dissolved! runs after initialize!"))
+        length(model.domains) == 1 ||
+            throw(ArgumentError("add_dissolved! v1 supports a single domain"))
+        domain = model.domains[1]
+        N = length(domain.flags)
+        length(δ) == N ||
+            throw(ArgumentError("add_dissolved! got $(length(δ)) values for $N cells"))
+        any(!iszero, δ) || return nothing
+        flags = Array(domain.flags.data)
+        c = Array(domain.c.data)
+        ci = Array(domain.ci.data)
+        CT = eltype(c)
+        @inbounds for n in eachindex(δ)
+            d = δ[n]
+            iszero(d) && continue
+            su = flags[n] & TYPE_SU
+            (su == TYPE_F || su == TYPE_I) || continue
+            dd = CT(d)
+            c[n] += dd
+            ci[f_index(n, 1, N)] += dd
+        end
+        copyto!(domain.c.data, c)
+        copyto!(domain.ci.data, ci)
+        return nothing
+    end
+end
+
 # --- Flood fill ------------------------------------------------------------
 
 function _face_touches_gas(flags, n::Int, Nx::Int, Ny::Int, Nz::Int)
@@ -670,7 +862,27 @@ function _joins_component(flags, prev, gas_tags, n, Nx, Ny, Nz)
     return t > 0 && t ∉ gas_tags
 end
 
-function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
+function _frozen_mask(foam::FoamHost)
+    nb = length(foam.bubbles)
+    mask = falses(nb)
+    @inbounds for i in 1:nb
+        row = foam.bubbles[i]
+        row !== nothing && row.frozen && (mask[i] = true)
+    end
+    return mask
+end
+
+# `lock > 0` is a solidified bubble: the walk stays on that id.
+# An unlocked walk (liquid gas, atmosphere) does not enter one.
+function _frozen_link_ok(prev, frozen::BitVector, lock::Int32, j::Int)
+    pj = prev[j]
+    if lock > Int32(0)
+        return pj == lock
+    end
+    return !(pj > 0 && pj <= length(frozen) && frozen[pj])
+end
+
+function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int, frozen::BitVector)
     N = Nx * Ny * Nz
     flags = foam.flags
     prev = foam.tag_prev
@@ -687,6 +899,8 @@ function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     for seed in 1:N
         comp[seed] != 0 && continue
         _joins_component(flags, prev, gas_tags, seed, Nx, Ny, Nz) || continue
+        pt = prev[seed]
+        lock = (pt > 0 && pt <= length(frozen) && frozen[pt]) ? pt : Int32(0)
         ncomp += 1
         cid = Int32(ncomp)
         comp[seed] = cid
@@ -701,6 +915,7 @@ function _flood_gas!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
                 j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
                 comp[j] != 0 && continue
                 _joins_component(flags, prev, gas_tags, j, Nx, Ny, Nz) || continue
+                _frozen_link_ok(prev, frozen, lock, j) || continue
                 comp[j] = cid
                 qt += 1
                 q[qt] = j
@@ -748,6 +963,9 @@ function _assign_components!(foam::FoamHost, parents, atm, ncomp::Int)
     for c in 1:ncomp
         atm[c] || continue
         for id in parents[c]
+            row = _live_bubble(foam, id)
+            # A solidified bubble that numerically touches tag −1 stays.
+            row !== nothing && row.frozen && continue
             push!(doomed, id)
         end
     end
@@ -758,6 +976,9 @@ function _assign_components!(foam::FoamHost, parents, atm, ncomp::Int)
         atm[c] && continue
         for id in parents[c]
             id in doomed && continue
+            row = _live_bubble(foam, id)
+            # Frozen ids are not merged. Their cells are written back from tag_prev.
+            row !== nothing && row.frozen && continue
             push!(comp_parents[c], id)
             push!(get!(id_comps, id, Int[]), c)
         end
@@ -821,12 +1042,18 @@ function _assign_components!(foam::FoamHost, parents, atm, ncomp::Int)
     return comp_tag, groups
 end
 
-function _tag_interface!(flags, tag, comp, Nx, Ny, Nz)
+function _tag_interface!(flags, tag, comp, prev, frozen, Nx, Ny, Nz)
     N = Nx * Ny * Nz
     for n in 1:N
         (flags[n] & TYPE_SU) == TYPE_I || continue
         # Orphan-shell cells already hold the component id.
         comp[n] != 0 && continue
+        # A solidified shell stays on the bubble it already belonged to.
+        pt = prev[n]
+        if pt > 0 && pt <= length(frozen) && frozen[pt]
+            tag[n] = pt
+            continue
+        end
         x, y, z = _cell_xyz(n, Nx, Ny)
         best = TAG_NONE
         npos = 0
@@ -888,7 +1115,13 @@ function _commit_rows!(foam::FoamHost, groups, N::Int)
     end
     for i in 1:nb
         used[i] && continue
-        foam.bubbles[i] === nothing && continue
+        row = foam.bubbles[i]
+        row === nothing && continue
+        # Solidified gas still carries this id. Keep ratio and V_ref; V is the fill.
+        if row.frozen && i <= length(vol) && vol[i] > 0
+            foam.bubbles[i] = Bubble(vol[i], row.V_ref, row.ratio, true)
+            continue
+        end
         _release_bubble_id!(foam, i)
     end
     return nothing
@@ -896,10 +1129,12 @@ end
 
 function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     N = Nx * Ny * Nz
-    ncomp = _flood_gas!(foam, Nx, Ny, Nz)
+    frozen = _frozen_mask(foam)
+    prev = foam.tag_prev
+    ncomp = _flood_gas!(foam, Nx, Ny, Nz, frozen)
     fill!(foam.tag, TAG_NONE)
     if ncomp == 0
-        _tag_interface!(foam.flags, foam.tag, foam.component, Nx, Ny, Nz)
+        _tag_interface!(foam.flags, foam.tag, foam.component, prev, frozen, Nx, Ny, Nz)
         for i in 1:length(foam.bubbles)
             foam.bubbles[i] === nothing && continue
             _release_bubble_id!(foam, i)
@@ -912,11 +1147,70 @@ function _retag!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
     tag = foam.tag
     for n in 1:N
         c = Int(comp[n])
-        c == 0 && continue
-        tag[n] = comp_tag[c]
+        c != 0 && (tag[n] = comp_tag[c])
+        pt = prev[n]
+        if pt > 0 && pt <= length(frozen) && frozen[pt]
+            tag[n] = pt
+        end
     end
-    _tag_interface!(foam.flags, tag, comp, Nx, Ny, Nz)
+    _tag_interface!(foam.flags, tag, comp, prev, frozen, Nx, Ny, Nz)
     _commit_rows!(foam, groups, N)
+    return nothing
+end
+
+# surface_0 staged the Henry slot drop on flux. Spread it across the liquid
+# rests and clear it, so the drop is not also given to the pore. Eq. 27
+# then books the pore and is still in flux at the next host. A domain with
+# no TYPE_F cell is a bare film: the staged drop stays on the pore.
+function _park_henry_slot!(model, domain)
+    flux = Array(domain.flux.data)
+    total = sum(Float64, flux)
+    total == 0.0 && return nothing
+    flags = model.foam.flags
+    N = length(flags)
+    nF = 0
+    @inbounds for f in flags
+        (f & TYPE_SU) == TYPE_F && (nF += 1)
+    end
+    if nF == 0
+        return nothing
+    end
+    share = total / nF
+    ci = Array(domain.ci.data)
+    CT = eltype(ci)
+    @inbounds for n in 1:N
+        (flags[n] & TYPE_SU) == TYPE_F || continue
+        r = f_index(n, 1, N)
+        ci[r] = CT(Float64(ci[r]) + share)
+    end
+    copyto!(domain.ci.data, ci)
+    fill!(domain.flux.data, zero(eltype(domain.flux.data)))
+    return nothing
+end
+
+# Eq. 27 has been added to flux and the Henry drop has already been parked.
+# Spread that pore credit back off the liquid rests so the bath falls as
+# the pores grow. The interface rest is left alone.
+function _debit_dissolved!(model, domain)
+    flux = Array(domain.flux.data)
+    total = sum(Float64, flux)
+    total == 0.0 && return nothing
+    flags = model.foam.flags
+    N = length(flags)
+    nF = 0
+    @inbounds for f in flags
+        (f & TYPE_SU) == TYPE_F && (nF += 1)
+    end
+    nF == 0 && return nothing
+    share = total / nF
+    ci = Array(domain.ci.data)
+    CT = eltype(ci)
+    @inbounds for n in 1:N
+        (flags[n] & TYPE_SU) == TYPE_F || continue
+        r = f_index(n, 1, N)
+        ci[r] = CT(Float64(ci[r]) - share)
+    end
+    copyto!(domain.ci.data, ci)
     return nothing
 end
 
@@ -928,6 +1222,7 @@ function _add_dissolved_inventory!(foam::FoamHost, flux, V_m, ρ_liquid)
     @inbounds for i in eachindex(foam.bubbles)
         row = foam.bubbles[i]
         row === nothing && continue
+        row.frozen && continue
         (1 <= i <= nbuf) || continue
         Δm = Float64(flux[i])
         Δm == 0.0 && continue
@@ -957,10 +1252,129 @@ function _impose_bubble_density!(foam::FoamHost, γ_b)
     return nothing
 end
 
+# One-way. A bubble freezes when it has a shell and every TYPE_I cell of its
+# tag is solid. fs = 0 (the default fill) does not freeze. No remelt.
+function _freeze_shells!(foam::FoamHost, fs)
+    nb = length(foam.bubbles)
+    nb == 0 && return nothing
+    n_iface = zeros(Int, nb)
+    n_liquid = zeros(Int, nb)
+    flags = foam.flags
+    tag = foam.tag_prev
+    for n in eachindex(flags)
+        (flags[n] & TYPE_SU) == TYPE_I || continue
+        t = Int(tag[n])
+        1 <= t <= nb || continue
+        foam.bubbles[t] === nothing && continue
+        n_iface[t] += 1
+        is_solid_fraction(fs[n]) || (n_liquid[t] += 1)
+    end
+    for i in 1:nb
+        row = foam.bubbles[i]
+        row === nothing && continue
+        row.frozen && continue
+        n_iface[i] == 0 && continue
+        n_liquid[i] == 0 || continue
+        foam.bubbles[i] = Bubble(row.V, row.V_ref, row.ratio, true)
+    end
+    return nothing
+end
+
+# A pore that shares a face with the headspace is one component and is dropped.
+# The link is often not a direct face: one untagged gas cell sits between the
+# pore and the atmosphere, the flood follows it, and the whole pore is lost.
+# Mark atmosphere plus untagged gas that touches it, and turn each live pore
+# cell that faces that set back into liquid. The finger is plugged and the
+# pore keeps its id. A frozen pore is left alone.
+function _seal_atmosphere!(foam::FoamHost, Nx::Int, Ny::Int, Nz::Int)
+    N = Nx * Ny * Nz
+    flags = foam.flags
+    prev = foam.tag_prev
+    ϕ = foam.ϕ
+    frozen = _frozen_mask(foam)
+    connected = falses(N)
+    queue = Int[]
+    for n in 1:N
+        (flags[n] & TYPE_SU) == TYPE_G || continue
+        prev[n] == TAG_ATM || continue
+        connected[n] = true
+        push!(queue, n)
+    end
+    qh = 1
+    while qh <= length(queue)
+        n = queue[qh]
+        qh += 1
+        x, y, z = _cell_xyz(n, Nx, Ny)
+        for (cx, cy, cz) in _FACE6
+            j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+            connected[j] && continue
+            (flags[j] & TYPE_SU) == TYPE_G || continue
+            prev[j] == TAG_NONE || continue
+            connected[j] = true
+            push!(queue, j)
+        end
+    end
+    contacts = Int[]
+    for n in 1:N
+        (flags[n] & TYPE_SU) == TYPE_G || continue
+        t = prev[n]
+        t > 0 || continue
+        t <= length(frozen) && frozen[t] && continue
+        x, y, z = _cell_xyz(n, Nx, Ny)
+        touch = false
+        for (cx, cy, cz) in _FACE6
+            j = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+            if connected[j]
+                touch = true
+                break
+            end
+        end
+        touch && push!(contacts, n)
+    end
+    CT = eltype(ϕ)
+    for n in contacts
+        flags[n] = (flags[n] & ~TYPE_SU) | TYPE_F
+        ϕ[n] = one(CT)
+        prev[n] = TAG_NONE
+    end
+    return contacts
+end
+
+# A plugged cell was gas. Its populations are not a liquid equilibrium, and the
+# interface reads them on the next surface pass. Replace them with liquid at
+# rest so the plug does not kick the film.
+function _quiet_plugs!(model, domain, cells)
+    isempty(cells) && return nothing
+    N = length(domain.flags)
+    fi = domain.fi.data
+    ci = domain.ci.data
+    ρ = domain.ρ.data
+    u = domain.u.data
+    mass = domain.mass.data
+    CT = eltype(ρ)
+    oneρ = one(CT)
+    zeroρ = zero(CT)
+    zc = zero(eltype(ci))
+    for n in cells
+        ρ[n] = oneρ
+        u[n, 1] = zeroρ
+        u[n, 2] = zeroρ
+        u[n, 3] = zeroρ
+        mass[n] = oneρ
+        store_feq_local!(fi, n, oneρ, zeroρ, zeroρ, zeroρ, model.weights, model.velocities, N)
+        ci[f_index(n, 1, N)] = zc
+        for i in 2:7
+            ci[f_index(n, i, N)] = zc
+        end
+    end
+    return nothing
+end
+
 """
 Host section at the start of the substep. Reads post-`surface_3` flags
-from the previous substep. Adds the binned dissolved flux to `ratio`,
-then writes tags and the imposed `ρb` before `surface_0`.
+from the previous substep. Freezes any bubble whose shell is solid, adds
+the binned dissolved flux to the liquid rows, then writes tags and the
+imposed `ρb` before `surface_0`.
 """
 function foam_host!(model, domain)
     @static if FOAM
@@ -972,14 +1386,24 @@ function foam_host!(model, domain)
         copyto!(foam.flags, domain.flags.data)
         copyto!(foam.ϕ, domain.ϕ.data)
         copyto!(foam.tag_prev, domain.tag.data)
+        @static if TEMPERATURE
+            _freeze_shells!(foam, Array(domain.fs.data))
+        end
         flux = Array(domain.flux.data)
         # Old rows, so a merge weights every parent's Δm and a split copies one ratio.
+        # Frozen rows are skipped: the shell no longer exchanges dissolved gas.
         _add_dissolved_inventory!(foam, flux, domain.V_m, domain.ρ_liquid)
+        plugs = _seal_atmosphere!(foam, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
         _retag!(foam, Int(domain.Nx), Int(domain.Ny), Int(domain.Nz))
         fill!(domain.flux.data, zero(eltype(domain.flux.data)))
         _impose_bubble_density!(foam, domain.γ_b)
         copyto!(domain.tag.data, foam.tag)
         copyto!(domain.ρb.data, foam.ρb)
+        if !isempty(plugs)
+            copyto!(domain.flags.data, foam.flags)
+            copyto!(domain.ϕ.data, foam.ϕ)
+            _quiet_plugs!(model, domain, plugs)
+        end
     end
     return nothing
 end

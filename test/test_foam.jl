@@ -250,12 +250,12 @@ end
     phij = LatticeBoltzmann.gather_phi_d3q27(ϕ, ϕ0, x, y, z, N, N, N)
     κ = calculate_curvature(phij)
     @test abs(κ) > 1f-3
-    expect = clamp(1f0 - 6f0 * σ * κ, 0.2f0, 2f0)
-    @test LatticeBoltzmann.gas_density_plic(σ, ϕ, ϕ0, x, y, z, N, N, N, 1f0, 0f0) == expect
-    @test LatticeBoltzmann.gas_density_plic(σ, ϕ, ϕ0, x, y, z, N, N, N) == expect
+    raw = 1f0 - 6f0 * σ * κ
+    @test LatticeBoltzmann.gas_density_plic(σ, ϕ, ϕ0, x, y, z, N, N, N, 1f0, 0f0) == clamp(raw, 0.8f0, 1.6f0)
+    @test LatticeBoltzmann.gas_density_plic(σ, ϕ, ϕ0, x, y, z, N, N, N) == clamp(raw, 0.2f0, 2f0)
     @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 1.2f0, 0f0) == 1.2f0
-    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 5f0, 0f0) == 2f0
-    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 0f0, 0f0) == 0.2f0
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 5f0, 0f0) == 1.6f0
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, ϕ0, x, y, z, N, N, N, 0f0, 0f0) == 0.8f0
 end
 
 @testset "doubling volume halves imposed density" begin
@@ -399,7 +399,8 @@ end
         domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
         Nd, Nx, Ny, Nz, domain.Eacc.data,
         domain.h.data, domain.Q.data, domain.ω_T,
-        domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D;
+        domain.ci.data, domain.flux.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D,
+        domain.tag.data, domain.c.data;
         ndrange = N)
     synchronize(model.backend)
     got = domain.fi.data[LatticeBoltzmann.f_index(srcG, i, N)]
@@ -502,7 +503,7 @@ end
         ρg = LatticeBoltzmann.gas_density_plic(0f0, ϕ_before, ϕ_before[n], x, y, z, Nx, Ny, Nz, 1f0, Pi[n])
         ρg0 = LatticeBoltzmann.gas_density_plic(0f0, ϕ_before, ϕ_before[n], x, y, z, Nx, Ny, Nz, 1f0, 0f0)
         @test ρg0 == 1f0
-        @test ρg ≈ ρg0 - 3f0 * Pi[n] atol=1f-5
+        @test ρg ≈ clamp(ρg0 - 3f0 * Pi[n], 0.8f0, 1.6f0) atol=1f-5
         n_if += 1
     end
     @test n_if == 2 * Nx * Ny
@@ -519,6 +520,23 @@ end
     # Five liquid cells: the other interface is past s = 4.
     _paint_zlayers!(domain, _film_layers(Nz, 2, 8, 1, 2))
     @test all(iszero, _launch_disjoining!(model))
+
+    # Three liquid cells. The ray reaches the other interface on the step
+    # where s = 4. Half-fill has zero PLIC offset, so d = 4 and Π stays 0.
+    # A fill of 0.25 leaves d < 4 after both offsets (paper eq. 30).
+    layers3 = _film_layers(Nz, 2, 6, 1, 2)
+    layers3[3] = (TYPE_I, 1, 0.25f0)
+    layers3[7] = (TYPE_I, 2, 0.25f0)
+    _paint_zlayers!(domain, layers3)
+    Pi3 = _launch_disjoining!(model)
+    ϕ3 = Array(domain.ϕ.data)
+    n3 = _layer_index(1, 1, 2, Nx, Ny)
+    j3 = _layer_index(1, 1, 6, Nx, Ny)
+    nϕ3 = calculate_normal_py(LatticeBoltzmann.gather_phi_d3q27(ϕ3, ϕ3[n3], 1, 1, 2, Nx, Ny, Nz))
+    d3 = max(4.0f0 - abs(plic_cube(ϕ3[n3], nϕ3)) - abs(plic_cube(ϕ3[j3], nϕ3)), 0.0f0)
+    @test d3 < 4
+    @test Pi3[n3] ≈ kΠ * (4.0f0 - d3) atol=1f-4
+    @test Pi3[n3] > 0
 
     # Atmosphere in the film ends the walk before the other bubble.
     layers_atm = _film_layers(Nz, 2, 5, 1, 2; film_tag=-1)
@@ -550,7 +568,7 @@ end
     LatticeBoltzmann.step!(model)
     @test all(iszero, Array(domain.Pi.data))
 
-    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, 0.5f0, 1, 1, 4, Nx, Ny, Nz, 1f0, 0.1f0) == 0.7f0
+    @test LatticeBoltzmann.gas_density_plic(0f0, ϕ, 0.5f0, 1, 1, 4, Nx, Ny, Nz, 1f0, 0.05f0) == 0.85f0
 end
 
 @testset "stale disjoining pressure is cleared" begin
@@ -737,7 +755,8 @@ function _launch_surface0_even!(model)
         domain.Λ_v, domain.T_v, domain.p0v, domain.β_v,
         Int(domain.N), Nx, Ny, Nz, domain.Eacc.data,
         domain.h.data, domain.Q.data, domain.ω_T,
-        domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D;
+        domain.ci.data, domain.flux.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D,
+        domain.tag.data, domain.c.data;
         ndrange = Nx * Ny * Nz)
     synchronize(model.backend)
     return nothing
@@ -916,11 +935,11 @@ function _paint_gas!(foam, Nx, Ny, cells, id)
     return nothing
 end
 
-function _put_row!(foam, id, V, V_ref, ratio)
+function _put_row!(foam, id, V, V_ref, ratio; frozen=false)
     while length(foam.bubbles) < id
         push!(foam.bubbles, nothing)
     end
-    foam.bubbles[id] = LatticeBoltzmann.Bubble(V, V_ref, ratio, false)
+    foam.bubbles[id] = LatticeBoltzmann.Bubble(V, V_ref, ratio, frozen)
     return nothing
 end
 
@@ -1044,6 +1063,147 @@ end
         @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(2)
     end
     @test _liquid_tags_are_zero(foam)
+end
+
+@testset "untagged gas between a pore and the atmosphere is plugged" begin
+    Nx, Ny, Nz = 12, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    pore = [(2, y, z), (3, y, z)]
+    bridge = [(4, y, z)]
+    atm = [(5, y, z), (6, y, z)]
+    spectator = [(8, y, z), (9, y, z)]
+    _paint_gas!(foam, Nx, Ny, pore, 1)
+    _paint_gas!(foam, Nx, Ny, bridge, 0)
+    _paint_gas!(foam, Nx, Ny, atm, -1)
+    _paint_gas!(foam, Nx, Ny, spectator, 2)
+    _put_row!(foam, 1, 2.0, 4.0, 1.5)
+    _put_row!(foam, 2, 2.0, 7.0, 2.5)
+    plugs = LatticeBoltzmann._seal_atmosphere!(foam, Nx, Ny, Nz)
+    @test length(plugs) == 1
+    n3 = 3 + y * Nx + z * Nx * Ny + 1
+    @test (foam.flags[n3] & TYPE_SU) == TYPE_F
+    @test foam.ϕ[n3] == 1
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    @test foam.bubbles[1] !== nothing
+    @test foam.bubbles[1].ratio == 1.5
+    @test foam.bubbles[1].V_ref == 4.0
+    @test foam.bubbles[1].V == 1.0
+    @test foam.bubbles[2] !== nothing
+    @test foam.bubbles[2].ratio == 2.5
+    @test foam.bubbles[2].V == 2.0
+    @test foam.tag[2 + y * Nx + z * Nx * Ny + 1] == Int32(1)
+    for (x, yy, zz) in vcat(bridge, atm)
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(-1)
+    end
+    for (x, yy, zz) in spectator
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(2)
+    end
+end
+
+@testset "untagged gas that does not reach the atmosphere stays with the pore" begin
+    Nx, Ny, Nz = 10, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    _paint_gas!(foam, Nx, Ny, [(2, y, z), (3, y, z)], 1)
+    _paint_gas!(foam, Nx, Ny, [(4, y, z)], 0)
+    _put_row!(foam, 1, 2.0, 4.0, 1.5)
+    @test isempty(LatticeBoltzmann._seal_atmosphere!(foam, Nx, Ny, Nz))
+    @test (foam.flags[3 + y * Nx + z * Nx * Ny + 1] & TYPE_SU) == TYPE_G
+end
+
+@testset "frozen bubble touching atmosphere is kept" begin
+    Nx, Ny, Nz = 12, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    joined = [(2, y, z), (3, y, z)]
+    atm = [(4, y, z), (5, y, z)]
+    spectator = [(8, y, z), (9, y, z)]
+    _paint_gas!(foam, Nx, Ny, joined, 1)
+    _paint_gas!(foam, Nx, Ny, atm, -1)
+    _paint_gas!(foam, Nx, Ny, spectator, 2)
+    _put_row!(foam, 1, 2.0, 4.0, 1.5; frozen=true)
+    _put_row!(foam, 2, 2.0, 7.0, 2.5)
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    @test foam.bubbles[1] !== nothing
+    @test foam.bubbles[1].frozen
+    @test foam.bubbles[1].ratio == 1.5
+    @test foam.bubbles[1].V_ref == 4.0
+    @test foam.bubbles[1].V == 2.0
+    id, row = only(r for r in _live_rows(foam) if r[1] == 2)
+    @test row.ratio == 2.5
+    @test row.V_ref == 7.0
+    for (x, yy, zz) in joined
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(1)
+    end
+    for (x, yy, zz) in atm
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(-1)
+    end
+    for (x, yy, zz) in spectator
+        @test foam.tag[x + yy * Nx + zz * Nx * Ny + 1] == Int32(2)
+    end
+end
+
+@testset "frozen bubbles that share a face do not merge" begin
+    Nx, Ny, Nz = 10, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    _paint_gas!(foam, Nx, Ny, [(2, y, z), (3, y, z)], 1)
+    _paint_gas!(foam, Nx, Ny, [(4, y, z), (5, y, z)], 2)
+    _put_row!(foam, 1, 2.0, 4.0, 1.5; frozen=true)
+    _put_row!(foam, 2, 2.0, 5.0, 3.0; frozen=true)
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    rows = _live_rows(foam)
+    @test length(rows) == 2
+    @test foam.bubbles[1].ratio == 1.5
+    @test foam.bubbles[1].V_ref == 4.0
+    @test foam.bubbles[1].frozen
+    @test foam.bubbles[2].ratio == 3.0
+    @test foam.bubbles[2].V_ref == 5.0
+    @test foam.bubbles[2].frozen
+    for x in (2, 3)
+        @test foam.tag[x + y * Nx + z * Nx * Ny + 1] == Int32(1)
+    end
+    for x in (4, 5)
+        @test foam.tag[x + y * Nx + z * Nx * Ny + 1] == Int32(2)
+    end
+end
+
+@testset "frozen bubble stays while a hot neighbor vents" begin
+    Nx, Ny, Nz = 12, 4, 4
+    y = z = 1
+    foam = _blank_foam(Nx, Ny, Nz)
+    _paint_gas!(foam, Nx, Ny, [(2, y, z), (3, y, z)], 1)
+    _paint_gas!(foam, Nx, Ny, [(4, y, z), (5, y, z)], 2)
+    _paint_gas!(foam, Nx, Ny, [(6, y, z), (7, y, z)], -1)
+    _put_row!(foam, 1, 2.0, 4.0, 1.25; frozen=true)
+    _put_row!(foam, 2, 2.0, 4.0, 2.0)
+    LatticeBoltzmann._retag!(foam, Nx, Ny, Nz)
+    @test foam.bubbles[1] !== nothing
+    @test foam.bubbles[1].frozen
+    @test foam.bubbles[1].ratio == 1.25
+    @test foam.bubbles[1].V_ref == 4.0
+    @test foam.bubbles[2] === nothing
+    for x in (2, 3)
+        @test foam.tag[x + y * Nx + z * Nx * Ny + 1] == Int32(1)
+    end
+    for x in (4, 5, 6, 7)
+        @test foam.tag[x + y * Nx + z * Nx * Ny + 1] == Int32(-1)
+    end
+end
+
+@testset "frozen row ignores dissolved flux" begin
+    foam = _blank_foam(4, 4, 4)
+    _put_row!(foam, 1, 2.0, 4.0, 1.5; frozen=true)
+    _put_row!(foam, 2, 2.0, 4.0, 1.5)
+    flux = zeros(Float32, 4)
+    flux[1] = 1.0f0
+    flux[2] = 1.0f0
+    LatticeBoltzmann._add_dissolved_inventory!(foam, flux, 2.0, 1.0)
+    @test foam.bubbles[1].ratio == 1.5
+    @test foam.bubbles[1].frozen
+    @test foam.bubbles[2].ratio == 1.5 + 1.0 * 2.0 / 4.0
+    @test !foam.bubbles[2].frozen
 end
 
 function _paint_device_gas!(domain, Nx, Ny, cells_ids)
@@ -1227,4 +1387,715 @@ end
         @test n_shell > 0
         @test n_liquid > 0
     end
+end
+
+function _shell_case(fs_shell)
+    Nx, Ny, Nz = 8, 4, 4
+    model = Model(Nx, Ny, Nz, 0.2; backend=CPU(), n_hydro=1)
+    domain = model.domains[1]
+    set_foam!(model; V_m=2, ρ_liquid=1)
+    N = Nx * Ny * Nz
+    flags = fill(TYPE_F, N)
+    ϕ = fill(1.0f0, N)
+    tag = zeros(Int32, N)
+    y = z = 1
+    # Gas at x = 3, shells at x = 2 and x = 4, both facing the gas.
+    for (x, su, ph) in ((3, TYPE_G, 0.0f0), (2, TYPE_I, 0.4f0), (4, TYPE_I, 0.6f0))
+        n = x + y * Nx + z * Nx * Ny + 1
+        flags[n] = su
+        ϕ[n] = ph
+        tag[n] = Int32(1)
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.ϕ.data, ϕ)
+    copyto!(domain.tag.data, tag)
+    fs = zeros(Float32, N)
+    fs[2 + y * Nx + z * Nx * Ny + 1] = fs_shell[1]
+    fs[4 + y * Nx + z * Nx * Ny + 1] = fs_shell[2]
+    copyto!(domain.fs.data, fs)
+    _put_row!(model.foam, 1, 1.0, 4.0, 1.5)
+    flux = Array(domain.flux.data)
+    flux[1] = 1.0f0
+    copyto!(domain.flux.data, flux)
+    return model, domain
+end
+
+@testset "solid shell freezes and ignores flux" begin
+    model, domain = _shell_case((1.0f0, 1.0f0))
+    LatticeBoltzmann.foam_host!(model, domain)
+    row = model.foam.bubbles[1]
+    @test row !== nothing
+    @test row.frozen
+    @test row.ratio == 1.5
+    @test row.V_ref == 4.0
+    @test bubble_frozen(model, 1)
+    tags = Array(domain.tag.data)
+    y = z = 1
+    Nx, Ny = 8, 4
+    for x in (2, 3, 4)
+        @test tags[x + y * Nx + z * Nx * Ny + 1] == Int32(1)
+    end
+    @test all(iszero, Array(domain.flux.data))
+end
+
+@testset "one liquid interface cell does not freeze" begin
+    model, domain = _shell_case((1.0f0, 0.0f0))
+    LatticeBoltzmann.foam_host!(model, domain)
+    row = model.foam.bubbles[1]
+    @test row !== nothing
+    @test !row.frozen
+    @test row.ratio == 1.5 + 1.0 * 2.0 / 4.0
+    @test row.V_ref == 4.0
+end
+
+@testset "fs = 0 does not freeze" begin
+    model, domain = _shell_case((0.0f0, 0.0f0))
+    LatticeBoltzmann.foam_host!(model, domain)
+    row = model.foam.bubbles[1]
+    @test !row.frozen
+    @test row.ratio == 1.5 + 0.5
+end
+
+@testset "a frozen bubble does not remelt" begin
+    model, domain = _shell_case((0.0f0, 0.0f0))
+    model.foam.bubbles[1] = LatticeBoltzmann.Bubble(1.0, 4.0, 1.5, true)
+    LatticeBoltzmann.foam_host!(model, domain)
+    row = model.foam.bubbles[1]
+    @test row.frozen
+    @test row.ratio == 1.5
+    @test row.V_ref == 4.0
+    @test bubble_ids(model) == Int32[1]
+end
+
+@testset "gas with no shell does not freeze" begin
+    Nx, Ny, Nz = 6, 4, 4
+    model = Model(Nx, Ny, Nz, 0.2; backend=CPU(), n_hydro=1)
+    domain = model.domains[1]
+    set_foam!(model; V_m=2, ρ_liquid=1)
+    _paint_device_gas!(domain, Nx, Ny, [(2, 1), (3, 1)])
+    fill!(domain.fs.data, 1.0f0)
+    _put_row!(model.foam, 1, 2.0, 4.0, 1.5)
+    flux = Array(domain.flux.data)
+    flux[1] = 0.5f0
+    copyto!(domain.flux.data, flux)
+    LatticeBoltzmann.foam_host!(model, domain)
+    row = model.foam.bubbles[1]
+    @test row !== nothing
+    @test !row.frozen
+    @test row.ratio == 1.5 + 0.5 * 2.0 / 4.0
+end
+
+# Cold mold, one bubble, enthalpy. The shell has to solidify from the walls
+# and then hold its id, ratio, and volume.
+@testset "cooling mold freezes one bubble" begin
+    N = 14
+    R0 = 2.5
+    model = Model(N, N, N, 0.2; backend=CPU(), σ=0.02, n_hydro=1,
+                  α=0.4, Λ=0.2, Ts=0.7, Tl=0.78, K0=1.0f-3, T_avg=1.0, fz=-1.0f-4)
+    domain = model.domains[1]
+    flags = fill(TYPE_F, N * N * N)
+    Th = fill(1.0f0, N * N * N)
+    fsh = zeros(Float32, N * N * N)
+    for z in 0:(N - 1), y in 0:(N - 1), x in 0:(N - 1)
+        n = 1 + x + N * y + N * N * z
+        if x == 0 || y == 0 || z == 0 || x == N - 1 || y == N - 1 || z == N - 1
+            flags[n] = TYPE_S | TYPE_T
+            Th[n] = 0.45f0
+            fsh[n] = 1.0f0
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, Th)
+    copyto!(domain.fs.data, fsh)
+    nucleate_bubbles!(model, [(N / 2, N / 2, N / 2)], [R0])
+    set_foam!(model; D=0.02, k_H=1.0f-4, k_Π=0, q=0, V_m=3, γ_b=1,
+              c0=0.05, ρ_liquid=1)
+    initialize!(model)
+    id0 = only(bubble_ids(model))
+    frozen_at = 0
+    for t in 1:300
+        LatticeBoltzmann.step!(model)
+        ids = bubble_ids(model)
+        id0 in ids || break
+        if !isempty(ids) && all(i -> bubble_frozen(model, i), ids)
+            frozen_at = t
+            break
+        end
+    end
+    @test frozen_at > 0
+    ids_f = bubble_ids(model)
+    @test id0 in ids_f
+    @test all(i -> bubble_frozen(model, i), ids_f)
+    ratios = Dict(i => bubble_ratio(model, i) for i in ids_f)
+    vols = Dict(i => bubble_volume(model, i) for i in ids_f)
+    @test vols[id0] > 0.4 * (4π / 3) * R0^3
+    for _ in 1:40
+        LatticeBoltzmann.step!(model)
+    end
+    ids_h = bubble_ids(model)
+    @test ids_h == ids_f
+    for i in ids_h
+        @test bubble_frozen(model, i)
+        @test bubble_ratio(model, i) == ratios[i]
+        @test bubble_volume(model, i) ≈ vols[i] rtol=0.02
+    end
+    flags = Array(domain.flags.data)
+    fs = Array(domain.fs.data)
+    tags = Array(domain.tag.data)
+    n_shell = 0
+    n_solid = 0
+    for i in eachindex(flags)
+        (flags[i] & TYPE_SU) == TYPE_I || continue
+        tags[i] in ids_h || continue
+        n_shell += 1
+        LatticeBoltzmann.is_solid_fraction(fs[i]) && (n_solid += 1)
+    end
+    @test n_shell > 0
+    @test n_solid == n_shell
+end
+
+function _metal_T_range(domain)
+    flags = Array(domain.flags.data)
+    T = Array(domain.T.data)
+    tmin = Inf
+    tmax = -Inf
+    s = 0.0
+    n = 0
+    twall = Inf
+    for i in eachindex(flags)
+        if (flags[i] & TYPE_T) != 0x00
+            twall = min(twall, Float64(T[i]))
+        end
+        su = flags[i] & TYPE_SU
+        su == TYPE_F || su == TYPE_I || continue
+        t = Float64(T[i])
+        tmin = min(tmin, t)
+        tmax = max(tmax, t)
+        s += t
+        n += 1
+    end
+    return tmin, tmax, n == 0 ? 0.0 : s / n, twall, n
+end
+
+# Gas cells skip the thermal collide. Without a zero-flux reconstruction the
+# stale populations are a heat sink and the metal falls through the mold
+# temperature. Λ = 0 keeps the shell liquid, so this is the pore link itself
+# and not the freeze. σ = 0 and g = 0 so the pore is not driven into a wall.
+@testset "insulating gas does not cool the melt below the mold" begin
+    N = 14
+    R0 = 2.5
+    Tmold = 0.40f0
+    Tinit = 1.20f0
+    model = Model(N, N, N, 0.2; backend=CPU(), σ=0.0, n_hydro=1,
+                  α=0.4, Λ=0.0, Ts=0.7, Tl=0.8, K0=0.0, T_avg=1.0, fz=0)
+    domain = model.domains[1]
+    flags = fill(TYPE_F, N * N * N)
+    Th = fill(Tinit, N * N * N)
+    fsh = zeros(Float32, N * N * N)
+    for z in 0:(N - 1), y in 0:(N - 1), x in 0:(N - 1)
+        n = 1 + x + N * y + N * N * z
+        if x == 0 || y == 0 || z == 0 || x == N - 1 || y == N - 1 || z == N - 1
+            flags[n] = TYPE_S | TYPE_T
+            Th[n] = Tmold
+            fsh[n] = 1
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, Th)
+    copyto!(domain.fs.data, fsh)
+    nucleate_bubbles!(model, [(N / 2, N / 2, N / 2)], [R0])
+    set_foam!(model; D=0, k_H=0, k_Π=0, q=0, V_m=0, γ_b=1, c0=0, ρ_liquid=1)
+    initialize!(model)
+    id0 = only(bubble_ids(model))
+    V0 = bubble_volume(model, id0)
+    for _ in 1:200
+        LatticeBoltzmann.step!(model)
+    end
+    tmin, tmax, tmean, twall, nmet = _metal_T_range(domain)
+    @info "insulating gas" tmin tmax tmean twall nmet V=bubble_volume(model, id0)
+    @test nmet > 0
+    @test twall ≈ Float64(Tmold) atol=1e-5
+    @test tmin >= Float64(Tmold) - 0.04
+    @test tmean < Float64(Tinit) - 0.25
+    @test tmax < 0.9
+    @test bubble_ids(model) == Int32[id0]
+    @test bubble_volume(model, id0) > 0.5 * V0
+    @test all(isfinite, Array(domain.T.data))
+end
+
+# Open mold, two pores, gravity, a little dissolved gas. They have to cool,
+# freeze, and still be the same two bubbles. Venting into the headspace or
+# coalescing drops an id.
+@testset "open mold freezes two bubbles in place" begin
+    Nx, Ny, Nz = 18, 18, 26
+    H = 16
+    R0 = 2.2
+    Tmold = 0.45f0
+    Tinit = 1.05f0
+    model = Model(Nx, Ny, Nz, 0.2; backend=CPU(), σ=0.02, n_hydro=1,
+                  α=0.35, Λ=0.2, Ts=0.70, Tl=0.80, K0=1.0f-3, T_avg=1.0, fz=-3.0f-5)
+    domain = model.domains[1]
+    flags = fill(TYPE_G, Nx * Ny * Nz)
+    Th = fill(Tinit, Nx * Ny * Nz)
+    fsh = zeros(Float32, Nx * Ny * Nz)
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = 1 + x + Nx * y + Nx * Ny * z
+        if x == 0 || y == 0 || z == 0 || x == Nx - 1 || y == Ny - 1 || z == Nz - 1
+            flags[n] = TYPE_S | TYPE_T
+            Th[n] = Tmold
+            fsh[n] = 1
+        elseif z < H
+            flags[n] = TYPE_F
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, Th)
+    copyto!(domain.fs.data, fsh)
+    # Far enough apart, and far enough under the free surface, that the
+    # pair does not pinch while it cools. The free surface is not a Henry sink.
+    centers = [(5.0, 5.0, 6.0), (13.0, 13.0, 6.0)]
+    nucleate_bubbles!(model, centers, [R0, R0])
+    set_foam!(model; D=0.005, k_H=1.0f-4, k_Π=0.01, q=0, V_m=3, γ_b=1,
+              c0=0.02, ρ_liquid=1)
+    initialize!(model)
+    ids0 = bubble_ids(model)
+    @test length(ids0) == 2
+    V0 = Dict(i => bubble_volume(model, i) for i in ids0)
+    frozen_at = 0
+    for t in 1:400
+        LatticeBoltzmann.step!(model)
+        ids = bubble_ids(model)
+        # A pinch of a couple of cells gets its own id and then fills back in.
+        # A real second pore, or the loss of one of these two, is a failure.
+        missing = !isempty(setdiff(ids0, ids))
+        spawned = any(i -> !(i in ids0) && bubble_volume(model, i) >= 4, ids)
+        (missing || spawned) && break
+        if issetequal(ids, ids0) && all(i -> bubble_frozen(model, i), ids)
+            frozen_at = t
+            break
+        end
+    end
+    tmin, tmax, tmean, twall, _ = _metal_T_range(domain)
+    @info "open mold" frozen_at ids=bubble_ids(model) tmin tmax tmean twall
+    @test frozen_at > 0
+    @test issetequal(bubble_ids(model), ids0)
+    @test all(i -> bubble_frozen(model, i), bubble_ids(model))
+    @test tmin >= Float64(Tmold) - 0.04
+    @test twall ≈ Float64(Tmold) atol=1e-5
+    ratios = Dict(i => bubble_ratio(model, i) for i in ids0)
+    vols = Dict(i => bubble_volume(model, i) for i in ids0)
+    for i in ids0
+        @test vols[i] > 0.5 * V0[i]
+    end
+    for _ in 1:40
+        LatticeBoltzmann.step!(model)
+    end
+    @test issetequal(bubble_ids(model), ids0)
+    for i in ids0
+        @test bubble_frozen(model, i)
+        @test bubble_ratio(model, i) == ratios[i]
+        @test bubble_volume(model, i) ≈ vols[i] rtol=0.02
+    end
+    tmin2, _, _, _, _ = _metal_T_range(domain)
+    @test tmin2 >= Float64(Tmold) - 0.04
+    @test all(isfinite, Array(domain.T.data))
+end
+
+# Metal α with the mold permeability. drag = 2ρ stored a zero velocity and
+# reflected the population momentum, so the melt temperature left the mold
+# while the printed speed stayed ~0. A closed liquid box has no gas in it.
+@testset "mush permeability does not drive temperature outside the mold" begin
+    N = 14
+    Nz = 16
+    Tmold = 0.73f0
+    Tinit = 1.15f0
+    model = Model(N, N, Nz, 0.2; backend=CPU(), σ=0.0, n_hydro=1,
+                  α=0.04, Λ=0.406, Ts=0.955, Tl=1.0, K0=3.0f-3, T_avg=1.0, fz=0)
+    domain = model.domains[1]
+    flags = fill(TYPE_F, N * N * Nz)
+    Th = fill(Tinit, N * N * Nz)
+    fsh = zeros(Float32, N * N * Nz)
+    for z in 0:(Nz - 1), y in 0:(N - 1), x in 0:(N - 1)
+        n = 1 + x + N * y + N * N * z
+        if x == 0 || y == 0 || z == 0 || x == N - 1 || y == N - 1 || z == Nz - 1
+            flags[n] = TYPE_S | TYPE_T
+            Th[n] = Tmold
+            fsh[n] = 1
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, Th)
+    copyto!(domain.fs.data, fsh)
+    set_foam!(model; D=0, k_H=0, k_Π=0, q=0, V_m=0, γ_b=1, c0=0, ρ_liquid=1)
+    initialize!(model)
+    for _ in 1:160
+        LatticeBoltzmann.step!(model)
+    end
+    tmin, tmax, tmean, twall, nmet = _metal_T_range(domain)
+    @info "mush permeability" tmin tmax tmean twall nmet
+    @test nmet > 0
+    @test twall ≈ Float64(Tmold) atol=1e-5
+    @test tmin >= Float64(Tmold) - 0.04
+    @test tmax <= Float64(Tinit) + 0.05
+    @test tmean < Float64(Tinit) - 0.1
+    @test all(isfinite, Array(domain.T.data))
+end
+
+# Headspace fi used to stay 0. Reconstruction then did feq - 0 + feq, the
+# free surface accelerated, and the melt under it heated above the pour.
+@testset "open surface does not heat the melt above the pour" begin
+    Nx, Ny, Nz = 16, 16, 22
+    H = 14
+    Tmold = 0.73f0
+    Tinit = 1.15f0
+    model = Model(Nx, Ny, Nz, 0.2; backend=CPU(), σ=0.02, n_hydro=1,
+                  α=0.04, Λ=0.406, Ts=0.955, Tl=1.0, K0=3.0f-3, T_avg=Tinit, fz=-2.0f-5)
+    domain = model.domains[1]
+    flags = fill(TYPE_G, Nx * Ny * Nz)
+    Th = fill(Tinit, length(flags))
+    fsh = zeros(Float32, length(flags))
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = 1 + x + Nx * y + Nx * Ny * z
+        if x == 0 || y == 0 || z == 0 || x == Nx - 1 || y == Ny - 1 || z == Nz - 1
+            flags[n] = TYPE_S | TYPE_T
+            Th[n] = Tmold
+            fsh[n] = 1
+        elseif z < H
+            flags[n] = TYPE_F
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, Th)
+    copyto!(domain.fs.data, fsh)
+    set_foam!(model; D=0, k_H=0, k_Π=0, q=0, V_m=0, γ_b=1, c0=0, ρ_liquid=1)
+    initialize!(model)
+    for _ in 1:30
+        LatticeBoltzmann.step!(model)
+    end
+    tmin, tmax, _, twall, nmet = _metal_T_range(domain)
+    @info "open surface" tmin tmax twall nmet
+    @test nmet > 0
+    @test tmin >= Float64(Tmold) - 0.04
+    @test tmax <= Float64(Tinit) + 0.05
+    @test all(isfinite, Array(domain.T.data))
+end
+
+# The open top is not a pore. Henry at c_H ≈ 0 would empty the melt.
+# The free-surface link is anti-bounce-back at the interface concentration.
+@testset "free surface does not vent dissolved gas" begin
+    Nx = Ny = Nz = 8
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    N = Nx * Ny * Nz
+    fill!(domain.flags.data, TYPE_F)
+    set_foam!(model; D=0.03, k_H=0.001, c0=0)
+    initialize!(model)
+
+    x, y, z = 3, 3, 3
+    n = _layer_index(x, y, z, Nx, Ny)
+    src_g = LatticeBoltzmann.src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    flags = fill(TYPE_F, N)
+    flags[n] = TYPE_I
+    flags[src_g] = TYPE_G
+    copyto!(domain.flags.data, flags)
+    ϕ = ones(Float32, N)
+    ϕ[n] = 0.5f0
+    ϕ[src_g] = 0f0
+    copyto!(domain.ϕ.data, ϕ)
+    tag = zeros(Int32, N)
+    tag[n] = Int32(-1)
+    tag[src_g] = Int32(-1)
+    copyto!(domain.tag.data, tag)
+    fill!(domain.ρb.data, 1f0)
+    fill!(domain.Pi.data, 0f0)
+    fill!(domain.fs.data, 0f0)
+    fill!(domain.u.data, 0f0)
+    _write_rest_feq!(domain.fi.data, Nx, Ny, Nz, 1f0)
+
+    # Liquid neighbors carry the bath concentration. The interface cell's
+    # own c is not the no-flux value.
+    fill!(domain.c.data, 0.2f0)
+    domain.c.data[src_g] = 0f0
+    # Anti-BB writes 2 ceq(c_wall) - outgoing. A pore still uses
+    # c_H = k_H ρ_b / 3, and that slot equals ceq only when outgoing is ceq.
+    ceq_face = LatticeBoltzmann.ceq_axis(0.2f0, 0f0)
+    ceq_vent = LatticeBoltzmann.ceq_axis(0.001f0 / 3f0, 0f0)
+    i = 2
+    out_slot = LatticeBoltzmann.f_index(src_g, i + 1, N)
+    gas_slot = LatticeBoltzmann.f_index(src_g, i, N)
+    sentinel = 0.17f0
+    fill!(domain.ci.data, sentinel)
+    domain.ci.data[out_slot] = ceq_vent
+    _launch_surface0_even!(model)
+    @test domain.ci.data[gas_slot] ≈ (2f0 * ceq_face - ceq_vent) atol=1f-5
+    @test domain.ci.data[gas_slot] != sentinel
+
+    # The same geometry with a pore tag still pins the gas link to c_H.
+    domain.tag.data[n] = Int32(1)
+    domain.tag.data[src_g] = Int32(1)
+    fill!(domain.ci.data, sentinel)
+    domain.ci.data[out_slot] = ceq_vent
+    _launch_surface0_even!(model)
+    @test domain.ci.data[gas_slot] ≈ ceq_vent atol=1f-6
+    @test domain.ci.data[gas_slot] != sentinel
+end
+
+# One gas cell touching the headspace used to drop the whole pore.
+# The bridge cell is turned back into liquid and the id survives.
+@testset "gas bridge into the headspace does not drop the pore" begin
+    Nx = Ny = 8
+    Nz = 16
+    H = 10
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0, n_hydro=1)
+    domain = model.domains[1]
+    N = Nx * Ny * Nz
+    flags = fill(TYPE_G, N)
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = _layer_index(x, y, z, Nx, Ny)
+        if x == 0 || y == 0 || z == 0 || x == Nx - 1 || y == Ny - 1 || z == Nz - 1
+            flags[n] = TYPE_S
+        elseif z < H
+            flags[n] = TYPE_F
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    set_foam!(model; D=0.01, k_H=1e-5, k_Π=0, V_m=3, c0=0.02)
+    nucleate_bubbles!(model, [(4.0, 4.0, 5.0)], [2.2])
+    initialize!(model)
+    ids0 = bubble_ids(model)
+    @test length(ids0) == 1
+    id = ids0[1]
+    V0 = bubble_volume(model, id)
+    flags = Array(domain.flags.data)
+    tags = Array(domain.tag.data)
+    # The headspace is tag −1 only after a retag. Paint that before the bridge.
+    for i in eachindex(flags)
+        if (flags[i] & TYPE_SU) == TYPE_G && tags[i] == Int32(0)
+            tags[i] = Int32(-1)
+        end
+    end
+    x = 4
+    y = 4
+    top = -1
+    az = Nz
+    for z in 0:(Nz - 1)
+        n = _layer_index(x, y, z, Nx, Ny)
+        su = flags[n] & TYPE_SU
+        if tags[n] == id && su == TYPE_G
+            top = max(top, z)
+        elseif tags[n] == Int32(-1) && su == TYPE_G
+            az = min(az, z)
+        end
+    end
+    @test top >= 0 && az > top + 1
+    ϕ = Array(domain.ϕ.data)
+    nbridge = 0
+    for z in (top + 1):(az - 1)
+        n = _layer_index(x, y, z, Nx, Ny)
+        flags[n] = TYPE_G
+        tags[n] = id
+        ϕ[n] = 0
+        nbridge += 1
+    end
+    @test nbridge >= 1
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.tag.data, tags)
+    copyto!(domain.ϕ.data, ϕ)
+    for _ in 1:8
+        LatticeBoltzmann.step!(model)
+        @test id in bubble_ids(model)
+    end
+    @test bubble_volume(model, id) > 0.5 * V0
+end
+
+# Henry removes (old − reconstructed) from each gas-facing slot and stages
+# that drop on flux. step! then parks it on the TYPE_F rests. Eq. 27 adds
+# the liquid-side difference on top and removes it from the interface rest.
+@testset "Henry drop is the pore credit" begin
+    Nx = Ny = Nz = 8
+    model = Model(Nx, Ny, Nz, 0.1; backend=CPU(), σ=0)
+    domain = model.domains[1]
+    N = Nx * Ny * Nz
+    fill!(domain.flags.data, TYPE_F)
+    set_foam!(model; D=0.03, k_H=0.001, c0=0)
+    initialize!(model)
+    x = y = z = 3
+    n = _layer_index(x, y, z, Nx, Ny)
+    src_g = LatticeBoltzmann.src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    i = 2
+    flags = fill(TYPE_F, N)
+    flags[n] = TYPE_I
+    flags[src_g] = TYPE_G
+    copyto!(domain.flags.data, flags)
+    ϕ = ones(Float32, N)
+    ϕ[n] = 0.5f0
+    ϕ[src_g] = 0f0
+    copyto!(domain.ϕ.data, ϕ)
+    fill!(domain.ρb.data, 1f0)
+    fill!(domain.Pi.data, 0f0)
+    fill!(domain.fs.data, 0f0)
+    fill!(domain.u.data, 0f0)
+    fill!(domain.tag.data, Int32(0))
+    domain.tag.data[n] = Int32(1)
+    _write_rest_feq!(domain.fi.data, Nx, Ny, Nz, 1f0)
+
+    ceq = LatticeBoltzmann.ceq_axis(0.001f0 / 3f0, 0f0)
+    gas_slot = LatticeBoltzmann.f_index(src_g, i, N)
+    out_slot = LatticeBoltzmann.f_index(src_g, i + 1, N)
+    fill!(domain.ci.data, 0.2f0)
+    # Liquid-face imbalance fp_in − fm_out on the −x neighbor.
+    domain.ci.data[LatticeBoltzmann.f_index(n, i + 1, N)] = 0.3f0
+    domain.ci.data[LatticeBoltzmann.f_index(n, i, N)] = 0.1f0
+    old_gas = domain.ci.data[gas_slot]
+    fp_out = domain.ci.data[out_slot]
+    δ_slot = old_gas - (ceq - fp_out + ceq)
+    sum0 = sum(Array(domain.ci.data))
+    fill!(domain.flux.data, 0f0)
+    _launch_surface0_even!(model)
+    ci = Array(domain.ci.data)
+    @test ci[gas_slot] ≈ (ceq - fp_out + ceq) atol=1f-5
+    @test sum(ci) ≈ sum0 - δ_slot atol=1f-4
+    @test Array(domain.flux.data)[1] ≈ δ_slot atol=1f-5
+    @test all(iszero, @view Array(domain.flux.data)[2:end])
+    own0 = ci[LatticeBoltzmann.f_index(n, 1, N)]
+
+    # Eq. 27 is booked on top of the staged drop. It does not rewrite the
+    # interface rest: that cell is the Dirichlet shell. step! parks the
+    # staged drop on the bath before this kernel; this launch does not.
+    model.cached_concentration_flux_even_kernel!(
+        domain.ci.data, domain.flags.data, domain.tag.data, domain.flux.data,
+        Int(domain.N), Nx, Ny, Nz; ndrange = N)
+    synchronize(model.backend)
+    @test Array(domain.flux.data)[1] ≈ δ_slot + 0.2f0 atol=1f-5
+    @test Array(domain.ci.data)[LatticeBoltzmann.f_index(n, 1, N)] ≈ own0 atol=1f-5
+
+    # No liquid face: every gas link is booked, and Σ ci falls by that sum.
+    for (cx, cy, cz) in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+        j = LatticeBoltzmann.src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+        flags[j] = TYPE_G
+        ϕ[j] = 0f0
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.ϕ.data, ϕ)
+    fill!(domain.ci.data, 0.2f0)
+    fill!(domain.flux.data, 0f0)
+    sum0 = sum(Array(domain.ci.data))
+    _launch_surface0_even!(model)
+    # Each of 6 links: old 0.2, outgoing 0.2, rec = 2*ceq − 0.2.
+    δ_film = 6f0 * (0.2f0 - (2f0 * ceq - 0.2f0))
+    @test Array(domain.flux.data)[1] ≈ δ_film atol=1f-4
+    @test all(iszero, @view Array(domain.flux.data)[2:end])
+    @test sum(Array(domain.ci.data)) ≈ sum0 - δ_film atol=1f-3
+
+    domain.tag.data[n] = Int32(0)
+    fill!(domain.ci.data, 0.2f0)
+    fill!(domain.flux.data, 0f0)
+    _launch_surface0_even!(model)
+    @test all(iszero, Array(domain.flux.data))
+end
+
+# α = 0.01 is the metal diffusivity (ω_T ≈ 1.92). A frozen interface cell
+# on the mold picked up an odd-even mode and sat near 0.80 while the wall
+# was 0.90, about 60 K low on the aluminum scale. The wall is the floor.
+@testset "frozen pore on a slow-cooling mold stays above the wall" begin
+    Nx, Ny, Nz = 16, 16, 24
+    H = 16
+    Tmold = 0.899f0
+    Tinit = 1.146f0
+    model = Model(Nx, Ny, Nz, 0.2; backend=CPU(), σ=0.02, n_hydro=1,
+                  α=0.01, Λ=0.406, Ts=0.955, Tl=1.0, K0=1.0f-4,
+                  T_avg=Tinit, fz=-2.0f-5)
+    domain = model.domains[1]
+    flags = fill(TYPE_G, Nx * Ny * Nz)
+    Th = fill(Tinit, length(flags))
+    fsh = zeros(Float32, length(flags))
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = 1 + x + Nx * y + Nx * Ny * z
+        if x == 0 || y == 0 || z == 0 || x == Nx - 1 || y == Ny - 1 || z == Nz - 1
+            flags[n] = TYPE_S | TYPE_T
+            Th[n] = Tmold
+            fsh[n] = 1
+        elseif z < H
+            flags[n] = TYPE_F
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, Th)
+    copyto!(domain.fs.data, fsh)
+    set_foam!(model; D=0.01, k_H=1.0f-5, k_Π=0.02, q=0, V_m=30, γ_b=1, c0=0.05, ρ_liquid=1)
+    nucleate_bubbles!(model, [(5.0, 5.0, 6.0), (11.0, 11.0, 6.0)], [2.5, 2.5])
+    initialize!(model)
+    for _ in 1:1500
+        LatticeBoltzmann.step!(model)
+    end
+    tmin, _, _, twall, nmet = _metal_T_range(domain)
+    @info "slow mold floor" tmin twall nmet
+    @test nmet > 0
+    @test twall ≈ Float64(Tmold) atol=1e-4
+    # The example rejects 30 K, which is 0.034 on this scale. The odd-even
+    # mode used to land 0.08 under the wall.
+    @test tmin >= Float64(Tmold) - 0.02
+    @test all(isfinite, Array(domain.T.data))
+end
+
+@testset "spawn after initialize adds a local dissolved source" begin
+    Nx, Ny, Nz = 20, 20, 20
+    model = Model(Nx, Ny, Nz, 0.2; backend=CPU(), σ=0.01, fz=0.0)
+    domain = model.domains[1]
+    N = Nx * Ny * Nz
+    flags = fill(TYPE_G, N)
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = 1 + x + Nx * y + Nx * Ny * z
+        if x == 0 || y == 0 || z == 0 || x == Nx - 1 || y == Ny - 1 || z == Nz - 1
+            flags[n] = TYPE_S | TYPE_T
+        elseif z < 14
+            flags[n] = TYPE_F
+        end
+    end
+    copyto!(domain.flags.data, flags)
+    copyto!(domain.T.data, fill(1.1f0, N))
+    copyto!(domain.fs.data, zeros(Float32, N))
+    set_foam!(model; D=0.01, k_H=1.0f-5, k_Π=0, q=0, V_m=3, γ_b=1, c0=0, ρ_liquid=1)
+    initialize!(model)
+    @test bubble_count(model) == 0
+    @test all(iszero, Array(domain.c.data))
+
+    δ = zeros(Float32, N)
+    nsrc = 1 + 8 + Nx * 8 + Nx * Ny * 6
+    δ[nsrc] = 0.05f0
+    # A wall cell must not take solute.
+    δ[1] = 0.2f0
+    add_dissolved!(model, δ)
+    c0 = Array(domain.c.data)
+    @test c0[nsrc] ≈ 0.05f0
+    @test c0[1] == 0
+    LatticeBoltzmann.step!(model)
+    @test sum(Array(domain.c.data)) ≈ 0.05 atol=1e-3
+
+    ids = spawn_bubbles!(model, [(8.0, 8.0, 6.0)], [2.2])
+    @test length(ids) == 1
+    @test bubble_count(model) == 1
+    flags1 = Array(domain.flags.data)
+    tags = Array(domain.tag.data)
+    nG = 0
+    nblock = 0
+    for z in 0:(Nz - 1), y in 0:(Ny - 1), x in 0:(Nx - 1)
+        n = 1 + x + Nx * y + Nx * Ny * z
+        su = flags1[n] & TYPE_SU
+        if su == TYPE_G && tags[n] == ids[1]
+            nG += 1
+        end
+        # Class-0 blockers are liquid again. The free surface sits near z = 14.
+        if z < 10 && su == TYPE_I && tags[n] == 0
+            nblock += 1
+        end
+    end
+    @test nG >= 1
+    @test nblock == 0
+    LatticeBoltzmann.step!(model)
+    @test bubble_ids(model) == ids
+    @test bubble_volume(model, ids[1]) > 1
+    @test all(isfinite, Array(domain.ρ.data))
+    @test all(isfinite, Array(domain.T.data))
+    @test all(isfinite, Array(domain.c.data))
 end

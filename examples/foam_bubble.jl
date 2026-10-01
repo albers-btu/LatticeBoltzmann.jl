@@ -1,4 +1,6 @@
 # One bubble in a closed box. Requires FOAM = true.
+# Dimensionless Epstein–Plesset check (paper §4.2), not a metal.
+# The cooling aluminum foam is examples/foam_poisson.jl.
 # Prints R(t) next to sqrt(2 Δc V_m D t + R0^2). No pass/fail band.
 # `full = true` runs the paper's 100³ box.
 

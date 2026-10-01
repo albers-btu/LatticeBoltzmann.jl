@@ -411,7 +411,7 @@ T_w = \frac{T_\text{fluid} + q/k + \mathrm{Bi}\, T_\infty}{1+\mathrm{Bi}}, \quad
 
 `reconstruct_g_boundaries!` runs in **surface_0** on F and I cells so a missing wall–fluid link (AA only streams \(+c\)) is rebuilt. Wall enthalpy change goes to `Eacc[EACC_WALL]`.
 
-**Do not** write `geq(T)` into `TYPE_G`: that overwrites the streamed outgoing pop and acts as a heat sink (kills recoil / evap). Gas keeps AA bounce.
+A `TYPE_G` face is adiabatic at the interface temperature: `surface_0` sets \(g_{\mathrm{in}} = 2g^{\mathrm{eq}}(T)-g_{\mathrm{out}}\). Copying \(g_{\mathrm{out}}\) alone is a sink. Do not `store_pair` from the gas cell into the melt; that overwrites the interface equilibrium. Gas init writes equilibrium only into the gas cell's own slots.
 
 ### 8.4 Boussinesq
 
@@ -491,7 +491,7 @@ K = K_0 \frac{f_\ell^3}{f_s^2+\varepsilon},\quad
 \mathbf{F}_D = -\frac{\nu}{K}\mathbf{u}.
 \]
 
-Fully solid (\(f_\ell < 10^{-3}\)): force **replaces** all other forces and is large enough to kill velocity (`-2\rho u`). `K0=0` → off. `K0` is lattice length² (`Model` divides SI m² by `units.m²`).
+Fully solid (\(f_\ell < 10^{-3}\)): force **replaces** all other forces. Explicit Guo with equilibrium at \(u+F/(2\rho)\) maps the population velocity to \(u'=(1-\mathrm{drag}/\rho)\,u\), so the cap is \(\mathrm{drag}=\rho\) (one-step kill). \(\mathrm{drag}=2\rho\) would store a zero velocity and reflect the populations. `K0=0` → off. `K0` is lattice length² (`Model` divides SI m² by `units.m²`).
 
 ### 10.2 Marangoni (`marangoni_force`)
 

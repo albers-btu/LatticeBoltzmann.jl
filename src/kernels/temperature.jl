@@ -23,6 +23,37 @@ end
 @inline function is_dirichlet_solid(fl::UInt8)
     return ((fl & TYPE_S) != 0x00) & ((fl & TYPE_T) != 0x00)
 end
+
+# Coldest adjacent Dirichlet wall. At ω_T near 2 a frozen interface cell
+# against the mold picks up an odd-even mode and its temperature falls
+# tens of kelvin below the wall. The wall is the cold boundary, so the
+# node is not allowed under that temperature.
+@inline function coldest_dirichlet(Tfield, flags, x, y, z, Nx, Ny, Nz, ::Type{CType}) where {CType}
+    flo = zero(CType)
+    found = false
+    src = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+    found, flo = _wall_min(found, flo, Tfield, flags, src, CType)
+    src = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+    found, flo = _wall_min(found, flo, Tfield, flags, src, CType)
+    src = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+    found, flo = _wall_min(found, flo, Tfield, flags, src, CType)
+    src = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+    found, flo = _wall_min(found, flo, Tfield, flags, src, CType)
+    src = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+    found, flo = _wall_min(found, flo, Tfield, flags, src, CType)
+    src = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+    found, flo = _wall_min(found, flo, Tfield, flags, src, CType)
+    return found, flo
+end
+
+@inline function _wall_min(found::Bool, flo::CType, Tfield, flags, src, ::Type{CType}) where {CType}
+    is_dirichlet_solid(flags[src]) || return found, flo
+    Tw = CType(Tfield[src])
+    if !found || Tw < flo
+        return true, Tw
+    end
+    return true, flo
+end
 @inline function is_flux_solid(fl::UInt8)
     return ((fl & TYPE_S) != 0x00) & ((fl & TYPE_H) != 0x00) & ((fl & TYPE_T) == 0x00)
 end
@@ -49,16 +80,22 @@ end
         dir_m = is_dirichlet_solid(flags[srcm])
         flux_p = is_flux_solid(flags[srcp])
         flux_m = is_flux_solid(flags[srcm])
-        miss_p = dir_p | flux_p
-        miss_m = dir_m | flux_m
+        # Pore and headspace gas do not collide, so one AA parity reads a
+        # stale population and the melt heats. Rebuild that link at the
+        # interface temperature: g_in = 2 geq(T) - g_out. Copying g_out
+        # itself was a sink. This exchange is not a wall flux.
+        gas_p = (flags[srcp] & TYPE_SU) == TYPE_G
+        gas_m = (flags[srcm] & TYPE_SU) == TYPE_G
+        miss_p = dir_p | flux_p | gas_p
+        miss_m = dir_m | flux_m | gas_m
         (miss_p | miss_m) || continue
         fp_in,  fm_in  = load_pair(gi, n, srcp, i, t_odd, N, CType)
         fp_out, fm_out = load_outgoing_pair(gi, n, srcp, i, t_odd, N, CType)
-        rec_p = fp_out
-        rec_m = fm_out
+        rec_p = zero(CType)
+        rec_m = zero(CType)
         if miss_p
-            Tw = T[srcp]
-            if flux_p
+            Tw = gas_p ? T[n] : T[srcp]
+            if flux_p && !gas_p
                 hn = hT[srcp]; qn = Qin[srcp]
                 if hn == zero(CType) && qn == zero(CType)
                     miss_p = false
@@ -69,12 +106,12 @@ end
             if miss_p
                 geg = geq_T_axis(Tw, zero(CType))
                 rec_p = geg + geg - fp_out
-                acc_add!(Eacc, EACC_WALL, fillc * (fm_in - rec_p))
+                gas_p || acc_add!(Eacc, EACC_WALL, fillc * (fm_in - rec_p))
             end
         end
         if miss_m
-            Tw = T[srcm]
-            if flux_m
+            Tw = gas_m ? T[n] : T[srcm]
+            if flux_m && !gas_m
                 hn = hT[srcm]; qn = Qin[srcm]
                 if hn == zero(CType) && qn == zero(CType)
                     miss_m = false
@@ -85,7 +122,7 @@ end
             if miss_m
                 geg = geq_T_axis(Tw, zero(CType))
                 rec_m = geg + geg - fm_out
-                acc_add!(Eacc, EACC_WALL, fillc * (fp_in - rec_m))
+                gas_m || acc_add!(Eacc, EACC_WALL, fillc * (fp_in - rec_m))
             end
         end
         (miss_p | miss_m) && store_reconstructed_pair!(gi, n, srcp, i, rec_p, rec_m, miss_p, miss_m, t_odd, N)
@@ -321,6 +358,11 @@ end
             H = cell_enthalpy(Tfromg, fs[n], Λ, γn) + Qn
             Tnew, fl = invert_enthalpy(H, Ts, Tl, Λ, γn)
             fs[n] = one(CType) - fl
+            walled, Twmin = coldest_dirichlet(Tfield, flags, x, y, z, Nx, Ny, Nz, CType)
+            if walled && Tnew < Twmin
+                acc_add!(Eacc, EACC_WALL, fillc * (Twmin - Tnew))
+                Tnew = Twmin
+            end
             Tfield[n] = Tnew
             if fl > zero(CType) && fl < one(CType)
                 Tn = Tnew

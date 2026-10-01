@@ -64,8 +64,8 @@ export Model
 export get_D
 export run!, initialize!, moments!
 export set_foam!, bubble_stats
-export nucleate_bubbles!, poisson_disk_centers
-export bubble_count, bubble_ids, bubble_volume, bubble_ratio
+export nucleate_bubbles!, spawn_bubbles!, add_dissolved!, poisson_disk_centers, seed_poisson_bubbles!
+export bubble_count, bubble_ids, bubble_volume, bubble_ratio, bubble_frozen
 export update_force_field!, reset_force_field!
 
 include("export.jl")

@@ -235,7 +235,7 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType,
-    ci, ρb, Pi, k_H::CType, D::CType
+    ci, flux, ρb, Pi, k_H::CType, D::CType, tag, cfield
 ) where {odd, Q, CType}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
@@ -306,8 +306,12 @@ end
         ρn = ρn > zero(CType) ? ρn : one(CType)
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
         uxg = zero(CType); uyg = zero(CType); uzg = zero(CType)
-        ρ_gas = one(CType)
-        ϕn = calculate_phi(ρn, massn, flagsn)
+        # Hold the fill, and keep this bubble's gas pressure. Ambient ρ = 1
+        # on a half-frozen shell next to a neighbor that still uses ρb
+        # is a pressure jump and spikes |u|.
+        ϕn = ϕ[n]
+        σn = σ
+        ρ_gas = gas_density_plic(σn, ϕ, ϕn, x, y, z, Nx, Ny, Nz, ρb[n], Pi[n])
     elseif eq
         ρn, ux, uy, uz = prescribed_hydro(ρ[n], u[n, 1], u[n, 2], u[n, 3], fx, fy, fz)
         ϕn = calculate_phi(ρn, massn, flagsn)
@@ -403,8 +407,42 @@ end
     end
     # D3Q7 axes are hydro indices 2, 4, 6. Do not walk the D3Q19 pairs.
     # 5th store argument is the minus reconstruction, 6th the plus.
-    if !solidified && k_H > zero(CType) && D > zero(CType)
+    # A pore uses Henry's law, c_H = k_H ρ_b / 3. The free surface
+    # (tag −1) is no-flux at the neighboring liquid concentration.
+    # The interface cell itself is a depleted boundary, so its own c
+    # is not the bath value.
+    atm = tag[n] == Int32(-1)
+    if !solidified && D > zero(CType) && (atm || k_H > zero(CType))
         c_H = k_H * CType(ρb[n]) * (CType(1) / CType(3))
+        if atm
+            c_sum = zero(CType)
+            n_sum = zero(CType)
+            for k2 in 1:3
+                i2 = 2k2
+                cp2, cm2 = c[i2], c[i2 + 1]
+                jp = src_index(x, y, z, cp2[1], cp2[2], cp2[3], Nx, Ny, Nz)
+                jm = src_index(x, y, z, cm2[1], cm2[2], cm2[3], Nx, Ny, Nz)
+                if (flags[jp] & TYPE_SU) == TYPE_F
+                    c_sum += CType(cfield[jp])
+                    n_sum += one(CType)
+                end
+                if (flags[jm] & TYPE_SU) == TYPE_F
+                    c_sum += CType(cfield[jm])
+                    n_sum += one(CType)
+                end
+            end
+            c_H = n_sum > zero(CType) ? c_sum / n_sum : CType(cfield[n])
+        end
+        # The unknown population is replaced by Henry anti-bounce-back.
+        # (old − new) is staged in flux. The host then spreads that sum over
+        # every TYPE_F rest, so the Dirichlet sink stays and the bath does
+        # not lose it. Eq. 27, afterwards, is the only pore credit while any
+        # liquid cell remains. With no TYPE_F cell the staged drop stays on
+        # the pore: a bare film has nowhere else to put the solute. Tag −1
+        # is not a pore.
+        tag_n = tag[n]
+        book = !atm && tag_n > Int32(0) && tag_n <= Int32(MAX_BUBBLES)
+        restored = zero(CType)
         for k in 1:3
             i = 2k
             cp, cm = c[i], c[i + 1]
@@ -419,9 +457,24 @@ end
             fp_out, fm_out = load_outgoing_pair(ci, n, srcp, i, t_odd, N, CType)
             cp_rec = ceq_m - fm_out + ceq_p
             cm_rec = ceq_p - fp_out + ceq_m
+            if book
+                # Even gas-plus writes src slot i; odd writes src slot i+1.
+                # Even gas-minus writes n slot i+1; odd writes n slot i.
+                if sup == TYPE_G
+                    slot = ifelse(odd, f_index(srcp, i + 1, N), f_index(srcp, i, N))
+                    restored += CType(ci[slot]) - cm_rec
+                end
+                if sum_ == TYPE_G
+                    slot = ifelse(odd, f_index(n, i, N), f_index(n, i + 1, N))
+                    restored += CType(ci[slot]) - cp_rec
+                end
+            end
             store_reconstructed_pair!(
                 ci, n, srcp, i, cm_rec, cp_rec,
                 sup == TYPE_G, sum_ == TYPE_G, t_odd, N)
+        end
+        if book && restored != zero(CType)
+            acc_add!(flux, Int(tag_n), restored)
         end
     end
     mass[n] = massn
@@ -439,10 +492,10 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
-    ci, ρb, Pi, k_H::CType, D::CType
+    ci, flux, ρb, Pi, k_H::CType, D::CType, @Const(tag), @Const(cfield)
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, ρb, Pi, k_H, D)
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, flux, ρb, Pi, k_H, D, tag, cfield)
 end
 
 @kernel function surface_0_odd_kernel!(
@@ -451,10 +504,10 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
-    ci, ρb, Pi, k_H::CType, D::CType
+    ci, flux, ρb, Pi, k_H::CType, D::CType, @Const(tag), @Const(cfield)
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, ρb, Pi, k_H, D)
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, ci, flux, ρb, Pi, k_H, D, tag, cfield)
 end
 
 end
@@ -500,7 +553,10 @@ end
         @static if TEMPERATURE
             Tn = average_neighbors_T(T, flags, x, y, z, c, Nx, Ny, Nz, CType)
             T[n] = Tn
-            store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd, CType)
+            # Gas does not advect heat. geq(T, u) on this cell is what the
+            # melt reads as the missing population; a nonzero u was a heat
+            # source on the pore (Tmax climbed for hundreds of steps).
+            store_geq!(gi, n, x, y, z, Tn, zero(CType), zero(CType), zero(CType), N, Nx, Ny, Nz, t_odd, CType)
             fs[n] = average_neighbors_fs(fs, flags, x, y, z, c, Nx, Ny, Nz, CType)
         end
         return nothing
@@ -550,8 +606,10 @@ end
             ϕn = zero(CType)
 
             if frozen && (sus == TYPE_F || sus == TYPE_I)
+                # A solid cell keeps the fill it froze with. Rewriting ϕ from
+                # mass/ρ lets a density fluctuation move the bubble volume.
                 massexn = zero(CType)
-                ϕn = sus == TYPE_F ? one(CType) : calculate_phi(ρn, massn, TYPE_I)
+                ϕn = sus == TYPE_F ? one(CType) : ϕ[n]
             elseif sus == TYPE_F
                 massexn = massn - ρn
                 massn = ρn

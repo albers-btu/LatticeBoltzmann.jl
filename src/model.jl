@@ -69,6 +69,8 @@ mutable struct Model{
     @static if FOAM
         cached_concentration_even_kernel!::Any
         cached_concentration_odd_kernel!::Any
+        cached_concentration_flux_even_kernel!::Any
+        cached_concentration_flux_odd_kernel!::Any
         cached_disjoining_kernel!::Any
         cached_ϕ_correction_kernel!::Any
         cached_concentration_init_kernel!::Any
@@ -247,6 +249,8 @@ function Model(
     @static if FOAM
         cached_concentration_even = concentration_even_kernel!(backend, workgroup)
         cached_concentration_odd = concentration_odd_kernel!(backend, workgroup)
+        cached_concentration_flux_even = concentration_flux_even_kernel!(backend, workgroup)
+        cached_concentration_flux_odd = concentration_flux_odd_kernel!(backend, workgroup)
         cached_disjoining = disjoining_kernel!(backend, workgroup)
         cached_ϕ_correction = ϕ_correction_kernel!(backend, workgroup)
         cached_concentration_init = concentration_init_kernel!(backend, workgroup)
@@ -393,6 +397,8 @@ function Model(
                     (
                         cached_concentration_even,
                         cached_concentration_odd,
+                        cached_concentration_flux_even,
+                        cached_concentration_flux_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
                         cached_concentration_init,
@@ -436,6 +442,8 @@ function Model(
                     (
                         cached_concentration_even,
                         cached_concentration_odd,
+                        cached_concentration_flux_even,
+                        cached_concentration_flux_odd,
                         cached_disjoining,
                         cached_ϕ_correction,
                         cached_concentration_init,
@@ -760,7 +768,14 @@ function step!(model::Model)
                     domain.Λ_v, domain.T_v, p0v, domain.β_v,
                     Nd, Nx, Ny, Nz, domain.Eacc.data,
                     domain.h.data, domain.Q.data, domain.ω_T,
-                    domain.ci.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D; ndrange = N)
+                    domain.ci.data, domain.flux.data, domain.ρb.data, domain.Pi.data, domain.k_H, domain.D,
+                    domain.tag.data, domain.c.data; ndrange = N)
+                end
+                @static if FOAM
+                    # Henry's slot drop is in flux. Park it on the liquid before
+                    # eq. 27 writes the pore credit into the same buffer.
+                    KernelAbstractions.synchronize(model.backend)
+                    _park_henry_slot!(model, domain)
                 end
             end
 
@@ -811,9 +826,15 @@ function step!(model::Model)
 
             @static if FOAM
                 if domain.D > zero(domain.D)
+                    # Eq. 27 reads the pre-collide pairs. The collide below
+                    # overwrites those slots, so the credit has to land first.
+                    fk = t_odd ? model.cached_concentration_flux_odd_kernel! : model.cached_concentration_flux_even_kernel!
+                    fk(domain.ci.data, domain.flags.data, domain.tag.data, domain.flux.data,
+                       Nd, Nx, Ny, Nz; ndrange = N)
+                    KernelAbstractions.synchronize(model.backend)
+                    _debit_dissolved!(model, domain)
                     ck = t_odd ? model.cached_concentration_odd_kernel! : model.cached_concentration_even_kernel!
                     ck(domain.ci.data, domain.c.data, domain.flags.data, domain.u.data,
-                       domain.tag.data, domain.flux.data,
                        omega_c_from_D(domain.D), domain.q,
                        Nd, Nx, Ny, Nz; ndrange = N)
                 end
