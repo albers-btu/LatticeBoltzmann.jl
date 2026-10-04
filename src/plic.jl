@@ -1,6 +1,7 @@
 using StaticArrays
 
 const D3Q27_C = ntuple(i -> VELOCITIES[:D3Q27][i], 27)
+const D2Q9_C = ntuple(i -> VELOCITIES[:D2Q9][i], 9)
 
 @inline _sq(x) = x * x
 @inline _cb(x) = x * x * x
@@ -37,6 +38,15 @@ end
          T(2)*(phij[11]-phij[10] + phij[13]-phij[12] + phij[16]-phij[17] + phij[18]-phij[19]) +
          (phij[21]-phij[20] + phij[22]-phij[23] + phij[25]-phij[24] + phij[27]-phij[26])
     return _normalize(SVector{3,T}(nx, ny, nz))
+end
+
+# In-plane Parker–Youngs. Same metal→gas direction as calculate_normal_py:
+# drop cz ≠ 0 links and halve the remaining weights. _deposit_along_normal!
+# walks −n, so the opposite (+∇ϕ) stencil would deposit into the gas.
+@inline function calculate_normal_py_2d(phij::NTuple{9,T}) where {T}
+    nx = T(2)*(phij[3]-phij[2]) + (phij[9]-phij[6]) + (phij[7]-phij[8])
+    ny = T(2)*(phij[5]-phij[4]) + (phij[8]-phij[6]) + (phij[7]-phij[9])
+    return _normalize(SVector{3,T}(nx, ny, zero(T)))
 end
 
 @inline function plic_cube_reduced(V::T, n1::T, n2::T, n3::T) where {T}
@@ -81,6 +91,25 @@ end
     return l * copysign(T(0.5) - d, V0 - T(0.5))
 end
 
+# Unit-square cut (Scardovelli–Zaleski). Fold only the volume that enters α:
+# after the fold, V − 0.5 ≤ 0 for every fill, so signing with V would put
+# V0 and 1−V0 on the same side of the cell.
+@inline function plic_line(V0::T, n::SVector{3,T}) where {T}
+    ax, ay = abs(n[1]), abs(n[2])
+    l = ax + ay
+    l <= zero(T) && return zero(T)
+    V = T(0.5) - abs(V0 - T(0.5))
+    n1 = min(ax, ay) / l
+    n2 = max(ax, ay) / l
+    α = if n1 == zero(T)
+        V
+    else
+        Vstar = n1 / (T(2) * n2)
+        V <= Vstar ? sqrt(T(2) * n1 * n2 * V) : n2 * V + T(0.5) * n1
+    end
+    return l * copysign(T(0.5) - α, V0 - T(0.5))
+end
+
 @inline function lu_solve5!(M::MVector{25,T}, x::MVector{5,T}, b::MVector{5,T}, Nsol::Int) where {T}
     N = 5
     @inbounds for i in 1:Nsol
@@ -123,6 +152,19 @@ end
             ϕ0
         else
             ci = D3Q27_C[i]
+            T(ϕ[src_index(x, y, z, ci[1], ci[2], ci[3], Nx, Ny, Nz)])
+        end
+    end
+end
+
+@inline function gather_phi_d2q9(
+    ϕ, ϕ0::T, x::Int, y::Int, z::Int, Nx::Int, Ny::Int, Nz::Int
+) where {T}
+    return ntuple(Val(9)) do i
+        if i == 1
+            ϕ0
+        else
+            ci = D2Q9_C[i]
             T(ϕ[src_index(x, y, z, ci[1], ci[2], ci[3], Nx, Ny, Nz)])
         end
     end
@@ -204,10 +246,94 @@ end
     return clamp(K, -one(T), one(T))
 end
 
+# Curve curvature along the metal→gas normal. Same height coordinate as
+# calculate_curvature (line along +n). A liquid sphere there returns κ < 0,
+# so this formula is not negated on its own.
+@inline function calculate_curvature_2d(phij::NTuple{9,T}) where {T}
+    bz = calculate_normal_py_2d(phij)
+    _dot(bz, bz) <= zero(T) && return zero(T)
+    bx = SVector{3,T}(-bz[2], bz[1], zero(T))
+    center_offset = plic_line(phij[1], bz)
+
+    s4 = zero(T); s3 = zero(T); s2 = zero(T); s1 = zero(T)
+    h2 = zero(T); h1 = zero(T); h0 = zero(T)
+    number = 0
+    @inbounds for i in 2:9
+        ϕi = phij[i]
+        if ϕi > zero(T) && ϕi < one(T)
+            ci = D2Q9_C[i]
+            ei = SVector{3,T}(T(ci[1]), T(ci[2]), T(ci[3]))
+            offset = plic_line(ϕi, bz) - center_offset
+            s = _dot(ei, bx)
+            h = _dot(ei, bz) + offset
+            ss = s * s
+            s4 += ss * ss
+            s3 += ss * s
+            s2 += ss
+            s1 += s
+            h2 += ss * h
+            h1 += s * h
+            h0 += h
+            number += 1
+        end
+    end
+    number < 3 && return zero(T)
+
+    a11 = s4; a12 = s3; a13 = s2; b1 = h2
+    a21 = s3; a22 = s2; a23 = s1; b2 = h1
+    a31 = s2; a32 = s1; a33 = T(number); b3 = h0
+    p1, p2, p3 = abs(a11), abs(a21), abs(a31)
+    if p2 > p1 && p2 >= p3
+        a11, a21 = a21, a11
+        a12, a22 = a22, a12
+        a13, a23 = a23, a13
+        b1, b2 = b2, b1
+    elseif p3 > p1 && p3 >= p2
+        a11, a31 = a31, a11
+        a12, a32 = a32, a12
+        a13, a33 = a33, a13
+        b1, b3 = b3, b1
+    end
+    abs(a11) <= eps(T) && return zero(T)
+    a21 /= a11
+    a31 /= a11
+    a22 -= a21 * a12
+    a23 -= a21 * a13
+    b2 -= a21 * b1
+    a32 -= a31 * a12
+    a33 -= a31 * a13
+    b3 -= a31 * b1
+    if abs(a32) > abs(a22)
+        a22, a32 = a32, a22
+        a23, a33 = a33, a23
+        b2, b3 = b3, b2
+    end
+    abs(a22) <= eps(T) && return zero(T)
+    a32 /= a22
+    a33 -= a32 * a23
+    b3 -= a32 * b2
+    abs(a33) <= eps(T) && return zero(T)
+    C = b3 / a33
+    B = (b2 - a23 * C) / a22
+    A = (b1 - a12 * B - a13 * C) / a11
+    den = one(T) + B * B
+    den <= zero(T) && return zero(T)
+    κ = T(2) * A / (sqrt(den) * den)
+    !isfinite(κ) && return zero(T)
+    return clamp(κ, -one(T), one(T))
+end
+
 @inline function gas_density_plic(σ::T, ϕ, ϕ0::T, x, y, z, Nx, Ny, Nz) where {T}
     σ == zero(T) && return one(T)
-    phij = gather_phi_d3q27(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
-    κ = calculate_curvature(phij)
-    # 6σκ > 1 makes ρ_g ≤ 0 and feq invalid. Floor (and cap) the jump.
-    return clamp(one(T) - T(6) * σ * κ, T(0.2), T(2))
+    @static if DIM == 3
+        phij = gather_phi_d3q27(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
+        κ = calculate_curvature(phij)
+        # 6σκ > 1 makes ρ_g ≤ 0 and feq invalid. Floor (and cap) the jump.
+        return clamp(one(T) - T(6) * σ * κ, T(0.2), T(2))
+    elseif DIM == 2
+        phij = gather_phi_d2q9(ϕ, ϕ0, x, y, z, Nx, Ny, Nz)
+        κ = calculate_curvature_2d(phij)
+        # Δp = σκ and cs² = 1/3, so Δρ = 3σκ. Same clamps as the 3D jump.
+        return clamp(one(T) - T(3) * σ * κ, T(0.2), T(2))
+    end
 end

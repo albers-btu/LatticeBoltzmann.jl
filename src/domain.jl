@@ -407,16 +407,29 @@ end
             y = (n0 ÷ Nx) % Ny
             z = n0 ÷ (Nx * Ny)
             cnt = 0
-            @inbounds for i in 2:length(VELOCITIES[:D3Q19])
-                ci = VELOCITIES[:D3Q19][i]
-                j = _wrap_mass(x, ci[1], Nx) +
-                    _wrap_mass(y, ci[2], Ny) * Nx +
-                    _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
-                suj = flags[j] & (TYPE_SU | TYPE_S)
-                liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
-                liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)         # Count as recipient if liquid fraction (1-fs)
-                                                                                            # is greater than 1e-3 (0.1%)
-                cnt += Int(liquid)
+            @static if DIM == 3
+                @inbounds for i in 2:length(VELOCITIES[:D3Q19])
+                    ci = VELOCITIES[:D3Q19][i]
+                    j = _wrap_mass(x, ci[1], Nx) +
+                        _wrap_mass(y, ci[2], Ny) * Nx +
+                        _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
+                    suj = flags[j] & (TYPE_SU | TYPE_S)
+                    liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
+                    liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)         # Count as recipient if liquid fraction (1-fs)
+                                                                                                # is greater than 1e-3 (0.1%)
+                    cnt += Int(liquid)
+                end
+            elseif DIM == 2
+                @inbounds for i in 2:length(VELOCITIES[:D2Q9])
+                    ci = VELOCITIES[:D2Q9][i]
+                    j = _wrap_mass(x, ci[1], Nx) +
+                        _wrap_mass(y, ci[2], Ny) * Nx +
+                        _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
+                    suj = flags[j] & (TYPE_SU | TYPE_S)
+                    liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
+                    liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)
+                    cnt += Int(liquid)
+                end
             end
             return cnt
         end

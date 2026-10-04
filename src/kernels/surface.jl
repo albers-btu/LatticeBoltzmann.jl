@@ -117,7 +117,9 @@ end
             ρn += fp_out + fm_out
             ux += CType(c[i][1])*fp_out + CType(c[i+1][1])*fm_out
             uy += CType(c[i][2])*fp_out + CType(c[i+1][2])*fm_out
-            uz += CType(c[i][3])*fp_out + CType(c[i+1][3])*fm_out
+            @static if DIM == 3
+                uz += CType(c[i][3])*fp_out + CType(c[i+1][3])*fm_out
+            end
         end
         if ρn <= zero(CType)
             ρn = one(CType)
@@ -137,7 +139,11 @@ end
         @static if VOLUME_FORCE
             uxg = clamp(ux + fx / (CType(2) * ρn), -cs, cs)
             uyg = clamp(uy + fy / (CType(2) * ρn), -cs, cs)
-            uzg = clamp(uz + fz / (CType(2) * ρn), -cs, cs)
+            @static if DIM == 3
+                uzg = clamp(uz + fz / (CType(2) * ρn), -cs, cs)
+            elseif DIM == 2
+                uzg = zero(CType)
+            end
         else
             uxg, uyg, uzg = ux, uy, uz
         end
@@ -147,15 +153,24 @@ end
                 mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
                 uxg = clamp(uxg + mx * inv2ρ, -cs, cs)
                 uyg = clamp(uyg + my * inv2ρ, -cs, cs)
-                uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
+                @static if DIM == 3
+                    uzg = clamp(uzg + mz * inv2ρ, -cs, cs)
+                end
             end
             if Λ_v > zero(CType)
                 rx, ry, rz = recoil_force(T, ϕ, n, x, y, z, Nx, Ny, Nz, Λ_v, T_v, p0v, β_v, CType)
                 uxg = clamp(uxg + rx * inv2ρ, -cs, cs)
                 uyg = clamp(uyg + ry * inv2ρ, -cs, cs)
-                uzg = clamp(uzg + rz * inv2ρ, -cs, cs)
+                @static if DIM == 3
+                    uzg = clamp(uzg + rz * inv2ρ, -cs, cs)
+                end
             end
         end
+    end
+    # D2Q9 has cz = 0, but uzg still enters uug. Do not let fz back in.
+    @static if DIM == 2
+        uz = zero(CType)
+        uzg = zero(CType)
     end
     uug = CType(1.5) * (uxg*uxg + uyg*uyg + uzg*uzg)
 
