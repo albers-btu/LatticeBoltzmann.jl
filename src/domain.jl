@@ -200,7 +200,11 @@ function Domain(
                                                                     # ω_T = 1 / (2⋅αT + 1/2)
         Tmem = Memory(AT{CType}(undef, N))
         fill!(Tmem.data, T_avg)
-        gi = Memory(AT{SType}(undef, N * 7))
+        @static if DIM == 3
+            gi = Memory(AT{SType}(undef, N * 7))
+        else
+            gi = Memory(AT{SType}(undef, N * 5))
+        end
         fill!(gi.data, zero(SType))
         Qmem = Memory(AT{CType}(undef, N))
         fill!(Qmem.data, zero(CType))

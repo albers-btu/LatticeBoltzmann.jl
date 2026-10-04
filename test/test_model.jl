@@ -6,6 +6,8 @@ using LatticeBoltzmann
 
 	@test length(model.domains) == 1
 	@test length(model.domains[1].ρ) == 256^3
+	@test length(model.weights) == 19
+	@test length(model.domains[1].gi) == 256^3 * 7
 
 	@test model.ρ[1] == Float32(1.0)
 	@test model.u[1, 1] == Float32(0.0)

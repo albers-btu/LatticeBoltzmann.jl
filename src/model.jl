@@ -204,8 +204,23 @@ function Model(
 )
     backend isa CUDABackend && !CUDA.functional() && throw(ArgumentError("CUDABackend requested but CUDA is not functional"))
 
+    @static if DIM == 2
+        Int(Nz) == 1 || throw(ArgumentError("DIM=2 requires Nz == 1, got $(Int(Nz))"))
+        if scheme == :D3Q19
+            scheme = :D2Q9
+        elseif scheme != :D2Q9
+            throw(ArgumentError("DIM=2 scheme must be :D2Q9 or :D3Q19, got $scheme"))
+        end
+        if fz != 0
+            @warn "DIM=2 ignores gz; use gy for in-plane gravity"
+            fz = 0
+        end
+    end
+
     w = weights(scheme, CType)
     c = velocities(scheme)
+    Q_T = @static DIM == 3 ? 7 : 5
+    @info "lattice image" DIM SCHEME SCHEME_T scheme Q=length(w) Q_T
 
     cached_collide_even = stream_collide_even_kernel!(backend, workgroup)
     cached_collide_odd = stream_collide_odd_kernel!(backend, workgroup)
@@ -239,6 +254,9 @@ function Model(
     Dx = UInt(1)
     Dy = UInt(1)
     Dz = UInt(1)
+    @static if DIM == 2
+        Int(Dz) == 1 || throw(ArgumentError("DIM=2 requires Dz == 1, got $(Int(Dz))"))
+    end
     D = UInt(Dx*Dy*Dz)
 
     if Nx % Dx != 0 || Ny % Dy != 0 || Nz % Dz != 0
@@ -559,7 +577,11 @@ function warn_lattice_stability(
     if Ma > C(0.3)
         @warn "characteristic Mach=$(round(Float64(Ma); digits=3)) (u=$u_char, cs=$cs) is likely unstable; lower lbm_u or |g|"
     elseif Ma > C(0.15)
-        @warn "characteristic Mach=$(round(Float64(Ma); digits=3)) is high for D3Q19 (target ≲ 0.1)" u=u_char
+        @static if DIM == 3
+            @warn "characteristic Mach=$(round(Float64(Ma); digits=3)) is high for D3Q19 (target ≲ 0.1)" u=u_char
+        else
+            @warn "characteristic Mach=$(round(Float64(Ma); digits=3)) is high for D2Q9 (target ≲ 0.1)" u=u_char
+        end
     end
     if fmag > C(1e-3)
         @warn "lattice |f|=$fmag is large; expect compressibility / SURFACE blow-up"
