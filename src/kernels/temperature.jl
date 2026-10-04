@@ -3,10 +3,20 @@
 # Volumetric Q: after SRT, add Δgeq(ΔT=Q) so ΣΔg = Q (lattice dT/step).
 # TYPE_H: equivalent Dirichlet from Fourier + Robin, k = c_sT² (τ_T-1/2) = α/2.
 @inline function geq_T_rest(Tn::CType) where {CType}
-    return CType(0.25) * Tn - CType(0.25)
+    @static if DIM == 3
+        return CType(0.25) * Tn - CType(0.25)
+    else
+        # D2Q5 w0 = 1/3. g0 = w0 (T - 1).
+        return (one(CType) / CType(3)) * Tn - (one(CType) / CType(3))
+    end
 end
 @inline function geq_T_axis(Tn::CType, ucomp::CType) where {CType}
-    return CType(0.5) * Tn * ucomp + CType(0.125) * (Tn - one(CType))
+    @static if DIM == 3
+        return CType(0.5) * Tn * ucomp + CType(0.125) * (Tn - one(CType))
+    else
+        # D2Q5 axis weight 1/6. g = (1/6)(T - 1) + (1/2) T u_comp.
+        return CType(0.5) * Tn * ucomp + (one(CType) / CType(6)) * (Tn - one(CType))
+    end
 end
 
 # TYPE_S never collides. Uninitialized gi=0 is T=1 (lattice Tm). Keep geq(T[n],0)
@@ -14,8 +24,16 @@ end
 @inline function store_geq_local!(gi, n, Tn::CType, N::Int) where {CType}
     gi[f_index(n, 1, N)] = eltype(gi)(geq_T_rest(Tn))
     gax = geq_T_axis(Tn, zero(CType))
-    @inbounds for i in 2:7
-        gi[f_index(n, i, N)] = eltype(gi)(gax)
+    # Not a store_pair! site: one population per index. 2:5 covers both
+    # D2Q5 axis pairs. Indices 2 and 4 alone would leave 3 and 5 at 0.
+    @static if DIM == 3
+        @inbounds for i in 2:7
+            gi[f_index(n, i, N)] = eltype(gi)(gax)
+        end
+    else
+        @inbounds for i in 2:5
+            gi[f_index(n, i, N)] = eltype(gi)(gax)
+        end
     end
     return nothing
 end
@@ -42,7 +60,13 @@ end
     N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType},
     Eacc, fillc::CType, ω_T::CType
 ) where {odd, CType}
-    @inbounds for (i, cx, cy, cz) in ((2, 1, 0, 0), (4, 0, 1, 0), (6, 0, 0, 1))
+    # Pair 2 writes populations 2 and 3, pair 4 writes 4 and 5. No pair 6 in 2D.
+    @static if DIM == 3
+        thermal_axes = ((2, 1, 0, 0), (4, 0, 1, 0), (6, 0, 0, 1))
+    else
+        thermal_axes = ((2, 1, 0, 0), (4, 0, 1, 0))
+    end
+    @inbounds for (i, cx, cy, cz) in thermal_axes
         srcp = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
         srcm = src_index(x, y, z, -cx, -cy, -cz, Nx, Ny, Nz)
         dir_p = is_dirichlet_solid(flags[srcp])
@@ -94,7 +118,12 @@ end
 end
 
 @inline function thermal_conductivity(ω_T::CType) where {CType}
-    return CType(0.25) * (one(CType) / ω_T - CType(0.5))
+    @static if DIM == 3
+        return CType(0.25) * (one(CType) / ω_T - CType(0.5))
+    else
+        # k = cs² (1/ω - 1/2) with cs² = 1/3. Do not use the D3Q7 1/4.
+        return (one(CType) / CType(3)) * (one(CType) / ω_T - CType(0.5))
+    end
 end
 
 @inline function flux_neighbor_T(Tfield, flags, x, y, z, Nx, Ny, Nz, ::Type{CType}) where {CType}
@@ -120,15 +149,17 @@ end
         Tnb += Tfield[src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)]
         cnt += 1
     end
-    src = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
-    if (flags[src] & TYPE_S) != 0x00
-        Tnb += Tfield[src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)]
-        cnt += 1
-    end
-    src = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
-    if (flags[src] & TYPE_S) != 0x00
-        Tnb += Tfield[src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)]
-        cnt += 1
+    @static if DIM == 3
+        src = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+        if (flags[src] & TYPE_S) != 0x00
+            Tnb += Tfield[src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)]
+            cnt += 1
+        end
+        src = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+        if (flags[src] & TYPE_S) != 0x00
+            Tnb += Tfield[src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)]
+            cnt += 1
+        end
     end
     return Tnb, cnt
 end
@@ -246,7 +277,12 @@ end
 end
 
 @inline function omega_T_from_alpha(α::CType) where {CType}
-    return clamp_omega(one(CType) / (CType(2) * α + CType(0.5)))
+    @static if DIM == 3
+        return clamp_omega(one(CType) / (CType(2) * α + CType(0.5)))
+    else
+        # domain.α = 2χ and χ = cs² (1/ω - 1/2), cs² = 1/3, so 1/ω = (3/2)α + 1/2.
+        return clamp_omega(one(CType) / ((CType(3) / CType(2)) * α + CType(0.5)))
+    end
 end
 
 @inline function fs_from_T(Tn::CType, Ts::CType, Tl::CType) where {CType}
@@ -271,12 +307,16 @@ end
 ) where {odd, CType}
     srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
     srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-    srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
     g0 = CType(gi[f_index(n, 1, N)])
     gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
     gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
-    gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
-    Tfromg = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+    @static if DIM == 3
+        srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+        gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
+        Tfromg = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+    else
+        Tfromg = g0 + gpx + gmx + gpy + gmy + one(CType)
+    end
 
     Qn_in = Qin[n]
     Qn = Qn_in
@@ -362,35 +402,54 @@ end
     ge0 = geq_T_rest(Tn)
     gexp, gexm = geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux)
     geyp, geym = geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy)
-    gezp, gezm = geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz)
+    @static if DIM == 3
+        gezp, gezm = geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz)
+    end
 
     if dirichlet || use_flux || write_geq
         gi[f_index(n, 1, N)] = eltype(gi)(ge0)
         store_pair!(gi, n, srcx, 2, gexp, gexm, t_odd, N)
         store_pair!(gi, n, srcy, 4, geyp, geym, t_odd, N)
-        store_pair!(gi, n, srcz, 6, gezp, gezm, t_odd, N)
+        @static if DIM == 3
+            store_pair!(gi, n, srcz, 6, gezp, gezm, t_odd, N)
+        end
     else
         om = one(CType) - ω_T
-        gi[f_index(n, 1, N)] = eltype(gi)(om * g0 + ω_T * ge0 + CType(0.25) * Qn)
-        store_pair!(gi, n, srcx, 2,
-            om * gpx + ω_T * gexp + CType(0.5) * Qn * ux + CType(0.125) * Qn,
-            om * gmx + ω_T * gexm + CType(0.5) * Qn * (-ux) + CType(0.125) * Qn,
-            t_odd, N)
-        store_pair!(gi, n, srcy, 4,
-            om * gpy + ω_T * geyp + CType(0.5) * Qn * uy + CType(0.125) * Qn,
-            om * gmy + ω_T * geym + CType(0.5) * Qn * (-uy) + CType(0.125) * Qn,
-            t_odd, N)
-        store_pair!(gi, n, srcz, 6,
-            om * gpz + ω_T * gezp + CType(0.5) * Qn * uz + CType(0.125) * Qn,
-            om * gmz + ω_T * gezm + CType(0.5) * Qn * (-uz) + CType(0.125) * Qn,
-            t_odd, N)
+        @static if DIM == 3
+            gi[f_index(n, 1, N)] = eltype(gi)(om * g0 + ω_T * ge0 + CType(0.25) * Qn)
+            store_pair!(gi, n, srcx, 2,
+                om * gpx + ω_T * gexp + CType(0.5) * Qn * ux + CType(0.125) * Qn,
+                om * gmx + ω_T * gexm + CType(0.5) * Qn * (-ux) + CType(0.125) * Qn,
+                t_odd, N)
+            store_pair!(gi, n, srcy, 4,
+                om * gpy + ω_T * geyp + CType(0.5) * Qn * uy + CType(0.125) * Qn,
+                om * gmy + ω_T * geym + CType(0.5) * Qn * (-uy) + CType(0.125) * Qn,
+                t_odd, N)
+            store_pair!(gi, n, srcz, 6,
+                om * gpz + ω_T * gezp + CType(0.5) * Qn * uz + CType(0.125) * Qn,
+                om * gmz + ω_T * gezm + CType(0.5) * Qn * (-uz) + CType(0.125) * Qn,
+                t_odd, N)
+        else
+            # Δg0 = Q/3, Δg_axis = Q/6 + (Q u_comp)/2. Σ Δg = Q.
+            gi[f_index(n, 1, N)] = eltype(gi)(om * g0 + ω_T * ge0 + (one(CType) / CType(3)) * Qn)
+            store_pair!(gi, n, srcx, 2,
+                om * gpx + ω_T * gexp + CType(0.5) * Qn * ux + (one(CType) / CType(6)) * Qn,
+                om * gmx + ω_T * gexm + CType(0.5) * Qn * (-ux) + (one(CType) / CType(6)) * Qn,
+                t_odd, N)
+            store_pair!(gi, n, srcy, 4,
+                om * gpy + ω_T * geyp + CType(0.5) * Qn * uy + (one(CType) / CType(6)) * Qn,
+                om * gmy + ω_T * geym + CType(0.5) * Qn * (-uy) + (one(CType) / CType(6)) * Qn,
+                t_odd, N)
+        end
     end
 
     Tmacro = dirichlet || use_flux ? Tn : Tn + Qn
     dT = Tmacro - T_avg
     fxn -= fx * β * dT
     fyn -= fy * β * dT
-    fzn -= fz * β * dT
+    @static if DIM == 3
+        fzn -= fz * β * dT
+    end
     return fxn, fyn, fzn, mevap
 end
 
@@ -400,9 +459,11 @@ end
     gi[f_index(n, 1, N)] = eltype(gi)(geq_T_rest(Tn))
     srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
     srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-    srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
     store_pair!(gi, n, srcx, 2, geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux), t_odd, N)
     store_pair!(gi, n, srcy, 4, geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy), t_odd, N)
-    store_pair!(gi, n, srcz, 6, geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz), t_odd, N)
+    @static if DIM == 3
+        srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+        store_pair!(gi, n, srcz, 6, geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz), t_odd, N)
+    end
     return nothing
 end

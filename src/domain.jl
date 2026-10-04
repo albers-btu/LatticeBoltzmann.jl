@@ -195,9 +195,14 @@ function Domain(
         αl = α_l == zero(CType) ? αT : α_l
         νs = ν_s == zero(CType) ? CType(ν) : ν_s
         νl = ν_l == zero(CType) ? CType(ν) : ν_l
-        ω_T = one(CType) / (CType(2) * αT + CType(1) / CType(2))    # D3Q7 heat relaxation
-                                                                    # c_sT² = 1/4
-                                                                    # ω_T = 1 / (2⋅αT + 1/2)
+        @static if DIM == 3
+            ω_T = one(CType) / (CType(2) * αT + CType(1) / CType(2))    # D3Q7 heat relaxation
+                                                                        # c_sT² = 1/4
+                                                                        # ω_T = 1 / (2⋅αT + 1/2)
+        else
+            # D2Q5 cs² = 1/3. Same domain.α = 2χ, so 1/ω = (3/2)α + 1/2.
+            ω_T = one(CType) / ((CType(3) / CType(2)) * αT + CType(1) / CType(2))
+        end
         Tmem = Memory(AT{CType}(undef, N))
         fill!(Tmem.data, T_avg)
         @static if DIM == 3
@@ -304,10 +309,16 @@ end
     Q(domain::Domain) = domain.Q
     htc(domain::Domain) = domain.h
     fs(domain::Domain) = domain.fs
-    thermal_k(domain::Domain{CType}) where CType =                              # This models α is twice the lattice α,
-        CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))                    # and the D3Q7 scheme uses this model α.
-                                                                                # Later reconstruction of lattice parameters
-                                                                                # will use α/2, e.g. for Fourier's k = α/2
+    @static if DIM == 3
+        thermal_k(domain::Domain{CType}) where CType =                              # This models α is twice the lattice α,
+            CType(0.25) * (one(CType) / domain.ω_T - CType(0.5))                    # and the D3Q7 scheme uses this model α.
+                                                                                    # Later reconstruction of lattice parameters
+                                                                                    # will use α/2, e.g. for Fourier's k = α/2
+    else
+        # k = (1/3)(1/ω - 1/2) = α/2. The D3Q7 factor 1/4 would give 0.375α.
+        thermal_k(domain::Domain{CType}) where CType =
+            (one(CType) / CType(3)) * (one(CType) / domain.ω_T - CType(0.5))
+    end
     thermal_k_s(domain::Domain{CType}) where CType = CType(0.5) * domain.α_s
     thermal_k_l(domain::Domain{CType}) where CType = CType(0.5) * domain.α_l
 

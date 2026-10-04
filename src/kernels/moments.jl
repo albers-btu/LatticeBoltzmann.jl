@@ -71,17 +71,30 @@ using KernelAbstractions
     ρ[n] = ρn
     u[n, 1] = ux * invρ
     u[n, 2] = uy * invρ
-    u[n, 3] = uz * invρ
+    @static if DIM == 3
+        u[n, 3] = uz * invρ
+    else
+        u[n, 3] = zero(CType)
+    end
     @static if TEMPERATURE
         if (flagsn & (TYPE_T | TYPE_H)) == 0x00
-            srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
-            srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-            srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
-            g0 = CType(gi[f_index(n, 1, N)])
-            gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
-            gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
-            gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
-            T[n] = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+            @static if DIM == 3
+                srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+                srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+                srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+                g0 = CType(gi[f_index(n, 1, N)])
+                gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
+                gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
+                gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
+                T[n] = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
+            else
+                srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+                srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+                g0 = CType(gi[f_index(n, 1, N)])
+                gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
+                gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
+                T[n] = g0 + gpx + gmx + gpy + gmy + one(CType)
+            end
         end
     end
     return nothing

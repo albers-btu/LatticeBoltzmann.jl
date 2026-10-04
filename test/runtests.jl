@@ -9,6 +9,10 @@ using Test, StaticArrays, CUDA
 	include("test_plic.jl")
 	include("test_dim_alloc.jl")
 
+	@static if DIM == 2
+		include("test_poiseuille_2d.jl")
+	end
+
 	@static if DIM == 3
 		include("test_model.jl")
 		include("test_equilibrium.jl")
