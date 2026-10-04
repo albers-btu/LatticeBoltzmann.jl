@@ -153,6 +153,30 @@ end
     return inside, t, nϕ
 end
 
+# Trailing ::T keeps this more specific than the untyped-phij method.
+@inline function plic_hit(
+    ϕ0::T, phij::NTuple{9,T},
+    ox::T, oy::T, oz::T,
+    dirx::T, diry::T, dirz::T,
+    cx::T, cy::T, cz::T
+) where {T}
+    nϕ = calculate_normal_py_2d(phij)
+    n2 = nϕ[1]*nϕ[1] + nϕ[2]*nϕ[2] + nϕ[3]*nϕ[3]
+    n2 <= eps(T) && return false, zero(T), nϕ
+    dpl = plic_line(ϕ0, nϕ)
+    nd = nϕ[1]*dirx + nϕ[2]*diry + nϕ[3]*dirz
+    abs(nd) <= T(1e-8) && return false, zero(T), nϕ
+    t = (nϕ[1]*(cx - ox) + nϕ[2]*(cy - oy) + nϕ[3]*(cz - oz) + dpl) / nd
+    t <= T(1e-6) && return false, t, nϕ
+    hx = ox + t * dirx
+    hy = oy + t * diry
+    hz = oz + t * dirz
+    inside = abs(hx - cx) <= T(0.5) + T(1e-4) &&
+             abs(hy - cy) <= T(0.5) + T(1e-4) &&
+             abs(hz - cz) <= T(0.5) + T(1e-4)
+    return inside, t, nϕ
+end
+
 # Spread the heat energy into the cells along ray with a depth of skin cells.
 @inline function _deposit_along_normal!(
     Q, flags, Pabs_q::T, skin::Int,
@@ -198,78 +222,157 @@ end
     Nx::Int, Ny::Int, Nz::Int,
     path=nothing,
 ) where {T}
-    ox, oy, oz = o0x, o0y, o0z
-    dirx, diry, dirz = dx, dy, dz
-    Pleft = Pray
-    bounces = 0
-    max_step = Nx + Ny + Nz + 16
-    epsn = T(1e-4)
-    _raypoint!(path, ox, oy, oz, Pleft)
-    @inbounds for _ in 1:max_step
-        Pleft < T(1e-8) * Pray && break
-        ix = floor(Int, ox + T(0.5))
-        iy = floor(Int, oy + T(0.5))
-        iz = floor(Int, oz + T(0.5))
-        if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
-            _raypoint!(path, ox, oy, oz, Pleft)
-            break
-        end
-        n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
-        fl = flags[n]
-        su = fl & TYPE_SU
-        if (fl & TYPE_BO) == TYPE_S
-            _raypoint!(path, ox, oy, oz, Pleft)
-            break
-        elseif su == TYPE_I
-            ϕ0 = T(ϕ[n])
-            phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
-            hit, t, nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
-                                  T(ix), T(iy), T(iz))
-            noutx, nouty, noutz = nϕ[1], nϕ[2], nϕ[3]
-            cθ = -(dirx * noutx + diry * nouty + dirz * noutz)
-            if hit && cθ > zero(T)
-                A = clamp(fresnel_absorptance(cθ, n_re, n_im), zero(T), one(T))
-                Pabs = A * Pleft
-                _deposit_along_normal!(Q, flags, Pabs * qfac, skin,
-                                       ix, iy, iz, noutx, nouty, noutz,
-                                       Nx, Ny, Nz)
-                Pleft -= Pabs
-                bounces += 1
-                hx = ox + t * dirx
-                hy = oy + t * diry
-                hz = oz + t * dirz
-                _raypoint!(path, hx, hy, hz, Pleft)
-                (bounces >= max_bounce || Pleft < T(1e-8) * Pray) && break
-                dn = T(2) * (dirx * noutx + diry * nouty + dirz * noutz)
-                dirx -= dn * noutx
-                diry -= dn * nouty
-                dirz -= dn * noutz
-                invd = T(1) / max(sqrt(dirx*dirx + diry*diry + dirz*dirz), epsn)
-                dirx *= invd; diry *= invd; dirz *= invd
-                ox = hx + epsn * dirx
-                oy = hy + epsn * diry
-                oz = hz + epsn * dirz
-                _raypoint!(path, ox, oy, oz, Pleft)
-                continue
-            end
-        elseif su == TYPE_F
-            _add_q!(Q, n, Pleft * qfac)
-            _raypoint!(path, ox, oy, oz, zero(T))
-            break
-        end
-        tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
-                dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
-        tMaxY = diry > 0 ? (T(iy) + T(0.5) - oy) / diry :
-                diry < 0 ? (oy - (T(iy) - T(0.5))) / (-diry) : T(Inf)
-        tMaxZ = dirz > 0 ? (T(iz) + T(0.5) - oz) / dirz :
-                dirz < 0 ? (oz - (T(iz) - T(0.5))) / (-dirz) : T(Inf)
-        tstep = min(max(tMaxX, zero(T)), max(tMaxY, zero(T)), max(tMaxZ, zero(T))) + T(1e-5)
-        ox += tstep * dirx
-        oy += tstep * diry
-        oz += tstep * dirz
+    @static if DIM == 3
+        ox, oy, oz = o0x, o0y, o0z
+        dirx, diry, dirz = dx, dy, dz
+        Pleft = Pray
+        bounces = 0
+        max_step = Nx + Ny + Nz + 16
+        epsn = T(1e-4)
         _raypoint!(path, ox, oy, oz, Pleft)
+        @inbounds for _ in 1:max_step
+            Pleft < T(1e-8) * Pray && break
+            ix = floor(Int, ox + T(0.5))
+            iy = floor(Int, oy + T(0.5))
+            iz = floor(Int, oz + T(0.5))
+            if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
+                _raypoint!(path, ox, oy, oz, Pleft)
+                break
+            end
+            n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
+            fl = flags[n]
+            su = fl & TYPE_SU
+            if (fl & TYPE_BO) == TYPE_S
+                _raypoint!(path, ox, oy, oz, Pleft)
+                break
+            elseif su == TYPE_I
+                ϕ0 = T(ϕ[n])
+                phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+                hit, t, nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
+                                      T(ix), T(iy), T(iz))
+                noutx, nouty, noutz = nϕ[1], nϕ[2], nϕ[3]
+                cθ = -(dirx * noutx + diry * nouty + dirz * noutz)
+                if hit && cθ > zero(T)
+                    A = clamp(fresnel_absorptance(cθ, n_re, n_im), zero(T), one(T))
+                    Pabs = A * Pleft
+                    _deposit_along_normal!(Q, flags, Pabs * qfac, skin,
+                                           ix, iy, iz, noutx, nouty, noutz,
+                                           Nx, Ny, Nz)
+                    Pleft -= Pabs
+                    bounces += 1
+                    hx = ox + t * dirx
+                    hy = oy + t * diry
+                    hz = oz + t * dirz
+                    _raypoint!(path, hx, hy, hz, Pleft)
+                    (bounces >= max_bounce || Pleft < T(1e-8) * Pray) && break
+                    dn = T(2) * (dirx * noutx + diry * nouty + dirz * noutz)
+                    dirx -= dn * noutx
+                    diry -= dn * nouty
+                    dirz -= dn * noutz
+                    invd = T(1) / max(sqrt(dirx*dirx + diry*diry + dirz*dirz), epsn)
+                    dirx *= invd; diry *= invd; dirz *= invd
+                    ox = hx + epsn * dirx
+                    oy = hy + epsn * diry
+                    oz = hz + epsn * dirz
+                    _raypoint!(path, ox, oy, oz, Pleft)
+                    continue
+                end
+            elseif su == TYPE_F
+                _add_q!(Q, n, Pleft * qfac)
+                _raypoint!(path, ox, oy, oz, zero(T))
+                break
+            end
+            tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
+                    dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
+            tMaxY = diry > 0 ? (T(iy) + T(0.5) - oy) / diry :
+                    diry < 0 ? (oy - (T(iy) - T(0.5))) / (-diry) : T(Inf)
+            tMaxZ = dirz > 0 ? (T(iz) + T(0.5) - oz) / dirz :
+                    dirz < 0 ? (oz - (T(iz) - T(0.5))) / (-dirz) : T(Inf)
+            tstep = min(max(tMaxX, zero(T)), max(tMaxY, zero(T)), max(tMaxZ, zero(T))) + T(1e-5)
+            ox += tstep * dirx
+            oy += tstep * diry
+            oz += tstep * dirz
+            _raypoint!(path, ox, oy, oz, Pleft)
+        end
+        return nothing
+    elseif DIM == 2
+        # Vertical ray never crosses an x or y face. Slab is the z = 1 layer.
+        ox, oy = o0x, o0y
+        oz = one(T)
+        dirx, diry = dx, dy
+        dirz = zero(T)
+        nd = sqrt(dirx * dirx + diry * diry)
+        nd <= zero(T) && return nothing
+        dirx /= nd
+        diry /= nd
+        Pleft = Pray
+        bounces = 0
+        max_step = Nx + Ny + 16
+        epsn = T(1e-4)
+        _raypoint!(path, ox, oy, oz, Pleft)
+        @inbounds for _ in 1:max_step
+            Pleft < T(1e-8) * Pray && break
+            ix = floor(Int, ox + T(0.5))
+            iy = floor(Int, oy + T(0.5))
+            iz = floor(Int, oz + T(0.5))
+            if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
+                _raypoint!(path, ox, oy, oz, Pleft)
+                break
+            end
+            n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
+            fl = flags[n]
+            su = fl & TYPE_SU
+            if (fl & TYPE_BO) == TYPE_S
+                _raypoint!(path, ox, oy, oz, Pleft)
+                break
+            elseif su == TYPE_I
+                ϕ0 = T(ϕ[n])
+                phij = gather_phi_d2q9(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+                hit, t, nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
+                                      T(ix), T(iy), T(iz))
+                noutx, nouty, noutz = nϕ[1], nϕ[2], nϕ[3]
+                cθ = -(dirx * noutx + diry * nouty + dirz * noutz)
+                if hit && cθ > zero(T)
+                    A = clamp(fresnel_absorptance(cθ, n_re, n_im), zero(T), one(T))
+                    Pabs = A * Pleft
+                    _deposit_along_normal!(Q, flags, Pabs * qfac, skin,
+                                           ix, iy, iz, noutx, nouty, noutz,
+                                           Nx, Ny, Nz)
+                    Pleft -= Pabs
+                    bounces += 1
+                    hx = ox + t * dirx
+                    hy = oy + t * diry
+                    hz = oz + t * dirz
+                    _raypoint!(path, hx, hy, hz, Pleft)
+                    (bounces >= max_bounce || Pleft < T(1e-8) * Pray) && break
+                    dn = T(2) * (dirx * noutx + diry * nouty + dirz * noutz)
+                    dirx -= dn * noutx
+                    diry -= dn * nouty
+                    dirz = zero(T)
+                    invd = T(1) / max(sqrt(dirx*dirx + diry*diry), epsn)
+                    dirx *= invd; diry *= invd
+                    ox = hx + epsn * dirx
+                    oy = hy + epsn * diry
+                    oz = one(T)
+                    _raypoint!(path, ox, oy, oz, Pleft)
+                    continue
+                end
+            elseif su == TYPE_F
+                _add_q!(Q, n, Pleft * qfac)
+                _raypoint!(path, ox, oy, oz, zero(T))
+                break
+            end
+            tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
+                    dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
+            tMaxY = diry > 0 ? (T(iy) + T(0.5) - oy) / diry :
+                    diry < 0 ? (oy - (T(iy) - T(0.5))) / (-diry) : T(Inf)
+            tstep = min(max(tMaxX, zero(T)), max(tMaxY, zero(T))) + T(1e-5)
+            ox += tstep * dirx
+            oy += tstep * diry
+            _raypoint!(path, ox, oy, oz, Pleft)
+        end
+        return nothing
     end
-    return nothing
 end
 
 _raypoint!(::Nothing, args...) = nothing

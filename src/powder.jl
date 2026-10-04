@@ -163,60 +163,123 @@ end
     o0x::T, o0y::T, o0z::T, dirx::T, diry::T, dirz::T,
     dist_max::T, pmass::T, Nx::Int, Ny::Int, Nz::Int,
 ) where {T}
-    ox, oy, oz = o0x, o0y, o0z
-    traveled = zero(T)
-    max_step = Nx + Ny + Nz + 8
-    @inbounds for _ in 1:max_step
-        remaining = dist_max - traveled
+    @static if DIM == 3
+        ox, oy, oz = o0x, o0y, o0z
+        traveled = zero(T)
+        max_step = Nx + Ny + Nz + 8
+        @inbounds for _ in 1:max_step
+            remaining = dist_max - traveled
 
-        # Stopped short
-        remaining <= T(1e-6) && return ox, oy, oz, true, zero(T)
+            # Stopped short
+            remaining <= T(1e-6) && return ox, oy, oz, true, zero(T)
 
-        ix = floor(Int, ox + T(0.5))
-        iy = floor(Int, oy + T(0.5))
-        iz = floor(Int, oz + T(0.5))
+            ix = floor(Int, ox + T(0.5))
+            iy = floor(Int, oy + T(0.5))
+            iz = floor(Int, oz + T(0.5))
 
-        # Out of bounds
-        if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
-            return ox, oy, oz, false, zero(T)
-        end
+            # Out of bounds
+            if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
+                return ox, oy, oz, false, zero(T)
+            end
 
-        n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
-        fl = flags[n]
-        su = fl & TYPE_SU
+            n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
+            fl = flags[n]
+            su = fl & TYPE_SU
 
-        # Cancel on solid boundary
-        if (fl & TYPE_BO) == TYPE_S
-            return ox, oy, oz, false, zero(T)
-        # Deposit into Interface
-        elseif su == TYPE_I
-            ϕ0 = T(ϕ[n])
-            phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
-            hit, t, _nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
-                                   T(ix), T(iy), T(iz))
-            if hit && t > zero(T) && t <= remaining + T(0.5)
+            # Cancel on solid boundary
+            if (fl & TYPE_BO) == TYPE_S
+                return ox, oy, oz, false, zero(T)
+            # Deposit into Interface
+            elseif su == TYPE_I
+                ϕ0 = T(ϕ[n])
+                phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+                hit, t, _nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
+                                       T(ix), T(iy), T(iz))
+                if hit && t > zero(T) && t <= remaining + T(0.5)
+                    dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+                    return ox, oy, oz, false, dm
+                end
+            # Deposit into Fluid
+            elseif su == TYPE_F
                 dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
                 return ox, oy, oz, false, dm
             end
-        # Deposit into Fluid
-        elseif su == TYPE_F
-            dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
-            return ox, oy, oz, false, dm
+            tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
+                    dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
+            tMaxY = diry > 0 ? (T(iy) + T(0.5) - oy) / diry :
+                    diry < 0 ? (oy - (T(iy) - T(0.5))) / (-diry) : T(Inf)
+            tMaxZ = dirz > 0 ? (T(iz) + T(0.5) - oz) / dirz :
+                    dirz < 0 ? (oz - (T(iz) - T(0.5))) / (-dirz) : T(Inf)
+            tstep = min(max(tMaxX, zero(T)), max(tMaxY, zero(T)), max(tMaxZ, zero(T)))
+            tstep = min(tstep, remaining) + T(1e-5)
+            ox += tstep * dirx
+            oy += tstep * diry
+            oz += tstep * dirz
+            traveled += tstep
         end
-        tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
-                dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
-        tMaxY = diry > 0 ? (T(iy) + T(0.5) - oy) / diry :
-                diry < 0 ? (oy - (T(iy) - T(0.5))) / (-diry) : T(Inf)
-        tMaxZ = dirz > 0 ? (T(iz) + T(0.5) - oz) / dirz :
-                dirz < 0 ? (oz - (T(iz) - T(0.5))) / (-dirz) : T(Inf)
-        tstep = min(max(tMaxX, zero(T)), max(tMaxY, zero(T)), max(tMaxZ, zero(T)))
-        tstep = min(tstep, remaining) + T(1e-5)
-        ox += tstep * dirx
-        oy += tstep * diry
-        oz += tstep * dirz
-        traveled += tstep
+        return ox, oy, oz, false, zero(T)
+    elseif DIM == 2
+        # Vertical parcel cannot cross an x or y face, so it dies. Slab is z = 1.
+        ox, oy = o0x, o0y
+        oz = one(T)
+        dirz = zero(T)
+        nd = sqrt(dirx * dirx + diry * diry)
+        if nd <= zero(T)
+            return ox, oy, oz, false, zero(T)
+        end
+        dirx /= nd
+        diry /= nd
+        traveled = zero(T)
+        max_step = Nx + Ny + 16
+        @inbounds for _ in 1:max_step
+            remaining = dist_max - traveled
+
+            # Stopped short
+            remaining <= T(1e-6) && return ox, oy, oz, true, zero(T)
+
+            ix = floor(Int, ox + T(0.5))
+            iy = floor(Int, oy + T(0.5))
+            iz = floor(Int, oz + T(0.5))
+
+            # Out of bounds
+            if ix < 1 || ix > Nx || iy < 1 || iy > Ny || iz < 1 || iz > Nz
+                return ox, oy, oz, false, zero(T)
+            end
+
+            n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
+            fl = flags[n]
+            su = fl & TYPE_SU
+
+            # Cancel on solid boundary
+            if (fl & TYPE_BO) == TYPE_S
+                return ox, oy, oz, false, zero(T)
+            # Deposit into Interface
+            elseif su == TYPE_I
+                ϕ0 = T(ϕ[n])
+                phij = gather_phi_d2q9(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+                hit, t, _nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
+                                       T(ix), T(iy), T(iz))
+                if hit && t > zero(T) && t <= remaining + T(0.5)
+                    dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+                    return ox, oy, oz, false, dm
+                end
+            # Deposit into Fluid
+            elseif su == TYPE_F
+                dm = _deposit_parcel!(mp, mass, flags, n, pmass, τ_p)
+                return ox, oy, oz, false, dm
+            end
+            tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
+                    dirx < 0 ? (ox - (T(ix) - T(0.5))) / (-dirx) : T(Inf)
+            tMaxY = diry > 0 ? (T(iy) + T(0.5) - oy) / diry :
+                    diry < 0 ? (oy - (T(iy) - T(0.5))) / (-diry) : T(Inf)
+            tstep = min(max(tMaxX, zero(T)), max(tMaxY, zero(T)))
+            tstep = min(tstep, remaining) + T(1e-5)
+            ox += tstep * dirx
+            oy += tstep * diry
+            traveled += tstep
+        end
+        return ox, oy, oz, false, zero(T)
     end
-    return ox, oy, oz, false, zero(T)
 end
 
 # One time step of LBM.

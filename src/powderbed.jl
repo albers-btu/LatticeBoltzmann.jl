@@ -50,20 +50,24 @@ end
 # Returns the domain z of the top substrate cell (0 if there is no plate).
 function paint_powder_bed!(flags::AbstractVector{UInt8}, T::AbstractVector, fs::AbstractVector,
                            bed::PowderBed, T_init; z0::Int=2)
-    Nx, Ny, Nz = size(bed.phi)
-    Hfill = 0
-    zsub = substrate_top(bed)
-    @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
-        zd = z0 + z - 1
-        n = x + (y - 1) * Nx + (zd - 1) * Nx * Ny
-        plate = bed.substrate !== nothing && bed.substrate[x, y, z] != 0x00
-        metal = bed.phi[x, y, z] > 0
-        if plate || metal
-            flags[n] = TYPE_F
-            T[n] = T_init
-            fs[n] = 1
+    @static if DIM == 3
+        Nx, Ny, Nz = size(bed.phi)
+        Hfill = 0
+        zsub = substrate_top(bed)
+        @inbounds for z in 1:Nz, y in 1:Ny, x in 1:Nx
+            zd = z0 + z - 1
+            n = x + (y - 1) * Nx + (zd - 1) * Nx * Ny
+            plate = bed.substrate !== nothing && bed.substrate[x, y, z] != 0x00
+            metal = bed.phi[x, y, z] > 0
+            if plate || metal
+                flags[n] = TYPE_F
+                T[n] = T_init
+                fs[n] = 1
+            end
+            plate && z == zsub && (Hfill = zd)
         end
-        plate && z == zsub && (Hfill = zd)
+        return Hfill
+    elseif DIM == 2
+        throw(ArgumentError("paint_powder_bed! is a 3D HDF5 volume; DIM=2 has no powder bed"))
     end
-    return Hfill
 end
