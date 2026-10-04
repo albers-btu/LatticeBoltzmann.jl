@@ -11,6 +11,7 @@ using Test, StaticArrays, CUDA
 
 	@static if DIM == 2
 		include("test_poiseuille_2d.jl")
+		include("test_forces_2d.jl")
 	end
 
 	@static if DIM == 3

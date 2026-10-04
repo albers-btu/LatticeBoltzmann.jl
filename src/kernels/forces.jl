@@ -5,29 +5,54 @@ using Atomix
     Tfield, ϕ, flags, σT::CType, x::Int, y::Int, z::Int, n::Int,
     Nx::Int, Ny::Int, Nz::Int, ::Type{CType}
 ) where {CType}
-    xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
-    xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
-    yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-    ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
-    zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
-    zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
-    dTx = axis_deriv(Tfield, flags, n, xp, xm, CType)
-    dTy = axis_deriv(Tfield, flags, n, yp, ym, CType)
-    dTz = axis_deriv(Tfield, flags, n, zp, zm, CType)
-    half = CType(0.5)
-    dϕx = half * (ϕ[xp] - ϕ[xm])
-    dϕy = half * (ϕ[yp] - ϕ[ym])
-    dϕz = half * (ϕ[zp] - ϕ[zm])
-    mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
-    if mag > eps(CType)
-        inv = one(CType) / mag
-        nx, ny, nz = dϕx * inv, dϕy * inv, dϕz * inv
-        ndT = nx * dTx + ny * dTy + nz * dTz
-        dTx -= nx * ndT
-        dTy -= ny * ndT
-        dTz -= nz * ndT
+    @static if DIM == 3
+        xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+        xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+        yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+        ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+        zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+        zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+        dTx = axis_deriv(Tfield, flags, n, xp, xm, CType)
+        dTy = axis_deriv(Tfield, flags, n, yp, ym, CType)
+        dTz = axis_deriv(Tfield, flags, n, zp, zm, CType)
+        half = CType(0.5)
+        dϕx = half * (ϕ[xp] - ϕ[xm])
+        dϕy = half * (ϕ[yp] - ϕ[ym])
+        dϕz = half * (ϕ[zp] - ϕ[zm])
+        mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
+        if mag > eps(CType)
+            inv = one(CType) / mag
+            nx, ny, nz = dϕx * inv, dϕy * inv, dϕz * inv
+            ndT = nx * dTx + ny * dTy + nz * dTz
+            dTx -= nx * ndT
+            dTy -= ny * ndT
+            dTz -= nz * ndT
+        end
+        return σT * dTx, σT * dTy, σT * dTz
+    elseif DIM == 2
+        # (0,0,±1) on Nz = 1 wraps onto this cell; do not load it.
+        xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+        xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+        yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+        ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+        dTx = axis_deriv(Tfield, flags, n, xp, xm, CType)
+        dTy = axis_deriv(Tfield, flags, n, yp, ym, CType)
+        dTz = zero(CType)
+        half = CType(0.5)
+        dϕx = half * (ϕ[xp] - ϕ[xm])
+        dϕy = half * (ϕ[yp] - ϕ[ym])
+        dϕz = zero(CType)
+        mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
+        if mag > eps(CType)
+            inv = one(CType) / mag
+            nx, ny, nz = dϕx * inv, dϕy * inv, dϕz * inv
+            ndT = nx * dTx + ny * dTy + nz * dTz
+            dTx -= nx * ndT
+            dTy -= ny * ndT
+            dTz -= nz * ndT
+        end
+        return σT * dTx, σT * dTy, σT * dTz
     end
-    return σT * dTx, σT * dTy, σT * dTz
 end
 
 @inline function darcy_force(
@@ -52,25 +77,46 @@ end
     Nx::Int, Ny::Int, Nz::Int,
     Λ_v::CType, T_v::CType, p0::CType, β_v::CType, ::Type{CType}
 ) where {CType}
-    Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
-    Tn = Tfield[n]
-    pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
-    pr = ifelse(pr > CType(0.5), CType(0.5), pr)
-    pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
-    xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
-    xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
-    yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-    ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
-    zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
-    zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
-    half = CType(0.5)
-    dϕx = half * (ϕ[xp] - ϕ[xm])
-    dϕy = half * (ϕ[yp] - ϕ[ym])
-    dϕz = half * (ϕ[zp] - ϕ[zm])
-    mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
-    mag <= eps(CType) && return zero(CType), zero(CType), zero(CType)
-    inv = one(CType) / mag
-    return pr * dϕx * inv, pr * dϕy * inv, pr * dϕz * inv
+    @static if DIM == 3
+        Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+        Tn = Tfield[n]
+        pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
+        pr = ifelse(pr > CType(0.5), CType(0.5), pr)
+        pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+        xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+        xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+        yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+        ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+        zp = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
+        zm = src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz)
+        half = CType(0.5)
+        dϕx = half * (ϕ[xp] - ϕ[xm])
+        dϕy = half * (ϕ[yp] - ϕ[ym])
+        dϕz = half * (ϕ[zp] - ϕ[zm])
+        mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
+        mag <= eps(CType) && return zero(CType), zero(CType), zero(CType)
+        inv = one(CType) / mag
+        return pr * dϕx * inv, pr * dϕy * inv, pr * dϕz * inv
+    elseif DIM == 2
+        Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+        Tn = Tfield[n]
+        pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
+        pr = ifelse(pr > CType(0.5), CType(0.5), pr)
+        pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
+        # (0,0,±1) on Nz = 1 wraps onto this cell; do not load it.
+        xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
+        xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
+        yp = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
+        ym = src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz)
+        half = CType(0.5)
+        dϕx = half * (ϕ[xp] - ϕ[xm])
+        dϕy = half * (ϕ[yp] - ϕ[ym])
+        dϕz = zero(CType)
+        mag = sqrt(dϕx * dϕx + dϕy * dϕy + dϕz * dϕz)
+        mag <= eps(CType) && return zero(CType), zero(CType), zero(CType)
+        inv = one(CType) / mag
+        return pr * dϕx * inv, pr * dϕy * inv, pr * dϕz * inv
+    end
 end
 
 @inline function axis_deriv(Tfield, flags, n, srcp, srcm, ::Type{CType}) where {CType}
