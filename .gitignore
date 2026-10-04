@@ -1,3 +1,4 @@
 /Manifest*.toml
 /output*
 input/*.h5
+/LocalPreferences.toml

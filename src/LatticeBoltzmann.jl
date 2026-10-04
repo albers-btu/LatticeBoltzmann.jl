@@ -9,6 +9,7 @@ export VELOCITIES
 export velocities
 
 include("extensions.jl")
+export DIM, SCHEME, SCHEME_T
 export TRT, KBC, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE
 
 include("units.jl")

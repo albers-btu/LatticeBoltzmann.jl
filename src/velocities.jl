@@ -20,6 +20,13 @@ const VELOCITIES = Dict(
         SVector( 1, -1,  0),
         SVector(-1,  1,  0)
     ],
+    :D2Q5 => SVector{3, Int}[
+        SVector( 0,  0,  0),
+        SVector( 1,  0,  0),
+        SVector(-1,  0,  0),
+        SVector( 0,  1,  0),
+        SVector( 0, -1,  0),
+    ],
     :D3Q7 => SVector{3, Int}[
         SVector( 0,  0,  0),
         SVector( 1,  0,  0),

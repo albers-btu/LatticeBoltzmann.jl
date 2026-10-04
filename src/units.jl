@@ -18,7 +18,7 @@ end
 _cp_si(cp) = cp isa Quantity ? ustrip(u"J/kg/K", cp) : cp
 
 # How many cells span physical length si_x?
-# What lattice speed should equal physical si_u? (Usually around Ma ≈ 0.05, with Ma = u/cₛ and cₛ = 1/√3 for D3Q19)
+# What lattice speed should equal physical si_u? (Usually around Ma ≈ 0.05, with Ma = u/cₛ and cₛ = 1/√3 for D2Q9 and D3Q19)
 # Example: 1 mm in 100 cells, 1 m/s in 0.05 lattice u -> 5×10⁻⁷ physical seconds per time step
 function Units(
        x,    u,    ρ,   # Lattice units
