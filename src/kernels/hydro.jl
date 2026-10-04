@@ -163,6 +163,7 @@ end
 
 # Deviatoric shear population. c_s²=1/3, w_i/(2 c_s⁴) = (9/2) w_i.
 # Off-diagonal Π_αβ is stored once, so those terms carry a 2.
+@static if DIM == 3
 @inline function kbc_shear(wi::CType, cx::CType, cy::CType, cz::CType,
                            Πxx::CType, Πyy::CType, Πzz::CType,
                            Πxy::CType, Πxz::CType, Πyz::CType) where {CType}
@@ -271,6 +272,125 @@ end
         store_pair!(fi, n, src, i, fp, fm, t_odd, N)
     end
     return nothing
+end
+else
+# qzz is not orthogonal to mass on D2Q9. The 2D store calls kbc_shear_2d.
+# kbc_shear stays so a test can inject Πzz; production does not call it.
+@inline function kbc_shear(wi::CType, cx::CType, cy::CType, cz::CType,
+                           Πxx::CType, Πyy::CType, Πzz::CType,
+                           Πxy::CType, Πxz::CType, Πyz::CType) where {CType}
+    third = CType(1) / CType(3)
+    qxx = cx * cx - third
+    qyy = cy * cy - third
+    qzz = cz * cz - third
+    contr = qxx * Πxx + qyy * Πyy + qzz * Πzz +
+            CType(2) * (cx * cy * Πxy + cx * cz * Πxz + cy * cz * Πyz)
+    return wi * CType(4.5) * contr
+end
+
+@inline function kbc_shear_2d(wi::CType, cx::CType, cy::CType,
+                              Πxx::CType, Πyy::CType, Πxy::CType) where {CType}
+    third = CType(1) / CType(3)
+    qxx = cx * cx - third
+    qyy = cy * cy - third
+    contr = qxx * Πxx + qyy * Πyy + CType(2) * cx * cy * Πxy
+    return wi * CType(4.5) * contr
+end
+
+# KBC: f* = feq + (1-β) s + (1-γβ) h, h = (f-feq) - s, β = ω(ν).
+# γ from ⟨s|h⟩/⟨h|h⟩ with weight 1/feq. γ=1 is BGK.
+@inline function kbc_store!(
+    t_odd::Val{odd}, fi, fn1::CType, pairs, w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
+    ρn::CType, ux::CType, uy::CType, uz::CType, uu::CType,
+    fx::CType, fy::CType, fz::CType, ω::CType,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n::Int, x::Int, y::Int, z::Int, ::Type{CType}
+) where {odd, Q, CType}
+    NP = (Q - 1) ÷ 2
+    β = ω
+    Πxx = Πyy = Πxy = zero(CType)
+    fe0 = feq(w[1], ρn, ux, uy, uz, uu, c[1], CType)
+    for k in 1:NP
+        i = 2k
+        fp, fm = pairs[k]
+        feqp = feq(w[i], ρn, ux, uy, uz, uu, c[i], CType)
+        feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
+        dp = fp - feqp
+        dm = fm - feqm
+        cxp = CType(c[i][1]); cyp = CType(c[i][2])
+        cxm = CType(c[i + 1][1]); cym = CType(c[i + 1][2])
+        Πxx += dp * cxp * cxp + dm * cxm * cxm
+        Πyy += dp * cyp * cyp + dm * cym * cym
+        Πxy += dp * cxp * cyp + dm * cxm * cym
+    end
+    # h = (f − feq) − s. Strip mass and momentum from h so γ cannot change them
+    # (Guo lives in that sector). f* = BGK + (1−γ)β h⊥.
+    s0 = kbc_shear_2d(w[1], zero(CType), zero(CType), Πxx, Πyy, Πxy)
+    h0 = (fn1 - fe0) - s0
+    m0 = h0
+    mx = zero(CType); my = zero(CType); mz = zero(CType)
+    for k in 1:NP
+        i = 2k
+        fp, fm = pairs[k]
+        feqp = feq(w[i], ρn, ux, uy, uz, uu, c[i], CType)
+        feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
+        sp = kbc_shear_2d(w[i], CType(c[i][1]), CType(c[i][2]), Πxx, Πyy, Πxy)
+        sm = kbc_shear_2d(w[i + 1], CType(c[i + 1][1]), CType(c[i + 1][2]), Πxx, Πyy, Πxy)
+        hp = (fp - feqp) - sp
+        hm = (fm - feqm) - sm
+        m0 += hp + hm
+        mx += hp * CType(c[i][1]) + hm * CType(c[i + 1][1])
+        my += hp * CType(c[i][2]) + hm * CType(c[i + 1][2])
+        mz += hp * CType(c[i][3]) + hm * CType(c[i + 1][3])
+    end
+    sh = zero(CType)
+    hh = zero(CType)
+    h0p = kbc_hperp(w[1], h0, zero(CType), zero(CType), zero(CType), m0, mx, my, mz)
+    fe0s = ifelse(fe0 > CType(1e-8), fe0, CType(1e-8))
+    sh += s0 * h0p / fe0s
+    hh += h0p * h0p / fe0s
+    for k in 1:NP
+        i = 2k
+        fp, fm = pairs[k]
+        feqp = feq(w[i], ρn, ux, uy, uz, uu, c[i], CType)
+        feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
+        sp = kbc_shear_2d(w[i], CType(c[i][1]), CType(c[i][2]), Πxx, Πyy, Πxy)
+        sm = kbc_shear_2d(w[i + 1], CType(c[i + 1][1]), CType(c[i + 1][2]), Πxx, Πyy, Πxy)
+        hp = kbc_hperp(w[i], (fp - feqp) - sp, CType(c[i][1]), CType(c[i][2]), CType(c[i][3]), m0, mx, my, mz)
+        hm = kbc_hperp(w[i + 1], (fm - feqm) - sm, CType(c[i + 1][1]), CType(c[i + 1][2]), CType(c[i + 1][3]), m0, mx, my, mz)
+        fep = ifelse(feqp > CType(1e-8), feqp, CType(1e-8))
+        fem = ifelse(feqm > CType(1e-8), feqm, CType(1e-8))
+        sh += sp * hp / fep + sm * hm / fem
+        hh += hp * hp / fep + hm * hm / fem
+    end
+    γ = kbc_gamma(sh, hh, β)
+    omb = one(CType) - β
+    ghost = (one(CType) - γ) * β
+    gscale = one(CType) - CType(0.5) * β
+    f0 = fe0 + omb * (fn1 - fe0) + ghost * h0p
+    @static if APPLY_FORCE
+        f0 += gscale * guo_fi(w[1], ux, uy, uz, fx, fy, fz, c[1], CType)
+    end
+    fi[f_index(n, 1, N)] = eltype(fi)(f0)
+    for k in 1:NP
+        i = 2k
+        fp0, fm0 = pairs[k]
+        feqp = feq(w[i], ρn, ux, uy, uz, uu, c[i], CType)
+        feqm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
+        sp = kbc_shear_2d(w[i], CType(c[i][1]), CType(c[i][2]), Πxx, Πyy, Πxy)
+        sm = kbc_shear_2d(w[i + 1], CType(c[i + 1][1]), CType(c[i + 1][2]), Πxx, Πyy, Πxy)
+        hp = kbc_hperp(w[i], (fp0 - feqp) - sp, CType(c[i][1]), CType(c[i][2]), CType(c[i][3]), m0, mx, my, mz)
+        hm = kbc_hperp(w[i + 1], (fm0 - feqm) - sm, CType(c[i + 1][1]), CType(c[i + 1][2]), CType(c[i + 1][3]), m0, mx, my, mz)
+        fp = feqp + omb * (fp0 - feqp) + ghost * hp
+        fm = feqm + omb * (fm0 - feqm) + ghost * hm
+        @static if APPLY_FORCE
+            fp += gscale * guo_fi(w[i], ux, uy, uz, fx, fy, fz, c[i], CType)
+            fm += gscale * guo_fi(w[i + 1], ux, uy, uz, fx, fy, fz, c[i + 1], CType)
+        end
+        src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
+        store_pair!(fi, n, src, i, fp, fm, t_odd, N)
+    end
+    return nothing
+end
 end
 
 @inline function kbc_hperp(wi::CType, hi::CType, cx::CType, cy::CType, cz::CType,

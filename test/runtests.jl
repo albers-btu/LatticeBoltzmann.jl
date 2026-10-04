@@ -10,6 +10,7 @@ using Test, StaticArrays, CUDA
 	include("test_dim_alloc.jl")
 
 	@static if DIM == 2
+		include("test_kbc_2d.jl")
 		include("test_poiseuille_2d.jl")
 		include("test_forces_2d.jl")
 	end
