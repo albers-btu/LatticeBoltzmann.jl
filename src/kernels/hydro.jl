@@ -95,6 +95,9 @@ end
         uy = clamp(uy, -cs, cs)
         uz = clamp(uz, -cs, cs)
     end
+    @static if DIM == 2
+        uz = zero(CType)
+    end
     return ρn, ux, uy, uz
 end
 
@@ -103,6 +106,9 @@ end
     ux, uy, uz, w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     N, Nx, Ny, Nz, t_odd::Val{odd}
 ) where {odd, Q, CType}
+    @static if DIM == 2
+        uz = zero(CType)
+    end
     uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
     fi[f_index(n, 1, N)] = eltype(fi)(feq(w[1], ρn, ux, uy, uz, uu, c[1], CType))
     NP = (Q - 1) ÷ 2

@@ -93,11 +93,18 @@ using KernelAbstractions
                 uy += fyn * invρ * CType(0.5)
                 uz += fzn * invρ * CType(0.5)
             end
+            @static if DIM == 2
+                fzn = zero(CType)
+                uz = zero(CType)
+            end
             ux = clamp(ux, -cs, cs)
             uy = clamp(uy, -cs, cs)
             uz = clamp(uz, -cs, cs)
         end
 
+        @static if DIM == 2
+            uz = zero(CType)
+        end
         uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
         @static if TRT
             ωm = omega_minus(ω)
@@ -521,7 +528,9 @@ end # not SURFACE
             dT = T[n] - T_avg
             fxn -= fx * β * dT
             fyn -= fy * β * dT
+            @static if DIM == 3
             fzn -= fz * β * dT
+            end
           end
             if (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
                 if σT != zero(CType)
@@ -548,6 +557,10 @@ end # not SURFACE
             ux += fxn * invρ * CType(0.5)
             uy += fyn * invρ * CType(0.5)
             uz += fzn * invρ * CType(0.5)
+        end
+        @static if DIM == 2
+            fzn = zero(CType)
+            uz = zero(CType)
         end
         ux = clamp(ux, -cs, cs)
         uy = clamp(uy, -cs, cs)
@@ -581,6 +594,9 @@ end # not SURFACE
         end
     end
 
+    @static if DIM == 2
+        uz = zero(CType)
+    end
     uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
     @static if KBC
         kbc_store!(t_odd, fi, fn1, pairs, w, c, ρn, ux, uy, uz, uu, fxn, fyn, fzn, ω,

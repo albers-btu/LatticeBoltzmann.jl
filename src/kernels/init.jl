@@ -118,6 +118,10 @@ end
             ρn, ux, uy, uz = average_neighbors_fluid(ρ, u, flags, x, y, z, c, Nx, Ny, Nz, CType)
             ρ[n] = ρn
             u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz
+            @static if DIM == 2
+                uz = zero(CType)
+                u[n, 3] = zero(CType)
+            end
             @static if TEMPERATURE
                 fs[n] = average_neighbors_fs(fs, flags, x, y, z, c, Nx, Ny, Nz, CType)
             end
@@ -147,6 +151,9 @@ end
             ϕn = CType(0.5)
         elseif (flagsn & TYPE_SU) == TYPE_F
             ϕn = one(CType)
+        end
+        @static if DIM == 2
+            uz = zero(CType)
         end
         store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(false))
         @static if TEMPERATURE
@@ -223,6 +230,9 @@ end # SURFACE
                 store_geq_local!(gi, n, T[n], N)
             end
         else
+            @static if DIM == 2
+                uz = zero(CType)
+            end
             uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
             fi[f_index(n, 1, N)] = eltype(fi)(w[1] * ρn * (one(CType) - uu))
 
