@@ -686,10 +686,16 @@ function step!(model::Model)
             end
         end
 
+        # gi streams once per outer step. Init writes it for an even load,
+        # so that load is isodd(t), not the hydro substep index.
+        g_odd = isodd(Int(domain.t))
         for sub in 1:nsub
-            # Stream index across outer steps, so AA parity stays continuous.
+            # fi parity advances every hydro substep and stays continuous across outer steps.
             t_odd = isodd(Int(domain.t) * nsub + sub - 1)
             thermal = sub == nsub
+            # store(P) is pulled by load(!P). A cell born before the thermal
+            # collide must be visible to load(g_odd); one born after it, to load(!g_odd).
+            g_store_odd = thermal ? g_odd : !g_odd
 
             @static if SURFACE
                 sk0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
@@ -700,7 +706,8 @@ function step!(model::Model)
                     fx, fy, fz, σ, σT, domain.Tσ,
                     domain.Λ_v, domain.T_v, p0v, domain.β_v,
                     Nd, Nx, Ny, Nz, domain.Eacc.data,
-                    domain.h.data, domain.Q.data, domain.ω_T; ndrange = N)
+                    domain.h.data, domain.Q.data, domain.ω_T,
+                    thermal, g_odd; ndrange = N)
             end
 
             @static if MOVING_BOUNDARIES
@@ -727,7 +734,7 @@ function step!(model::Model)
                        νs, νl, νsT, νlT,
                        domain.Λ_v, domain.T_v, domain.C_hk, p0v, domain.β_v,
                        domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
-                       thermal,
+                       thermal, g_odd,
                        Nd, Nx, Ny, Nz, domain.Eacc.data,
                        domain.Macc.data;
                        ndrange = N)
@@ -745,6 +752,7 @@ function step!(model::Model)
                        νs, νl, νsT, νlT,
                        domain.Λ_v, domain.T_v, domain.C_hk, p0v, domain.β_v,
                        domain.C_rad, domain.T_rad,
+                       thermal, g_odd,
                        Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
             end
 
@@ -754,7 +762,7 @@ function step!(model::Model)
                 sk2 = t_odd ? model.cached_surface_2_odd_kernel! : model.cached_surface_2_even_kernel!
                 sk2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                     domain.gi.data, domain.T.data, domain.fs.data,
-                    model.weights, model.velocities, Nd, Nx, Ny, Nz; ndrange = N)
+                    model.weights, model.velocities, Nd, Nx, Ny, Nz, g_store_odd; ndrange = N)
                 model.cached_surface_3_kernel!(domain.ρ.data, domain.flags.data, domain.mass.data,
                                                domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                                                Nd, Nx, Ny, Nz; ndrange = N)
@@ -772,6 +780,13 @@ end
     return isodd(Int(domain.t) * nsub - 1)
 end
 
+# Parity of the thermal collide that just finished. t == 0 means init, which is even.
+@inline function last_thermal_odd(domain::Domain)
+    t = Int(domain.t)
+    t == 0 && return false
+    return isodd(t - 1)
+end
+
 function moments!(model::Model)
     for domain in model.domains
         N = get_N(domain)
@@ -783,7 +798,8 @@ function moments!(model::Model)
             domain.fi.data,
             domain.gi.data, domain.T.data,
             model.weights, model.velocities,
-            Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+            Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
+            last_thermal_odd(domain);
             ndrange = N
         )
     end

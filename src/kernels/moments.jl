@@ -1,7 +1,16 @@
 using KernelAbstractions
 
+@inline function load_gi_pair(gi, n, src, i, g_odd::Bool, N, ::Type{CType}) where {CType}
+    if g_odd
+        return load_pair(gi, n, src, i, Val(true), N, CType)
+    else
+        return load_pair(gi, n, src, i, Val(false), N, CType)
+    end
+end
+
 @inline function moments_body!(
     t_odd::Val{odd},
+    g_odd::Bool,
     ρ, u, flags, fi, gi, T,
     w::NTuple{Q, CType},
     c::NTuple{Q, SVector{3, Int}},
@@ -51,8 +60,10 @@ using KernelAbstractions
     pairs = ntuple(Val(NP)) do k
         i = 2k
         cp = c[i]
-        src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-        load_pair(fi, n, src, i, t_odd, N, CType)
+        cm = c[i + 1]
+        srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+        srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
+        load_bb_pair(fi, flags, n, srcp, srcm, i, t_odd, N, CType)
     end
 
     ρn = fn1
@@ -83,16 +94,16 @@ using KernelAbstractions
                 srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
                 srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
                 g0 = CType(gi[f_index(n, 1, N)])
-                gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
-                gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
-                gpz, gmz = load_pair(gi, n, srcz, 6, t_odd, N, CType)
+                gpx, gmx = load_gi_pair(gi, n, srcx, 2, g_odd, N, CType)
+                gpy, gmy = load_gi_pair(gi, n, srcy, 4, g_odd, N, CType)
+                gpz, gmz = load_gi_pair(gi, n, srcz, 6, g_odd, N, CType)
                 T[n] = g0 + gpx + gmx + gpy + gmy + gpz + gmz + one(CType)
             else
                 srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
                 srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
                 g0 = CType(gi[f_index(n, 1, N)])
-                gpx, gmx = load_pair(gi, n, srcx, 2, t_odd, N, CType)
-                gpy, gmy = load_pair(gi, n, srcy, 4, t_odd, N, CType)
+                gpx, gmx = load_gi_pair(gi, n, srcx, 2, g_odd, N, CType)
+                gpy, gmy = load_gi_pair(gi, n, srcy, 4, g_odd, N, CType)
                 T[n] = g0 + gpx + gmx + gpy + gmy + one(CType)
             end
         end
@@ -102,18 +113,18 @@ end
 
 @kernel function moments_even_kernel!(
     ρ, u, @Const(flags), fi, gi, T, w::NTuple{Q, CType},
-    c, N, Nx, Ny, Nz
+    c, N, Nx, Ny, Nz, g_odd::Bool
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds moments_body!(Val(false), ρ, u, flags, fi, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds moments_body!(Val(false), g_odd, ρ, u, flags, fi, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 @kernel function moments_odd_kernel!(
     ρ, u, @Const(flags), fi, gi, T, w::NTuple{Q, CType},
-    c, N, Nx, Ny, Nz
+    c, N, Nx, Ny, Nz, g_odd::Bool
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds moments_body!(Val(true), ρ, u, flags, fi, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds moments_body!(Val(true), g_odd, ρ, u, flags, fi, gi, T, w, c, N, Nx, Ny, Nz, Int(n))
 end
 
 @static if MOVING_BOUNDARIES

@@ -24,7 +24,8 @@ end
     c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType,
+    do_thermal::Bool, g_odd::Bool
 ) where {odd, Q, CType}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
@@ -59,18 +60,22 @@ end
         if !solidified
             for k in 1:NP
                 i = 2k # plus velocities
-                src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-                fp_in,  fm_in  = load_pair(fi, n, src, i, t_odd, N, CType)
-                fp_out, fm_out = load_outgoing_pair(fi, n, src, i, t_odd, N, CType)
+                cp, cm = c[i], c[i + 1]
+                srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
+                srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
+                fp_in,  fm_in  = load_bb_pair(fi, flags, n, srcp, srcm, i, t_odd, N, CType)
+                fp_out, fm_out = load_outgoing_pair(fi, n, srcp, i, t_odd, N, CType)
                 massn += (fp_in - fp_out) + (fm_in - fm_out)
             end
         end
         mass[n] = massn
 
         @static if TEMPERATURE
-            fillc = ϕ[n]
-            fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-            reconstruct_g_boundaries!(t_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+            if do_thermal
+                fillc = ϕ[n]
+                fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
+                reconstruct_g_boundaries!(g_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+            end
         end
         return nothing
     end
@@ -207,9 +212,11 @@ end
     end
     mass[n] = massn
     @static if TEMPERATURE
-        fillc = ϕn
-        fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-        reconstruct_g_boundaries!(t_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+        if do_thermal
+            fillc = ϕn
+            fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
+            reconstruct_g_boundaries!(g_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+        end
     end
     return nothing
 end
@@ -219,10 +226,11 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
+    do_thermal::Bool, g_odd::Bool
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, do_thermal, g_odd)
 end
 
 @kernel function surface_0_odd_kernel!(
@@ -230,10 +238,11 @@ end
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
+    do_thermal::Bool, g_odd::Bool
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T)
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, do_thermal, g_odd)
 end
 
 @kernel function surface_1_kernel!(
@@ -265,7 +274,7 @@ end
     t_odd::Val{odd},
     fi, ρ, u, flags, gi, T, fs,
     w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, g_store_odd::Bool
 ) where {odd, Q, CType}
     sus = flags[n] & (TYPE_SU | TYPE_S)
     n0 = n - 1
@@ -277,7 +286,7 @@ end
         @static if TEMPERATURE
             Tn = average_neighbors_T(T, flags, x, y, z, c, Nx, Ny, Nz, CType)
             T[n] = Tn
-            store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd, CType)
+            store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, g_store_odd, CType)
             fs[n] = average_neighbors_fs(fs, flags, x, y, z, c, Nx, Ny, Nz, CType)
         end
         return nothing
@@ -295,13 +304,13 @@ end
     return nothing
 end
 
-@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, fs, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+@kernel function surface_2_even_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, fs, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz, g_store_odd::Bool) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_2_body!(Val(false), fi, ρ, u, flags, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n), g_store_odd)
 end
-@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, fs, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz) where {Q, CType}
+@kernel function surface_2_odd_kernel!(fi, @Const(ρ), @Const(u), flags, gi, T, fs, w::NTuple{Q,CType}, c, N, Nx, Ny, Nz, g_store_odd::Bool) where {Q, CType}
     n = @index(Global)
-    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n))
+    @inbounds surface_2_body!(Val(true), fi, ρ, u, flags, gi, T, fs, w, c, N, Nx, Ny, Nz, Int(n), g_store_odd)
 end
 
 @kernel function surface_3_kernel!(

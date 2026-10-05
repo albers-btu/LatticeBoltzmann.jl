@@ -177,8 +177,6 @@ end
 kg_cell = ρ_m * m^3
 σ_lat_phys = ustrip(u"N/m", si_σ_phys) * s^2 / kg_cell
 n_hydro = max(1, ceil(Int, sqrt(max(σ_lat_phys, 0.0) / Float64(σ_lat_cap))))
-# An even count reuses one temperature slot, so the pool does not conduct.
-iseven(n_hydro) && (n_hydro += 1)
 si_σ  = si_σ_phys
 si_σT = si_σT_phys
 

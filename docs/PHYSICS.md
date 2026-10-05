@@ -1,6 +1,6 @@
 # LatticeBoltzmann.jl — models, equations, and how the kernels compute them
 
-This document describes the library **as it is in `src/`**: a FluidX3D-style lattice Boltzmann solver for incompressible hydrodynamics, optional free-surface (FSLBM), optional temperature / melting, and melt-pool drivers (laser, powder). Every equation is tied to the function that implements it.
+This document describes the library **as it is in `src/`**: an EsotericPull lattice Boltzmann solver for incompressible hydrodynamics, optional free-surface (FSLBM), optional temperature / melting, and melt-pool drivers (laser, powder). Every equation is tied to the function that implements it.
 
 The module table of contents is `src/LatticeBoltzmann.jl`. Physics that is compiled in is selected in `src/extensions.jl`.
 
@@ -15,7 +15,7 @@ The solver advances **one cell per GPU/CPU thread** through:
 3. combined **stream-collide** (hydro D3Q19 + heat D3Q7 + forces)
 4. FSLBM **surface_1 / 2 / 3** (interface conversion, excess mass)
 
-The time loop is `step!` in `src/model.jl`. There is **no second population array**: streaming is the A-A pattern (even/odd slot swap) in `src/kernel.jl`.
+The time loop is `step!` in `src/model.jl`. There is **no second population array**: streaming is EsotericPull (even/odd slot swap) in `src/kernels/helper.jl`.
 
 Target continuum equations (lattice units unless noted):
 
@@ -115,7 +115,7 @@ All cells of \(f_1\), then all of \(f_2\), … Neighbor `n` and `n+1` are adjace
 
 ### 4.2 Domain
 
-`src/domain.jl` — one grid’s state: `fi` (D3Q19), `ρ`, `u`, `F`, `flags`, plus FSLBM / T fields when compiled in. `t::UInt64` is the step counter (even/odd selects the AA kernel).
+`src/domain.jl` — one grid’s state: `fi` (D3Q19), `ρ`, `u`, `F`, `flags`, plus FSLBM / T fields when compiled in. `t::UInt64` is the step counter (even/odd selects the EsotericPull kernel).
 
 ### 4.3 Model
 
@@ -169,7 +169,7 @@ Fill fraction (`calculate_phi` in `kernel.jl`):
 
 ### 6.1 Discrete velocity set
 
-Default scheme `:D3Q19` (`src/velocities.jl`, `src/weights.jl`). Velocities are stored as **± pairs** after rest: \(e_0, +e_1,-e_1,+e_2,-e_2,\ldots\) That pairing is required for AA and TRT.
+Default scheme `:D3Q19` (`src/velocities.jl`, `src/weights.jl`). Velocities are stored as **± pairs** after rest: \(e_0, +e_1,-e_1,+e_2,-e_2,\ldots\) That pairing is required for EsotericPull and TRT.
 
 Weights: \(w_0=1/3\), face \(1/18\), edge \(1/36\).
 
@@ -244,7 +244,7 @@ then scaled by \((1-\omega/2)\) (SRT) or the TRT even/odd split (`scale_force_pa
 
 ### 6.5 Bounce-back and walls
 
-`TYPE_S` **does not collide**. AA already stores the incoming population in the opposite slot: that *is* bounce-back.
+`TYPE_S` **does not collide**. `load_bb_pair` reads the population the previous step stored into the wall and returns it as the opposite direction. That is the one-step EsotericPull bounce.
 
 Moving walls (`MOVING_BOUNDARIES`): `moving_wall_pair` adds the Ladd term \(-6 w_i \rho_w (c_i·u_w)\) when the neighbor is `TYPE_S` and this cell is `TYPE_MS`.
 
@@ -254,9 +254,9 @@ Periodic wrap: `wrap_coord` / `src_index` — faces wrap with a branch-light `if
 
 ---
 
-## 7. How hydro is computed efficiently (A-A + kernels)
+## 7. How hydro is computed efficiently (EsotericPull + kernels)
 
-### 7.1 A-A streaming (no second `f` array)
+### 7.1 EsotericPull (no second `f` array)
 
 Velocities come in ± pairs. After collide, the post-collision \(f_+\) is written into the slot where the **next** collide will read the streamed value.
 
@@ -364,7 +364,7 @@ Heat collide is **SRT** (not TRT). After collide, a source \(\Delta T = Q\) is i
 
 so \(T\) jumps by \(Q\) this step. Explicitly (`collide_temperature!` else-branch): rest gets \(0.25 Q\), each axis \(0.5 Q u_\alpha + 0.125 Q\).
 
-AA for `gi` uses the **same** `load_pair` / `store_pair!` as hydro (only three axis pairs).
+EsotericPull for `gi` uses the **same** `load_pair` / `store_pair!` as hydro (only three axis pairs).
 
 ### 8.2 Enthalpy and melting
 
@@ -397,7 +397,7 @@ Solid fraction from temperature only (Dirichlet walls): `fs_from_T`.
 
 | Flag | Model | Code |
 |------|--------|------|
-| `TYPE_S` only | adiabatic bounce-back (AA, do not overwrite `g`) | comment on `reconstruct_g_boundaries!` |
+| `TYPE_S` only | adiabatic bounce-back (EsotericPull, do not overwrite `g`) | comment on `reconstruct_g_boundaries!` |
 | `TYPE_S\|TYPE_T` | Dirichlet ABB at `T[wall]` | `is_dirichlet_solid`; \(g_{\mathrm{in}} = 2g^{\mathrm{eq}}(T_w)-g_{\mathrm{out}}\) |
 | `TYPE_S\|TYPE_H` | Neumann / Robin | `robin_wall_T` |
 
@@ -409,9 +409,9 @@ T_w = \frac{T_\text{fluid} + q/k + \mathrm{Bi}\, T_\infty}{1+\mathrm{Bi}}, \quad
 
 `h=0` → Neumann with flux `Q[wall]`. `T[wall]` holds \(T_\infty\) when `h≠0`.
 
-`reconstruct_g_boundaries!` runs in **surface_0** on F and I cells so a missing wall–fluid link (AA only streams \(+c\)) is rebuilt. Wall enthalpy change goes to `Eacc[EACC_WALL]`.
+`reconstruct_g_boundaries!` runs in **surface_0** on F and I cells so a missing wall–fluid link (EsotericPull only streams \(+c\)) is rebuilt. Wall enthalpy change goes to `Eacc[EACC_WALL]`.
 
-**Do not** write `geq(T)` into `TYPE_G`: that overwrites the streamed outgoing pop and acts as a heat sink (kills recoil / evap). Gas keeps AA bounce.
+**Do not** write `geq(T)` into `TYPE_G`: that overwrites the streamed outgoing pop and acts as a heat sink (kills recoil / evap). Gas keeps the EsotericPull populations.
 
 ### 8.4 Boussinesq
 
@@ -425,7 +425,7 @@ i.e. gravity is scaled by density variation \(\beta\Delta T\). \(\mathbf{F}_0=(f
 
 ---
 
-## 9. Free-surface LBM (Körner / FluidX3D)
+## 9. Free-surface LBM (Körner)
 
 `SURFACE`. Liquid is `TYPE_F` / `TYPE_I`; atmosphere is `TYPE_G` (no hydro collide). Interface is **one cell** thick.
 
@@ -464,7 +464,7 @@ Gas density from **PLIC curvature** (`gas_density_plic` in `plic.jl`):
 \rho_g = 1 - 6\sigma\kappa.
 \]
 
-With \(p=\rho/3\), this is Young–Laplace \(\Delta p \propto \sigma\kappa\) (FluidX3D convention). \(\sigma=0\) → \(\rho_g=1\).
+With \(p=\rho/3\), this is Young–Laplace \(\Delta p \propto \sigma\kappa\). \(\sigma=0\) → \(\rho_g=1\).
 
 \(\sigma(T)=\sigma+\sigma_T(T-T_\sigma)\) on the interface before the PLIC call.
 
@@ -609,7 +609,7 @@ Enthalpy of a cell: `fill · cell_enthalpy(T, f_s, Λ, γ)` with `fill=ϕ` on th
 - Bare cells (no S/E/T/H/F/I) become **G**.
 - G next to F becomes **I** with \(\phi=0.5\) and \(\rho,u\) averaged from fluid neighbors.
 - Solids: \(u=0\), `store_geq_local!(T_{\mathrm{wall}})`.
-- F/I: `store_feq!` / `store_geq!` in the **even** AA layout (`Val(false)`), `mass = ϕ ρ`.
+- F/I: `store_feq!` / `store_geq!` in the **even** EsotericPull layout (`Val(false)`), `mass = ϕ ρ`.
 
 Then `reset_energy_budget!` / `reset_mass_budget!` snapshot \(H_0\), \(M_0\).
 

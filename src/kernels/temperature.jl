@@ -117,6 +117,20 @@ end
     return nothing
 end
 
+@inline function reconstruct_g_boundaries!(
+    g_odd::Bool, gi, T, flags, hT, Qin,
+    x::Int, y::Int, z::Int, n::Int,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType},
+    Eacc, fillc::CType, ω_T::CType
+) where {CType}
+    if g_odd
+        reconstruct_g_boundaries!(Val(true), gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+    else
+        reconstruct_g_boundaries!(Val(false), gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+    end
+    return nothing
+end
+
 @inline function thermal_conductivity(ω_T::CType) where {CType}
     @static if DIM == 3
         return CType(0.25) * (one(CType) / ω_T - CType(0.5))
@@ -453,17 +467,69 @@ end
     return fxn, fyn, fzn, mevap
 end
 
+@inline function collide_temperature!(
+    g_odd::Bool, gi, Tfield, Qin, hT, flags, flagsn, fs,
+    ux::CType, uy::CType, uz::CType,
+    fxn::CType, fyn::CType, fzn::CType,
+    fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType,
+    γ_s::CType, γ_l::CType,
+    Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
+    x::Int, y::Int, z::Int, Nx::Int, Ny::Int, Nz::Int, N::Int, n::Int,
+    ::Type{CType}, Eacc, fill::CType
+) where {CType}
+    if g_odd
+        return collide_temperature!(
+            Val(true), gi, Tfield, Qin, hT, flags, flagsn, fs,
+            ux, uy, uz, fxn, fyn, fzn, fx, fy, fz,
+            ω_T, β, T_avg, Λ, Ts, Tl, γ_s, γ_l,
+            Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad,
+            x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, fill)
+    else
+        return collide_temperature!(
+            Val(false), gi, Tfield, Qin, hT, flags, flagsn, fs,
+            ux, uy, uz, fxn, fyn, fzn, fx, fy, fz,
+            ω_T, β, T_avg, Λ, Ts, Tl, γ_s, γ_l,
+            Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad,
+            x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, fill)
+    end
+end
+
 @inline function store_geq!(
-    gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd::Val{odd}, ::Type{CType}
-) where {odd, CType}
+    gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, t_odd::Val{odd}, ::Type{CType},
+    ::Val{swap}=Val(false)
+) where {odd, CType, swap}
     gi[f_index(n, 1, N)] = eltype(gi)(geq_T_rest(Tn))
     srcx = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
     srcy = src_index(x, y, z, 0, 1, 0, Nx, Ny, Nz)
-    store_pair!(gi, n, srcx, 2, geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux), t_odd, N)
-    store_pair!(gi, n, srcy, 4, geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy), t_odd, N)
+    gpx, gmx = geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux)
+    gpy, gmy = geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy)
+    # Same init correction as store_feq!: even load would otherwise see −u.
+    if swap
+        gpx, gmx = gmx, gpx
+        gpy, gmy = gmy, gpy
+    end
+    store_pair!(gi, n, srcx, 2, gpx, gmx, t_odd, N)
+    store_pair!(gi, n, srcy, 4, gpy, gmy, t_odd, N)
     @static if DIM == 3
         srcz = src_index(x, y, z, 0, 0, 1, Nx, Ny, Nz)
-        store_pair!(gi, n, srcz, 6, geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz), t_odd, N)
+        gpz, gmz = geq_T_axis(Tn, uz), geq_T_axis(Tn, -uz)
+        if swap
+            gpz, gmz = gmz, gpz
+        end
+        store_pair!(gi, n, srcz, 6, gpz, gmz, t_odd, N)
+    end
+    return nothing
+end
+
+@inline function store_geq!(
+    gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, g_odd::Bool, ::Type{CType}
+) where {CType}
+    if g_odd
+        store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, Val(true), CType)
+    else
+        store_geq!(gi, n, x, y, z, Tn, ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType)
     end
     return nothing
 end

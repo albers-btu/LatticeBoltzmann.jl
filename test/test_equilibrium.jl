@@ -35,3 +35,25 @@ using KernelAbstractions
     @test all(isapprox.(u[inlet, 2], 0; atol=1.0f-6))
     @test all(isapprox.(u[inlet, 3], 0; atol=1.0f-6))
 end
+
+@testset "EsotericPull init keeps the sign of a uniform velocity" begin
+    Nx, Ny, Nz = 8, 8, 8
+    ux0 = 0.05f0
+    model = Model(Nx, Ny, Nz, 0.02; fx=0.0f0, fy=0.0f0, fz=0.0f0, β=0.0f0,
+                  backend=CPU(), workgroup=64)
+    N = Nx * Ny * Nz
+    copyto!(model.domains[1].flags.data, fill(TYPE_F, N))
+    uh = zeros(Float32, N, 3)
+    uh[:, 1] .= ux0
+    copyto!(model.domains[1].u.data, uh)
+    copyto!(model.domains[1].ρ.data, ones(Float32, N))
+    initialize!(model)
+    moments!(model)
+    u0 = Array(model.domains[1].u.data)
+    @test all(isapprox.(u0[:, 1], ux0; atol=1.0f-5))
+    @test all(isapprox.(u0[:, 2], 0; atol=1.0f-5))
+    run!(model, 2)
+    moments!(model)
+    u2 = Array(model.domains[1].u.data)
+    @test all(isapprox.(u2[:, 1], ux0; atol=1.0f-4))
+end

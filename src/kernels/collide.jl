@@ -13,6 +13,7 @@ using KernelAbstractions
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
+    do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -42,7 +43,7 @@ using KernelAbstractions
             cp, cm = c[i], c[i + 1]
             srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
             srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
-            fp, fm = load_pair(fi, n, srcp, i, t_odd, N, CType)
+            fp, fm = load_bb_pair(fi, flags, n, srcp, srcm, i, t_odd, N, CType)
             moving_wall_pair(fp, fm, flags, u, srcp, srcm, w[i], cp, cm, flagsn, CType)
         end
 
@@ -72,11 +73,20 @@ using KernelAbstractions
             invρ = one(CType) / ρn
             ux *= invρ; uy *= invρ; uz *= invρ
             @static if TEMPERATURE
-                ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
-                fxn, fyn, fzn, _ = collide_temperature!(
-                    t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
-                    fxn, fyn, fzn, fx, fy, fz,
-                    ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, one(CType))
+                if do_thermal
+                    ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
+                    fxn, fyn, fzn, _ = collide_temperature!(
+                        g_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
+                        fxn, fyn, fzn, fx, fy, fz,
+                        ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, one(CType))
+                else
+                    dT = T[n] - T_avg
+                    fxn -= fx * β * dT
+                    fyn -= fy * β * dT
+                    @static if DIM == 3
+                        fzn -= fz * β * dT
+                    end
+                end
             end
             @static if TEMPERATURE
                 νc = prop_fs_T(fs[n], ν_s, ν_sT, ν_l, ν_lT, T[n], T_avg, CType(1e-8))
@@ -149,6 +159,7 @@ end
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
+    do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
 ) where {odd, CType}
     flagsn = flags[n]
@@ -183,27 +194,27 @@ end
     src14 = src_index(x, y, z, c[14][1], c[14][2], c[14][3], Nx, Ny, Nz)
     src16 = src_index(x, y, z, c[16][1], c[16][2], c[16][3], Nx, Ny, Nz)
     src18 = src_index(x, y, z, c[18][1], c[18][2], c[18][3], Nx, Ny, Nz)
+    src3  = src_index(x, y, z, c[3][1],  c[3][2],  c[3][3],  Nx, Ny, Nz)
+    src5  = src_index(x, y, z, c[5][1],  c[5][2],  c[5][3],  Nx, Ny, Nz)
+    src7  = src_index(x, y, z, c[7][1],  c[7][2],  c[7][3],  Nx, Ny, Nz)
+    src9  = src_index(x, y, z, c[9][1],  c[9][2],  c[9][3],  Nx, Ny, Nz)
+    src11 = src_index(x, y, z, c[11][1], c[11][2], c[11][3], Nx, Ny, Nz)
+    src13 = src_index(x, y, z, c[13][1], c[13][2], c[13][3], Nx, Ny, Nz)
+    src15 = src_index(x, y, z, c[15][1], c[15][2], c[15][3], Nx, Ny, Nz)
+    src17 = src_index(x, y, z, c[17][1], c[17][2], c[17][3], Nx, Ny, Nz)
+    src19 = src_index(x, y, z, c[19][1], c[19][2], c[19][3], Nx, Ny, Nz)
 
-    fp2,  fm3  = load_pair(fi, n, src2,  2,  t_odd, N, CType)
-    fp4,  fm5  = load_pair(fi, n, src4,  4,  t_odd, N, CType)
-    fp6,  fm7  = load_pair(fi, n, src6,  6,  t_odd, N, CType)
-    fp8,  fm9  = load_pair(fi, n, src8,  8,  t_odd, N, CType)
-    fp10, fm11 = load_pair(fi, n, src10, 10, t_odd, N, CType)
-    fp12, fm13 = load_pair(fi, n, src12, 12, t_odd, N, CType)
-    fp14, fm15 = load_pair(fi, n, src14, 14, t_odd, N, CType)
-    fp16, fm17 = load_pair(fi, n, src16, 16, t_odd, N, CType)
-    fp18, fm19 = load_pair(fi, n, src18, 18, t_odd, N, CType)
+    fp2,  fm3  = load_bb_pair(fi, flags, n, src2,  src3,  2,  t_odd, N, CType)
+    fp4,  fm5  = load_bb_pair(fi, flags, n, src4,  src5,  4,  t_odd, N, CType)
+    fp6,  fm7  = load_bb_pair(fi, flags, n, src6,  src7,  6,  t_odd, N, CType)
+    fp8,  fm9  = load_bb_pair(fi, flags, n, src8,  src9,  8,  t_odd, N, CType)
+    fp10, fm11 = load_bb_pair(fi, flags, n, src10, src11, 10, t_odd, N, CType)
+    fp12, fm13 = load_bb_pair(fi, flags, n, src12, src13, 12, t_odd, N, CType)
+    fp14, fm15 = load_bb_pair(fi, flags, n, src14, src15, 14, t_odd, N, CType)
+    fp16, fm17 = load_bb_pair(fi, flags, n, src16, src17, 16, t_odd, N, CType)
+    fp18, fm19 = load_bb_pair(fi, flags, n, src18, src19, 18, t_odd, N, CType)
 
     @static if MOVING_BOUNDARIES
-        src3  = src_index(x, y, z, c[3][1],  c[3][2],  c[3][3],  Nx, Ny, Nz)
-        src5  = src_index(x, y, z, c[5][1],  c[5][2],  c[5][3],  Nx, Ny, Nz)
-        src7  = src_index(x, y, z, c[7][1],  c[7][2],  c[7][3],  Nx, Ny, Nz)
-        src9  = src_index(x, y, z, c[9][1],  c[9][2],  c[9][3],  Nx, Ny, Nz)
-        src11 = src_index(x, y, z, c[11][1], c[11][2], c[11][3], Nx, Ny, Nz)
-        src13 = src_index(x, y, z, c[13][1], c[13][2], c[13][3], Nx, Ny, Nz)
-        src15 = src_index(x, y, z, c[15][1], c[15][2], c[15][3], Nx, Ny, Nz)
-        src17 = src_index(x, y, z, c[17][1], c[17][2], c[17][3], Nx, Ny, Nz)
-        src19 = src_index(x, y, z, c[19][1], c[19][2], c[19][3], Nx, Ny, Nz)
         fp2,  fm3  = moving_wall_pair(fp2,  fm3,  flags, u, src2,  src3,  w[2],  c[2],  c[3],  flagsn, CType)
         fp4,  fm5  = moving_wall_pair(fp4,  fm5,  flags, u, src4,  src5,  w[4],  c[4],  c[5],  flagsn, CType)
         fp6,  fm7  = moving_wall_pair(fp6,  fm7,  flags, u, src6,  src7,  w[6],  c[6],  c[7],  flagsn, CType)
@@ -246,11 +257,18 @@ end
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
-            ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
-            fxn, fyn, fzn, _ = collide_temperature!(
-                t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
-                fxn, fyn, fzn, fx, fy, fz,
-                ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, one(CType))
+            if do_thermal
+                ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
+                fxn, fyn, fzn, _ = collide_temperature!(
+                    g_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
+                    fxn, fyn, fzn, fx, fy, fz,
+                    ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, one(CType))
+            else
+                dT = T[n] - T_avg
+                fxn -= fx * β * dT
+                fyn -= fy * β * dT
+                fzn -= fz * β * dT
+            end
         end
         @static if TEMPERATURE
             νc = prop_fs_T(fs[n], ν_s, ν_sT, ν_l, ν_lT, T[n], T_avg, CType(1e-8))
@@ -390,10 +408,11 @@ end
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
+    do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n), Eacc)
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc)
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -405,10 +424,11 @@ end
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
+    do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, N, Nx, Ny, Nz, Int(n), Eacc)
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc)
 end
 
 end # not SURFACE
@@ -425,7 +445,7 @@ end # not SURFACE
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
-    do_thermal::Bool,
+    do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, Macc
 ) where {odd, Q, CType}
     flagsn = flags[n]
@@ -454,7 +474,7 @@ end # not SURFACE
         cp, cm = c[i], c[i + 1]
         srcp = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
         srcm = src_index(x, y, z, cm[1], cm[2], cm[3], Nx, Ny, Nz)
-        fp, fm = load_pair(fi, n, srcp, i, t_odd, N, CType)
+        fp, fm = load_bb_pair(fi, flags, n, srcp, srcm, i, t_odd, N, CType)
         moving_wall_pair(fp, fm, flags, u, srcp, srcm, w[i], cp, cm, flagsn, CType)
     end
 
@@ -516,7 +536,7 @@ end # not SURFACE
                 acc_add!(Macc, MACC_POWDER, Sn * ρn)
             end
             fxn, fyn, fzn, mevap = collide_temperature!(
-                t_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
+                g_odd, gi, T, Qin, hT, flags, flagsn, fs, ux, uy, uz,
                 fxn, fyn, fzn, fx, fy, fz,
                 ωTn, β, T_avg, Λ, Ts, Tl, γ_s, γ_l, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, x, y, z, Nx, Ny, Nz, N, n, CType, Eacc, fillc)
             debit != zero(CType) && (Qin[n] += debit)
@@ -637,11 +657,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, do_thermal::Bool,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, do_thermal, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -651,11 +671,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, do_thermal::Bool,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, do_thermal, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 # Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).

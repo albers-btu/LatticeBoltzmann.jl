@@ -1401,3 +1401,39 @@ end
     @test all(isfinite, B)
     @test B[1, 1, 1] == 0
 end
+
+# Heat collides once per outer step. An even hydro count used to reload one gi slot.
+function _conduction_T(n_hydro::Int, nsteps::Int)
+    Nx, Ny, Nz = 8, 8, 12
+    model = Model(Nx, Ny, Nz, 0.05; α=0.05f0, β=0.0f0, fx=0.0f0, fy=0.0f0, fz=0.0f0,
+                  n_hydro=n_hydro, backend=CPU(), workgroup=64)
+    host = zeros(UInt8, Nx * Ny * Nz)
+    Th = ones(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz
+            host[n] = TYPE_S | TYPE_T
+            Th[n] = z == 1 ? 1.5f0 : 0.5f0
+        else
+            host[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    copyto!(model.domains[1].T.data, Th)
+    initialize!(model)
+    run!(model, nsteps)
+    moments!(model)
+    return Array(model.domains[1].T.data)
+end
+
+@testset "temperature streams for even and odd n_hydro" begin
+    @test TEMPERATURE && SURFACE
+    T1 = _conduction_T(1, 24)
+    T2 = _conduction_T(2, 24)
+    T3 = _conduction_T(3, 24)
+    nnear = lbm_n(4, 4, 2, 8, 8)
+    @test T1[nnear] > 1.02f0
+    @test maximum(abs.(T1 .- T2)) < 1.0f-4
+    @test maximum(abs.(T1 .- T3)) < 1.0f-4
+    @test all(isfinite, T2)
+end

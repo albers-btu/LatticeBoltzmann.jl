@@ -1,8 +1,8 @@
-# Rayleigh–Bénard convection (FluidX3D setup.cpp). D3Q7 temperature + Boussinesq.
+# Rayleigh–Bénard convection. D3Q7 temperature + Boussinesq.
 # Bottom TYPE_T hot, top TYPE_T cold, outer z faces TYPE_S; x/y periodic.
 # Ra = |g| β ΔT H³ / (ν α). Rolls for Ra ≳ 1708 (no-slip).
 #
-# Lattice T must have O(1) contrast (FluidX3D uses 1.75 / 0.25). Mapping a
+# Lattice T must have O(1) contrast (hot 1.75, cold 0.25). Mapping a
 # 10 K air gap onto T=1±0.017 makes buoyancy a 2% ripple on full g and
 # kills the rolls. SI here is only box size / time for VTK.
 #

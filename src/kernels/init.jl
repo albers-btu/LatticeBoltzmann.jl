@@ -143,6 +143,9 @@ end
         @static if TEMPERATURE
             store_geq_local!(gi, n, T[n], N)
         end
+        ρbb = ρn > zero(CType) ? ρn : one(CType)
+        store_feq!(fi, n, x, y, z, ρbb, zero(CType), zero(CType), zero(CType),
+                   w, c, N, Nx, Ny, Nz, Val(false), Val(true))
     elseif (flagsn & TYPE_SU) == TYPE_G
         u[n, 1] = zero(CType); u[n, 2] = zero(CType); u[n, 3] = zero(CType)
         ϕn = zero(CType)
@@ -155,16 +158,16 @@ end
         @static if DIM == 2
             uz = zero(CType)
         end
-        store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(false))
+        store_feq!(fi, n, x, y, z, ρn, ux, uy, uz, w, c, N, Nx, Ny, Nz, Val(false), Val(true))
         @static if TEMPERATURE
-            store_geq!(gi, n, x, y, z, T[n], ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType)
+            store_geq!(gi, n, x, y, z, T[n], ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType, Val(true))
         end
     end
 
     @static if TEMPERATURE
         if (flagsn & TYPE_SU) == TYPE_G
             store_geq!(gi, n, x, y, z, T[n], zero(CType), zero(CType), zero(CType),
-                       N, Nx, Ny, Nz, Val(false), CType)
+                       N, Nx, Ny, Nz, Val(false), CType, Val(true))
         end
     end
 
@@ -229,6 +232,9 @@ end # SURFACE
             @static if TEMPERATURE
                 store_geq_local!(gi, n, T[n], N)
             end
+            ρbb = ρn > zero(CType) ? ρn : one(CType)
+            store_feq!(fi, n, x, y, z, ρbb, zero(CType), zero(CType), zero(CType),
+                       w, c, N, Nx, Ny, Nz, Val(false), Val(true))
         else
             @static if DIM == 2
                 uz = zero(CType)
@@ -244,10 +250,11 @@ end # SURFACE
                 feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
                 feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
                 src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
-                store_pair!(fi, n, src, i, feqp, feqm, Val(false), N)
+                # Even store writes + into the slot the first (even) load reads as −.
+                store_pair!(fi, n, src, i, feqm, feqp, Val(false), N)
             end
             @static if TEMPERATURE
-                store_geq!(gi, n, x, y, z, T[n], ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType)
+                store_geq!(gi, n, x, y, z, T[n], ux, uy, uz, N, Nx, Ny, Nz, Val(false), CType, Val(true))
             end
         end
     end

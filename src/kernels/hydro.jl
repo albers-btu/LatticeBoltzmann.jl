@@ -104,8 +104,8 @@ end
 @inline function store_feq!(
     fi, n, x, y, z, ρn,
     ux, uy, uz, w::NTuple{Q, CType}, c::NTuple{Q, SVector{3, Int}},
-    N, Nx, Ny, Nz, t_odd::Val{odd}
-) where {odd, Q, CType}
+    N, Nx, Ny, Nz, t_odd::Val{odd}, ::Val{swap}=Val(false)
+) where {odd, Q, CType, swap}
     @static if DIM == 2
         uz = zero(CType)
     end
@@ -115,10 +115,12 @@ end
     for k in 1:NP
         i = 2k
         src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
-        store_pair!(fi, n, src, i,
-            feq(w[i], ρn, ux, uy, uz, uu, c[i], CType),
-            feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType),
-            t_odd, N)
+        fp = feq(w[i], ρn, ux, uy, uz, uu, c[i], CType)
+        fm = feq(w[i + 1], ρn, ux, uy, uz, uu, c[i + 1], CType)
+        if swap
+            fp, fm = fm, fp
+        end
+        store_pair!(fi, n, src, i, fp, fm, t_odd, N)
     end
     return nothing
 end

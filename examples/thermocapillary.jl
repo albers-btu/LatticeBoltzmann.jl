@@ -24,7 +24,7 @@ Lx = Float32(xC - xH)
 H  = Float32(Hfill - 1)
 
 ν     = 0.1f0
-α     = 0.2f0                 # FluidX3D α; k = α/2 = 0.1, Pr = ν/k = 1
+α     = 0.2f0                 # k = α/2 = 0.1, Pr = ν/k = 1
 T_hot = 1.5f0
 T_cold = 0.5f0
 T_avg = 1.0f0

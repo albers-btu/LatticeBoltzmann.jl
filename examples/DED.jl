@@ -8,7 +8,7 @@
 # The plate is bare TYPE_F. The jet sits on the beam axis and aims at the
 # track. Cold cells shed powder on powder_τ; a cell at or above Tm keeps it,
 # which is the pool catchment. At si_dx = 80 µm the 2 mm spot is ~25 cells
-# across. Expect on the order of 160×80×80 cells, n_hydro = 11, and ~10⁴
+# across. Expect on the order of 160×80×80 cells, n_hydro around 10, and ~10⁴
 # scan steps plus a 0.2 s freeze. The log line prints the real counts.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
@@ -120,11 +120,6 @@ Nz = Hfill + n_layers * n_z_layer + n_gas_top + 1
 kg_cell = ρ_m * m^3
 σ_lat_phys = ustrip(u"N/m", si_σ_phys) * s^2 / kg_cell
 n_hydro = max(1, ceil(Int, sqrt(max(σ_lat_phys, 0.0) / Float64(σ_lat_cap))))
-# Temperature is collided once per outer step, but its even/odd slot follows
-# every hydro substep. An even count always reuses one slot, so after the
-# first step the liquid does not conduct into the plate and stays molten.
-# An odd count alternates the slot and heat flows. σ_lat is still under the cap.
-iseven(n_hydro) && (n_hydro += 1)
 si_σ  = si_σ_phys                      # surface tension passed to the model; edit si_σ_phys
 si_σT = si_σT_phys                      # dσ/dT passed to the model; edit si_σT_phys
 
