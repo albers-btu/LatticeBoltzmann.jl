@@ -1,22 +1,34 @@
-# 316L directed-energy deposition: one weld line, coaxial powder, clean plate.
-# 1000 W, 2 mm 1/e² spot, 10 mm/s, 8 g/min. No powder-bed file.
-# Process numbers are loaded from input/ (material_316L, DED_build, DED_laser, DED_powder).
+# IN625 directed-energy deposition: one weld line, front-fed powder, clean plate.
+# 726 W, 1.0 mm 1/e² spot, 500 mm/min, 9.5 g/min. No powder-bed file.
+# Material is input/material_IN625.jl. Plate, mesh, powder, and absorption
+# depth come from the shared DED inputs; power, spot, speed, and the scan
+# inset are overridden below so examples/DED.jl stays the 316L case.
 # Heat: PLIC + Fresnel (multi-bounce). Evaporation, recoil, radiation, gravity.
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
-# σ stays the physical 1.6 N/m; n_hydro shortens the flow step so σ_lat stays small.
+# σ stays the physical 1.8 N/m; n_hydro shortens the flow step so σ_lat stays small.
 #
-# The plate is bare TYPE_F. The jet sits on the beam axis and aims at the
-# track. Cold cells shed powder on powder_τ; a cell at or above Tm keeps it,
-# which is the pool catchment. At si_dx = 80 µm the 2 mm spot is ~25 cells
-# across. Expect on the order of 160×80×80 cells, n_hydro around 10, and ~10⁴
-# scan steps plus a 0.2 s freeze. The log line prints the real counts.
+# The plate is the same 12.8 × 6.4 × 3.2 mm block as examples/DED.jl, with the
+# same 80 µm cell and 2.4 mm of gas, so the grid stays on the order of
+# 160×80×100. This track uses a 1.2 mm powder focus; the shared file stays
+# 2.4 mm for the 316L case. The scan
+# inset is one spot diameter (1.0 mm); the original inset was one 2 mm
+# diameter. At 80 µm the 1.0 mm spot is ~12 cells across. The 9.5 g/min feed on
+# this narrower track builds a taller bead (~2.3 mm), added above the plate.
+# Particles are drawn from the d10/d50/d90 distribution in input/DED_powder.jl.
+# They absorb the beam in flight and shade the plate by their geometric cross
+# section. Molten particles, and any particle that lands in liquid, join the
+# surface. A cell filled past one ρ sends that surplus along the outward
+# interface normal. A new cell opens only in the leading direction, and only
+# when its share would be at least half a cell. Powder on solid metal hotter
+# than 0.9 Ts stays. Colder metal still sheds on powder_τ.
+# The log line prints the real counts.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
 # isosurface slider. Open lbm.pvd, rays.pvd, and powder.pvd.
 # rays.pvd has the ray lines and the 1/e² beam cylinder (colour by power).
 # powder.pvd is the 1/e² jet cylinder (colour by mdot).
 # Colour the volume by T (or phi / mp), then Contour.
-# Type the isosurface in the text box (e.g. T=1673, or phi=0.5 for the
+# Type the isosurface in the text box (e.g. T=1623, or phi=0.5 for the
 # free surface). Do not drag the slider if the range looks empty.
 #
 #   SURFACE = true, TEMPERATURE = true, VOLUME_FORCE = true
@@ -28,22 +40,39 @@ using ProgressMeter
 using Logging
 
 @assert SURFACE && TEMPERATURE
-start_run_log!("output_DED")
+start_run_log!("output_Tim_DED")
 
 # Process settings. Edit the files in input/; names stay in this scope.
 const input_dir = joinpath(@__DIR__, "..", "input")
-include(joinpath(input_dir, "material_316L.jl"))
+include(joinpath(input_dir, "material_IN625.jl"))
 include(joinpath(input_dir, "DED_build.jl"))
 include(joinpath(input_dir, "DED_laser.jl"))
 include(joinpath(input_dir, "DED_powder.jl"))
+
+# Tim process. The shared DED files stay the 316L example (1000 W, 2 mm, 10 mm/s, 8 g/min).
+# 500 mm/min = 8.333 mm/s. Line energy P/v is about 87 J/mm.
+si_P          = 726.0u"W"
+si_d_spot     = 1.0e-3u"m"              # 1.0 mm 1/e² focus diameter
+si_v          = 500.0u"mm/minute"
+si_mdot       = 9.5u"g/minute"
+si_d_powder   = 1.2e-3u"m"              # 1.2 mm 1/e² powder focus; shared file stays 2.4 mm
+si_end_margin = 1.0e-3u"m"              # one spot diameter in from each x wall
+# Nozzle ahead of the spot, in the scan direction. The axis hits the plate
+# at the laser focus, so the stream is this far from vertical.
+si_powder_tilt = 45u"°"
 
 # Lattice caps. n_hydro brings the physical σ down so σ_lat stays ≤ σ_lat_cap.
 σ_lat_cap = 0.03f0
 q_max     = 0.04f0
 
-# Coaxial nozzle: origin on the beam axis, aimed at the plate under the spot.
-function place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx)
-    x_noz = clamp(x_las, 2.5f0, Float32(Nx) - 1.5f0)
+# Front-fed nozzle. The origin is ahead of the beam along the scan, at the
+# lid. The axis passes through the laser focus on the plate, so the landing
+# is the spot and the flight is tilted by si_powder_tilt. Against the far
+# wall the origin stops and the tilt steepens; the aim stays on the focus.
+function place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx, sgn)
+    drop = max(z_noz - z_aim, one(Float32))
+    lead = drop * Float32(tan(ustrip(u"rad", si_powder_tilt)))
+    x_noz = clamp(x_las + sgn * lead, 2.5f0, Float32(Nx) - 1.5f0)
     set_powder_jet_position!(jet, x_noz, y_las, z_noz)
     aim_powder_jet!(jet, x_las, y_las, z_aim)
     return jet
@@ -149,8 +178,8 @@ model = Model(Nx, Ny, Nz, units;
 Tm      = Float32(lbm_T(units, si_Tm))
 T_init  = Float32(lbm_T(units, si_T_init))
 w_cells = w_m / Float64(units.m)
-# The bundle is a square of side 4w. nrays = 11 put hits ~4–5 cells apart
-# on this 2 mm spot, and that grid showed up in the pool. Half a cell is smooth.
+# The bundle is a square of side 4w. Hits more than about half a cell apart
+# print into the pool, so the side count tracks the spot in cells.
 nrays = max(11, ceil(Int, 4 * w_cells / 0.5))
 v_lat   = Float32(ustrip(u"m/s", si_v) * units.s / units.m)
 y_las   = Float32(Ny + 1) / 2
@@ -178,7 +207,7 @@ end
 if σlat > 0.05f0
     @warn "lattice σ=$(σlat) is large; CSF may blow up. Lower si_σ." σlat
 end
-@info "316L DED" use_powder n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) bead_mm=(1e3*h_layer) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_cells nrays scan_mm=(1e3*m*abs(x1-x0)) v_lat nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
+@info "IN625 Tim DED" use_powder n_hydro n_layers Nx Ny Nz Hfill m_um=(1e6*m) box_mm=(1e3*m*Nx, 1e3*m*Ny, 1e3*m*Nz) gas_mm=(1e3*m*n_gas_top) bead_mm=(1e3*h_layer) spot_mm=(1e3*ustrip(u"m", si_d_spot)) w_cells nrays scan_mm=(1e3*m*abs(x1-x0)) v_lat nsteps_pass nsteps_freeze nsteps_total Ncell=(Nx*Ny*Nz) si_P si_v si_mdot si_σ si_σT σlat=model.domains[1].σ σ_lat_phys A0 nskin Q_full h_lat gz=model.domains[1].fz β=model.domains[1].β ν=model.domains[1].ν T_init
 
 host = zeros(UInt8, Nx * Ny * Nz)
 Th   = fill(T_init, Nx * Ny * Nz)
@@ -207,6 +236,7 @@ copyto!(model.domains[1].h.data, hh)
 d = model.domains[1]
 model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
+                    n_re = fresnel_n, n_im = fresnel_k,
                     nrays = nrays, max_bounce = 8, every = qevery, skin = nskin)
 model.powder_jet = PowderJet(units; mdot = si_mdot, w = 0.5 * si_d_powder,
                              v = si_v_powder, d = si_d_particle,
@@ -215,7 +245,7 @@ model.powder_jet = PowderJet(units; mdot = si_mdot, w = 0.5 * si_d_powder,
                              x = x0, y = y_las, z = z_noz,
                              nparcels = 8, enabled = false)
 LatticeBoltzmann.initialize!(model)
-export!(model; dir="output_DED")
+export!(model; dir="output_Tim_DED")
 
 function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
                      nsteps_pass, nsteps_dwell, nsteps_freeze, nsteps_total,
@@ -226,10 +256,10 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
     x_now = x0
     mlups_ema = NaN
     αema = 0.2
-    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="DED ", showspeed=true)
+    prog = Progress(cld(nsteps_total, every); dt=0.3, desc="Tim DED ", showspeed=true)
 
     function report!(layer, x_las)
-        export!(model; dir="output_DED")
+        export!(model; dir="output_Tim_DED")
         nliq, depth, bead, Tmax_K, Tmin_K, umax, _, zI, xl = track_metrics(
             Array(d.fs.data), Array(d.flags.data), Array(d.T.data), Array(d.u.data),
             Nx, Ny, Nz, Hfill, x_las, y_las, model.units)
@@ -267,7 +297,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
         set_laser_position!(model.laser, x_las, y_las)
         jet = model.powder_jet
         jet.enabled = powder && use_powder
-        jet.enabled && place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx)
+        jet.enabled && place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx, sgn)
         t0 = time_ns()
         with_logger(NullLogger()) do
             run!(model, 1)
@@ -322,4 +352,4 @@ b = energy_budget(d)
 m = mass_budget(d)
 U = model.units
 dx = Float64(U.m)
-@info "DED single-track report" nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mpowder_kg=si_mass(U, m.powder) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) mdot_g_min=ustrip(u"g/minute", si_mdot) A0 nskin Q_full
+@info "Tim DED single-track report" nliq depth_cells=depth depth_mm=(1e3*dx*depth) bead_cells=bead bead_mm=(1e3*dx*bead) Tmax_K Tmin_K H_J=si_enthalpy(U, b.H) Q_J=si_enthalpy(U, b.Q) rad_J=si_enthalpy(U, b.rad) evap_J=si_enthalpy(U, b.evap) wall_J=si_enthalpy(U, b.wall) powder_J=si_enthalpy(U, b.powder) res_J=si_enthalpy(U, b.residual) M_kg=si_mass(U, m.M) Mpowder_kg=si_mass(U, m.powder) Mevap_kg=si_mass(U, m.evap) Mres_kg=si_mass(U, m.residual) umax u_sol zI Hfill x_las=xl box_mm=(1e3*dx*Nx, 1e3*dx*Ny, 1e3*dx*Nz) spot_mm=(1e3*ustrip(u"m", si_d_spot)) t_end=si_t(U, Int(d.t)) P_W=ustrip(u"W", si_P) mdot_g_min=ustrip(u"g/minute", si_mdot) A0 nskin Q_full

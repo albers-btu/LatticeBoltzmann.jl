@@ -6,7 +6,9 @@
 # σ stays the physical 1.6 N/m; n_hydro shortens the flow step so σ_lat stays small.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
-# isosurface slider. Open lbm.pvd and rays.pvd (colour rays by power).
+# isosurface slider. Open lbm.pvd, rays.pvd, and powder.pvd.
+# rays.pvd has the ray lines and the 1/e² beam cylinder (colour by power).
+# powder.pvd is the 1/e² jet cylinder (colour by mdot).
 # Colour the volume by T (or phi), then Contour.
 # Type the isosurface in the text box (e.g. T=1673, or phi=0.5 for the
 # free surface). Do not drag the slider if the range looks empty.

@@ -100,6 +100,7 @@ function Model(
     T_rad = nothing,                        # Far-field temperature for radiation
     powder_τ = 0.0,                         # Unmelted powder lifetime 
     powder_T = nothing,                     # Powder temperature
+    T_stick = nothing,                      # Hold powder on solid at or above this T; default 0.9 Ts
     laser = nothing,
     powder_jet = nothing,
     n_hydro::Int = 1,
@@ -144,6 +145,8 @@ function Model(
     τp = powder_τ isa Quantity ? CType(ustrip(u"s", powder_τ) / units.s) : CType(powder_τ)
     Tp = powder_T === nothing ? CType(T_avg) :
          powder_T isa Quantity ? CType(lbm_T(units, powder_T)) : CType(powder_T)
+    Tstick = T_stick === nothing ? CType(0.9) * Tsl :
+             T_stick isa Quantity ? CType(lbm_T(units, T_stick)) : CType(T_stick)
     εr = emissivity isa Quantity ? ustrip(emissivity) : Float64(emissivity)
     Crad = εr > 0 ? CType(lbm_rad(units, εr)) : zero(CType)
     Trad = T_rad === nothing ? CType(T_avg) :
@@ -155,7 +158,7 @@ function Model(
                   Λ=Λ, Ts=Tsl, Tl=Tll, K0=K0l,
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
                   C_rad=Crad, T_rad=Trad,
-                  τ_p=τp, T_p=Tp,
+                  τ_p=τp, T_p=Tp, T_stick=Tstick,
                   laser=laser, powder_jet=powder_jet, n_hydro=n_hydro, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
@@ -193,6 +196,7 @@ function Model(
     T_rad = nothing,
     τ_p = 0.0f0,
     T_p = nothing,
+    T_stick = nothing,
     laser = nothing,
     powder_jet = nothing,
     n_hydro::Int = 1,
@@ -326,6 +330,8 @@ function Model(
             T_rad=T_rad === nothing ? CType(T_avg) : CType(T_rad),
             τ_p=CType(τ_p),
             T_p=T_p === nothing ? CType(T_avg) : CType(T_p),
+            T_stick=T_stick === nothing ?
+                CType(0.9) * (Ts === nothing ? CType(T_avg) : CType(Ts)) : CType(T_stick),
         )
     end
 
@@ -670,14 +676,20 @@ function step!(model::Model)
         fx = domain.fx * s2; fy = domain.fy * s2; fz = domain.fz * s2
         σ = domain.σ * s2
         σT = domain.σT * s2
+        # Recoil is the gas density in surface_0 on every substep. p ∝ Δt².
         p0v = domain.p0v * s2
+        # Hertz–Knudsen runs once per outer step (the last collide only).
+        # ṁ ∝ C_hk · p, and p above is the substep value, so C_hk · n_hydro²
+        # makes that product the outer-step atmosphere. n_hydro = 1 is unchanged.
+        C_hk = domain.C_hk / s2
         νs = domain.ν_s * sν; νl = domain.ν_l * sν
         νsT = domain.ν_sT * sν; νlT = domain.ν_lT * sν
         ω = omega_from_nu(domain.ν * sν)
 
         @static if SURFACE && TEMPERATURE
-            deposit_laser!(model, domain)
-            advance_powder_jet!(model, domain)
+            heat_powder_beam!(model, domain)
+            refreshed = deposit_laser!(model, domain)
+            advance_powder_jet!(model, domain, refreshed)
             if domain.τ_p > 0
                 powder_gas_kernel!(model.backend, model.workgroup)(
                                    domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
@@ -693,8 +705,10 @@ function step!(model::Model)
             # fi parity advances every hydro substep and stays continuous across outer steps.
             t_odd = isodd(Int(domain.t) * nsub + sub - 1)
             thermal = sub == nsub
-            # store(P) is pulled by load(!P). A cell born before the thermal
-            # collide must be visible to load(g_odd); one born after it, to load(!g_odd).
+            # Neighbors pull store(P) with load(!P). Birth before the thermal
+            # collide is pulled by load(g_odd); birth after it, by load(!g_odd).
+            # surface_2 also writes the other parity so this cell's own next load
+            # sees the same equilibrium (that read swaps + and −).
             g_store_odd = thermal ? g_odd : !g_odd
 
             @static if SURFACE
@@ -732,8 +746,8 @@ function step!(model::Model)
                        domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
                        domain.γ_s, domain.γ_l,
                        νs, νl, νsT, νlT,
-                       domain.Λ_v, domain.T_v, domain.C_hk, p0v, domain.β_v,
-                       domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p,
+                       domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
+                       domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p, domain.T_stick,
                        thermal, g_odd,
                        Nd, Nx, Ny, Nz, domain.Eacc.data,
                        domain.Macc.data;
@@ -750,19 +764,20 @@ function step!(model::Model)
                        domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
                        domain.γ_s, domain.γ_l,
                        νs, νl, νsT, νlT,
-                       domain.Λ_v, domain.T_v, domain.C_hk, p0v, domain.β_v,
+                       domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
                        domain.C_rad, domain.T_rad,
                        thermal, g_odd,
                        Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
             end
 
             @static if SURFACE
-                model.cached_surface_1_kernel!(domain.flags.data, model.velocities,
+                model.cached_surface_1_kernel!(domain.flags.data, domain.ϕ.data, domain.mass.data,
+                                               domain.ρ.data, model.velocities,
                                                Nd, Nx, Ny, Nz; ndrange = N)
                 sk2 = t_odd ? model.cached_surface_2_odd_kernel! : model.cached_surface_2_even_kernel!
                 sk2(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
                     domain.gi.data, domain.T.data, domain.fs.data,
-                    model.weights, model.velocities, Nd, Nx, Ny, Nz, g_store_odd; ndrange = N)
+                    model.weights, model.velocities, domain.Ts, Nd, Nx, Ny, Nz, g_store_odd; ndrange = N)
                 model.cached_surface_3_kernel!(domain.ρ.data, domain.flags.data, domain.mass.data,
                                                domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                                                Nd, Nx, Ny, Nz; ndrange = N)

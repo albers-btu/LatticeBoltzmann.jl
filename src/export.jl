@@ -278,20 +278,132 @@ function _vtk_write(job::_VtkJob)
     return nothing
 end
 
-# One polyline per ray, in the same coordinates as the rectilinear grid.
-# Open rays.pvd in ParaView together with lbm.pvd. Point data "power" is watts left.
+# Right-handed frame. e1 × e2 = dir. Nothing when the direction vanishes.
+function _vtk_axis_frame(dx, dy, dz)
+    n = hypot(dx, dy, dz)
+    n <= 0 && return nothing
+    dx /= n; dy /= n; dz /= n
+    ax, ay, az = abs(dz) < 0.9 ? (0.0, 0.0, 1.0) : (1.0, 0.0, 0.0)
+    e1x = ay * dz - az * dy
+    e1y = az * dx - ax * dz
+    e1z = ax * dy - ay * dx
+    e1n = hypot(e1x, e1y, e1z)
+    e1n <= 0 && return nothing
+    e1x /= e1n; e1y /= e1n; e1z /= e1n
+    e2x = dy * e1z - dz * e1y
+    e2y = dz * e1x - dx * e1z
+    e2z = dx * e1y - dy * e1x
+    return (dx, dy, dz, e1x, e1y, e1z, e2x, e2y, e2z)
+end
+
+# Gas, including an empty flag. A wall or any metal cell closes the envelope.
+function _vtk_open_cell(flags, ix, iy, iz, Nx, Ny, Nz)
+    (1 <= ix <= Nx && 1 <= iy <= Ny && 1 <= iz <= Nz) || return false
+    f = flags[ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny]
+    (f & TYPE_S) != 0 && return false
+    su = f & TYPE_SU
+    return su == TYPE_G || su == 0
+end
+
+# Cell-units from an interior point along dir until metal, a wall, or the box.
+function _vtk_axis_length(flags, x, y, z, dx, dy, dz, Nx, Ny, Nz)
+    lo = 0.5
+    tmax = Inf
+    for (p, d, hi) in (
+        (Float64(x), Float64(dx), Float64(Nx) + 0.5),
+        (Float64(y), Float64(dy), Float64(Ny) + 0.5),
+        (Float64(z), Float64(dz), Float64(Nz) + 0.5),
+    )
+        if d > 1.0e-8
+            tmax = min(tmax, (hi - p) / d)
+        elseif d < -1.0e-8
+            tmax = min(tmax, (lo - p) / d)
+        end
+    end
+    (isfinite(tmax) && tmax > 0.05) || return 0.0
+    t = 0.0
+    step = 0.25
+    while t < tmax - 1.0e-6
+        tnext = min(tmax, t + step)
+        ix = floor(Int, Float64(x) + tnext * Float64(dx) + 0.5)
+        iy = floor(Int, Float64(y) + tnext * Float64(dy) + 0.5)
+        iz = floor(Int, Float64(z) + tnext * Float64(dz) + 0.5)
+        _vtk_open_cell(flags, ix, iy, iz, Nx, Ny, Nz) || return tnext
+        t = tnext
+    end
+    return tmax
+end
+
+# Straight cylinder of the given cell radius. Two rings, a side strip, and
+# both caps. Coordinates match the rectilinear grid: cell c → (c − 1) Δx.
+function _vtk_add_cylinder!(xs, ys, zs, strips, polys,
+                            x, y, z, dx, dy, dz, radius, flags,
+                            Nx, Ny, Nz, dx_m; nseg::Int=24)
+    radius <= 0 && return false
+    frame = _vtk_axis_frame(dx, dy, dz)
+    frame === nothing && return false
+    dirx, diry, dirz, e1x, e1y, e1z, e2x, e2y, e2z = frame
+    len = _vtk_axis_length(flags, x, y, z, dirx, diry, dirz, Nx, Ny, Nz)
+    len <= 0 && return false
+    R = Float64(radius)
+    base = length(xs)
+    for ring in 0:1
+        ox = Float64(x) + ring * len * dirx
+        oy = Float64(y) + ring * len * diry
+        oz = Float64(z) + ring * len * dirz
+        for i in 0:(nseg - 1)
+            θ = 2π * i / nseg
+            cθ, sθ = cos(θ), sin(θ)
+            push!(xs, Float32(ox - 1 + R * (cθ * e1x + sθ * e2x)) * dx_m)
+            push!(ys, Float32(oy - 1 + R * (cθ * e1y + sθ * e2y)) * dx_m)
+            push!(zs, Float32(oz - 1 + R * (cθ * e1z + sθ * e2z)) * dx_m)
+        end
+    end
+    side = Int[]
+    for i in 1:nseg
+        push!(side, base + i)
+        push!(side, base + nseg + i)
+    end
+    push!(side, base + 1)
+    push!(side, base + nseg + 1)
+    push!(strips, MeshCell(PolyData.Strips(), side))
+    push!(polys, MeshCell(PolyData.Polys(), [base + i for i in nseg:-1:1]))
+    push!(polys, MeshCell(PolyData.Polys(), [base + nseg + i for i in 1:nseg]))
+    return true
+end
+
+function _vtk_write_poly(dir, stem, t, t_si, xs, ys, zs, groups, data)
+    parts = filter(!isempty, groups)
+    isempty(parts) && return nothing
+    path = joinpath(dir, @sprintf("%s_%08d", stem, t))
+    pvd_path = joinpath(dir, stem)
+    pvd = paraview_collection(pvd_path; append = t > 0 && isfile(pvd_path * ".pvd"))
+    vtk_grid(path, xs, ys, zs, parts...) do vtk
+        for (name, vals) in data
+            vtk[name] = vals
+        end
+        pvd[t_si] = vtk
+    end
+    vtk_save(pvd)
+    return nothing
+end
+
+# Ray polylines plus the incident 1/e² cylinder. Open rays.pvd with lbm.pvd.
+# Point data "power" is watts left on a ray, and the incident power on the cylinder.
 function _write_laser_rays(model, domain, dir)
     L = model.laser
     (L === nothing || !L.enabled || L.P <= 0) && return nothing
     rays = trace_laser_rays(model, domain)
-    isempty(rays) && return nothing
     U = model.units
     dx = Float32(U.m)
+    isfinite(dx) && dx > 0 || (dx = 1.0f0)
     xs = Float32[]
     ys = Float32[]
     zs = Float32[]
     power = Float32[]
-    cells = MeshCell{PolyData.Lines, Vector{Int}}[]
+    lines = MeshCell{PolyData.Lines, Vector{Int}}[]
+    strips = MeshCell{PolyData.Strips, Vector{Int}}[]
+    polys = MeshCell{PolyData.Polys, Vector{Int}}[]
     for ray in rays
         ids = Int[]
         for (x, y, z, p) in ray
@@ -301,20 +413,50 @@ function _write_laser_rays(model, domain, dir)
             push!(power, Float32(p))
             push!(ids, length(xs))
         end
-        length(ids) >= 2 && push!(cells, MeshCell(PolyData.Lines(), ids))
+        length(ids) >= 2 && push!(lines, MeshCell(PolyData.Lines(), ids))
     end
-    isempty(cells) && return nothing
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    flags = Array(domain.flags.data)
+    if _vtk_add_cylinder!(xs, ys, zs, strips, polys,
+                          L.x, L.y, L.z, L.dx, L.dy, L.dz, L.w,
+                          flags, Nx, Ny, Nz, dx)
+        P = Float32(L.P)
+        while length(power) < length(xs)
+            push!(power, P)
+        end
+    end
     t = Int(domain.t)
     t_si = Float64(si_t(U, t))
     isfinite(t_si) || (t_si = Float64(t))
-    path = joinpath(dir, @sprintf("rays_%08d", t))
-    pvd_path = joinpath(dir, "rays")
-    pvd = paraview_collection(pvd_path; append = t > 0 && isfile(pvd_path * ".pvd"))
-    vtk_grid(path, xs, ys, zs, cells) do vtk
-        vtk["power"] = power
-        pvd[t_si] = vtk
-    end
-    vtk_save(pvd)
+    _vtk_write_poly(dir, "rays", t, t_si, xs, ys, zs,
+                    (lines, strips, polys), ("power" => power,))
+    return nothing
+end
+
+# 1/e² cylinder of the powder jet, from the nozzle along its axis to the
+# first wall or metal. Open powder.pvd beside lbm.pvd. "mdot" is kg/s.
+function _write_powder_jet(model, domain, dir)
+    J = model.powder_jet
+    (J === nothing || !J.enabled || J.w <= 0) && return nothing
+    U = model.units
+    dx = Float32(U.m)
+    isfinite(dx) && dx > 0 || (dx = 1.0f0)
+    xs = Float32[]
+    ys = Float32[]
+    zs = Float32[]
+    strips = MeshCell{PolyData.Strips, Vector{Int}}[]
+    polys = MeshCell{PolyData.Polys, Vector{Int}}[]
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    flags = Array(domain.flags.data)
+    _vtk_add_cylinder!(xs, ys, zs, strips, polys,
+                       J.x, J.y, J.z, J.dx, J.dy, J.dz, J.w,
+                       flags, Nx, Ny, Nz, dx) || return nothing
+    t = Int(domain.t)
+    t_si = Float64(si_t(U, t))
+    isfinite(t_si) || (t_si = Float64(t))
+    mdot = fill(Float32(J.mdot), length(xs))
+    _vtk_write_poly(dir, "powder", t, t_si, xs, ys, zs,
+                    (strips, polys), ("mdot" => mdot,))
     return nothing
 end
 
@@ -356,6 +498,7 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
 
     domain = model.domains[1]
     _write_laser_rays(model, domain, dir)
+    _write_powder_jet(model, domain, dir)
     t = Int(domain.t)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
     N = Nx * Ny * Nz

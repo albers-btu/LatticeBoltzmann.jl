@@ -127,9 +127,23 @@ end
     return nothing
 end
 
+# True when the sample is inside the cell and on the metal side of
+# n·(x − c) = dpl. n points metal → gas, so the metal side is the negative one.
+@inline function _plic_in_metal(ox::T, oy::T, oz::T, cx::T, cy::T, cz::T,
+                                nx::T, ny::T, nz::T, dpl::T) where {T}
+    abs(ox - cx) <= T(0.5) + T(1e-4) || return false
+    abs(oy - cy) <= T(0.5) + T(1e-4) || return false
+    abs(oz - cz) <= T(0.5) + T(1e-4) || return false
+    side = nx * (ox - cx) + ny * (oy - cy) + nz * (oz - cz) - dpl
+    return side <= zero(T)
+end
+
 # Parker–Youngs n points metal to gas.
 # Returns a boolean for inside the this voxels cube, distance of origin
 # along the ray in cells, and the normal of the cube.
+# φ → 1 puts the cut on the gas face. The walk steps 10⁻⁵ past that face,
+# the forward root is behind the sample, and a downward ray used to fall
+# through into the bulk.
 @inline function plic_hit(
     ϕ0::T, phij,
     ox::T, oy::T, oz::T,
@@ -138,19 +152,36 @@ end
 ) where {T}
     nϕ = calculate_normal_py(phij)
     n2 = nϕ[1]*nϕ[1] + nϕ[2]*nϕ[2] + nϕ[3]*nϕ[3]
-    n2 <= eps(T) && return false, zero(T), nϕ
+    # ∇φ cancels when gas lies on both sides of a full cell. φ = 1 means
+    # every point in the cell is metal, so a ray already inside it has hit.
+    # The face normal is the incoming direction: normal incidence, as in bulk.
+    if n2 <= eps(T)
+        inside = abs(ox - cx) <= T(0.5) + T(1.0e-4) &&
+                 abs(oy - cy) <= T(0.5) + T(1.0e-4) &&
+                 abs(oz - cz) <= T(0.5) + T(1.0e-4)
+        if ϕ0 >= one(T) - T(1.0e-3) && inside
+            return true, zero(T), SVector{3,T}(-dirx, -diry, -dirz)
+        end
+        return false, zero(T), nϕ
+    end
     dpl = plic_cube(ϕ0, nϕ)
     nd = nϕ[1]*dirx + nϕ[2]*diry + nϕ[3]*dirz
-    abs(nd) <= T(1e-8) && return false, zero(T), nϕ
-    t = (nϕ[1]*(cx - ox) + nϕ[2]*(cy - oy) + nϕ[3]*(cz - oz) + dpl) / nd
-    t <= T(1e-6) && return false, t, nϕ
-    hx = ox + t * dirx
-    hy = oy + t * diry
-    hz = oz + t * dirz
-    inside = abs(hx - cx) <= T(0.5) + T(1e-4) &&
-             abs(hy - cy) <= T(0.5) + T(1e-4) &&
-             abs(hz - cz) <= T(0.5) + T(1e-4)
-    return inside, t, nϕ
+    t = zero(T)
+    if abs(nd) > T(1e-8)
+        t = (nϕ[1]*(cx - ox) + nϕ[2]*(cy - oy) + nϕ[3]*(cz - oz) + dpl) / nd
+        if t > T(1e-6)
+            hx = ox + t * dirx
+            hy = oy + t * diry
+            hz = oz + t * dirz
+            inside = abs(hx - cx) <= T(0.5) + T(1e-4) &&
+                     abs(hy - cy) <= T(0.5) + T(1e-4) &&
+                     abs(hz - cz) <= T(0.5) + T(1e-4)
+            inside && return true, t, nϕ
+        end
+    end
+    _plic_in_metal(ox, oy, oz, cx, cy, cz, nϕ[1], nϕ[2], nϕ[3], dpl) &&
+        return true, zero(T), nϕ
+    return false, t, nϕ
 end
 
 # Trailing ::T keeps this more specific than the untyped-phij method.
@@ -162,19 +193,33 @@ end
 ) where {T}
     nϕ = calculate_normal_py_2d(phij)
     n2 = nϕ[1]*nϕ[1] + nϕ[2]*nϕ[2] + nϕ[3]*nϕ[3]
-    n2 <= eps(T) && return false, zero(T), nϕ
+    if n2 <= eps(T)
+        inside = abs(ox - cx) <= T(0.5) + T(1.0e-4) &&
+                 abs(oy - cy) <= T(0.5) + T(1.0e-4) &&
+                 abs(oz - cz) <= T(0.5) + T(1.0e-4)
+        if ϕ0 >= one(T) - T(1.0e-3) && inside
+            return true, zero(T), SVector{3,T}(-dirx, -diry, -dirz)
+        end
+        return false, zero(T), nϕ
+    end
     dpl = plic_line(ϕ0, nϕ)
     nd = nϕ[1]*dirx + nϕ[2]*diry + nϕ[3]*dirz
-    abs(nd) <= T(1e-8) && return false, zero(T), nϕ
-    t = (nϕ[1]*(cx - ox) + nϕ[2]*(cy - oy) + nϕ[3]*(cz - oz) + dpl) / nd
-    t <= T(1e-6) && return false, t, nϕ
-    hx = ox + t * dirx
-    hy = oy + t * diry
-    hz = oz + t * dirz
-    inside = abs(hx - cx) <= T(0.5) + T(1e-4) &&
-             abs(hy - cy) <= T(0.5) + T(1e-4) &&
-             abs(hz - cz) <= T(0.5) + T(1e-4)
-    return inside, t, nϕ
+    t = zero(T)
+    if abs(nd) > T(1e-8)
+        t = (nϕ[1]*(cx - ox) + nϕ[2]*(cy - oy) + nϕ[3]*(cz - oz) + dpl) / nd
+        if t > T(1e-6)
+            hx = ox + t * dirx
+            hy = oy + t * diry
+            hz = oz + t * dirz
+            inside = abs(hx - cx) <= T(0.5) + T(1e-4) &&
+                     abs(hy - cy) <= T(0.5) + T(1e-4) &&
+                     abs(hz - cz) <= T(0.5) + T(1e-4)
+            inside && return true, t, nϕ
+        end
+    end
+    _plic_in_metal(ox, oy, oz, cx, cy, cz, nϕ[1], nϕ[2], nϕ[3], dpl) &&
+        return true, zero(T), nϕ
+    return false, t, nϕ
 end
 
 # Spread the heat energy into the cells along ray with a depth of skin cells.
@@ -278,8 +323,17 @@ end
                     continue
                 end
             elseif su == TYPE_F
-                _add_q!(Q, n, Pleft * qfac)
-                _raypoint!(path, ox, oy, oz, zero(T))
+                # The cut was missed, so the ray is already inside the metal.
+                # qfac turns watts in one cell into ΔT. Spread the Fresnel
+                # fraction over the optical skin along the ray. Dumping Pleft
+                # into this cell alone is about nskin/A too hot and blows the pool.
+                A = clamp(fresnel_absorptance(one(T), n_re, n_im), zero(T), one(T))
+                Pabs = A * Pleft
+                _deposit_along_normal!(Q, flags, Pabs * qfac, skin,
+                                       ix, iy, iz, -dirx, -diry, -dirz,
+                                       Nx, Ny, Nz)
+                Pleft = zero(T)
+                _raypoint!(path, ox, oy, oz, Pleft)
                 break
             end
             tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
@@ -358,8 +412,14 @@ end
                     continue
                 end
             elseif su == TYPE_F
-                _add_q!(Q, n, Pleft * qfac)
-                _raypoint!(path, ox, oy, oz, zero(T))
+                # Same bulk entry as the 3D walk: Fresnel fraction over the skin.
+                A = clamp(fresnel_absorptance(one(T), n_re, n_im), zero(T), one(T))
+                Pabs = A * Pleft
+                _deposit_along_normal!(Q, flags, Pabs * qfac, skin,
+                                       ix, iy, iz, -dirx, -diry, -dirz,
+                                       Nx, Ny, Nz)
+                Pleft = zero(T)
+                _raypoint!(path, ox, oy, oz, Pleft)
                 break
             end
             tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
@@ -414,8 +474,19 @@ function _ray_origin(L, rid)
            L.z + ox * e1z + oy * e2z
 end
 
+# True when this outer step recomputes the beam. Other steps keep the last Q.
+function laser_deposits_now(L, t::Int)
+    L === nothing && return false
+    (L.enabled && L.P > 0) || return false
+    L.every > 1 && (t % L.every != 0) && t != 0 && return false
+    return true
+end
+
+# Outer steps that reuse one deposited Q, including the deposit step.
+laser_hold_steps(L) = max(1, Int(L.every))
+
 # Retrace the current bundle on the host. Each entry is one ray of (x,y,z,P_left)
-# in cell coordinates. Does not deposit heat.
+# in cell coordinates. Does not deposit heat. Pray is not rewritten.
 function trace_laser_rays(model, domain)
     L = model.laser
     (L === nothing || !L.enabled || L.P <= 0 || isempty(L.Pray)) && return Vector{NTuple{4,Float64}}[]
@@ -425,13 +496,14 @@ function trace_laser_rays(model, domain)
     Q = zeros(Float32, 1)
     rays = Vector{NTuple{4,Float64}}[]
     T = eltype(L.x)
+    scale = powder_beam_transmit(model)
     @inbounds for rid in eachindex(L.Pray)
         path = NTuple{4,Float64}[]
         rx, ry, rz = _ray_origin(L, rid)
         _walk_laser_ray!(
             Q, flags, ϕ,
             rx, ry, rz,
-            L.dx, L.dy, L.dz, L.Pray[rid],
+            L.dx, L.dy, L.dz, L.Pray[rid] * scale,
             L.n_re, L.n_im, L.max_bounce, L.skin, zero(T),
             Nx, Ny, Nz, path,
         )
@@ -446,18 +518,19 @@ function laser_qfac(U::Units{T}, ρ_lattice=one(T)) where {T}
 end
 
 # Deposit laser energy for this domain. Is called from step function.
+# Returns true when Q was rewritten. A false step leaves the previous Q in place.
+# Powder already took J.absorbed watts; scale this walk, do not rewrite Pray.
 function deposit_laser!(model, domain)
     L = model.laser
-    (L === nothing || !L.enabled || L.P <= 0) && return nothing
-    t = Int(domain.t)
-    L.every > 1 && (t % L.every != 0) && t != 0 && return nothing
+    laser_deposits_now(L, Int(domain.t)) || return false
     Q = domain.Q.data
     nray = length(L.Pray)
     if nray == 0
         fill!(Q, zero(eltype(Q)))
-        return nothing
+        return true
     end
     qfac = laser_qfac(model.units)
+    scale = powder_beam_transmit(model)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
     flags = Array(domain.flags.data)
     ϕ = Array(domain.ϕ.data)
@@ -467,11 +540,11 @@ function deposit_laser!(model, domain)
         _walk_laser_ray!(
             Qh, flags, ϕ,
             rx, ry, rz,
-            L.dx, L.dy, L.dz, L.Pray[rid],
+            L.dx, L.dy, L.dz, L.Pray[rid] * scale,
             L.n_re, L.n_im, L.max_bounce, L.skin, qfac,
             Nx, Ny, Nz,
         )
     end
     copyto!(Q, Qh)
-    return nothing
+    return true
 end

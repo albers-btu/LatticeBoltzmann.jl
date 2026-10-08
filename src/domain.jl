@@ -56,6 +56,7 @@ mutable struct Domain{
         mp::Memory{CType, Aρ}           # Unmelted powder mass
         τ_p::CType                      # Powder lifetime in lattice steps
         T_p::CType                      # Powder temperature
+        T_stick::CType                  # Hold powder at or above this T; decay only below it
     end
 
     @static if TEMPERATURE
@@ -147,6 +148,7 @@ function Domain(
     T_rad::CType = one(CType),
     τ_p::CType = zero(CType),
     T_p::CType = one(CType),
+    T_stick::CType = zero(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
 
@@ -234,7 +236,7 @@ function Domain(
                 CType(fx), CType(fy), CType(fz),
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
-                ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p),
+                ϕ, mass, massex, msrc, mp, CType(τ_p), CType(T_p), CType(T_stick),
                 αT, αs, αl, CType(α_sT), CType(α_lT),
                 CType(γ_s), CType(γ_l), 
                 νs, νl, CType(ν_sT), CType(ν_lT), 
@@ -253,7 +255,7 @@ function Domain(
                 CType(σ), CType(σT), CType(Tσ),
                 ρ, u, F, fi, flags,
                 ϕ, mass, massex, msrc, mp,
-                CType(τ_p), CType(T_p),
+                CType(τ_p), CType(T_p), CType(T_stick),
                 UInt64(0)
             )
         end
@@ -393,64 +395,17 @@ end
     end
 
     @static if SURFACE
-        # dx is neighbor coordinate x+0 (resting), x+1 or x-1
-        @inline function _wrap_mass(x, dx, N)
-            ifelse(dx == 0, x,
-                ifelse(dx > 0, ifelse(x == N - 1, 0, x + 1),
-                               ifelse(x == 0, N - 1, x - 1)))
-        end
-
-        # Count the interface/fluid cells to distribute the excess mass to
-        function _massex_recipients(flags, fsA, n::Int, Nx::Int, Ny::Int, Nz::Int)
-            n0 = n - 1
-            x = n0 % Nx
-            y = (n0 ÷ Nx) % Ny
-            z = n0 ÷ (Nx * Ny)
-            cnt = 0
-            @static if DIM == 3
-                @inbounds for i in 2:length(VELOCITIES[:D3Q19])
-                    ci = VELOCITIES[:D3Q19][i]
-                    j = _wrap_mass(x, ci[1], Nx) +
-                        _wrap_mass(y, ci[2], Ny) * Nx +
-                        _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
-                    suj = flags[j] & (TYPE_SU | TYPE_S)
-                    liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
-                    liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)         # Count as recipient if liquid fraction (1-fs)
-                                                                                                # is greater than 1e-3 (0.1%)
-                    cnt += Int(liquid)
-                end
-            elseif DIM == 2
-                @inbounds for i in 2:length(VELOCITIES[:D2Q9])
-                    ci = VELOCITIES[:D2Q9][i]
-                    j = _wrap_mass(x, ci[1], Nx) +
-                        _wrap_mass(y, ci[2], Ny) * Nx +
-                        _wrap_mass(z, ci[3], Nz) * Nx * Ny + 1
-                    suj = flags[j] & (TYPE_SU | TYPE_S)
-                    liquid = suj == TYPE_F || suj == TYPE_I || suj == TYPE_IF || suj == TYPE_GI
-                    liquid = liquid && (one(eltype(fsA)) - fsA[j]) >= eltype(fsA)(1e-3)
-                    cnt += Int(liquid)
-                end
-            end
-            return cnt
-        end
-
-        # Sum the mass on all cells (Σ mass + mp + (massex × recipients))
+        # Σ mass + mp + massex. massex is the total give still waiting for the
+        # next surface_0, so it is added once.
         function metal_mass(domain::Domain{CType}) where {CType}
             flags = Array(domain.flags.data)
             mA = Array(domain.mass.data)
             mxA = Array(domain.massex.data)
             mpA = Array(domain.mp.data)
-            fsA = Array(domain.fs.data)
-            Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
             s = 0.0
             @inbounds for n in eachindex(flags)
                 (flags[n] & TYPE_S) != 0x00 && continue
-                s += Float64(mA[n]) + Float64(mpA[n])
-                mx = Float64(mxA[n])
-                if mx != 0
-                    cnt = _massex_recipients(flags, fsA, n, Nx, Ny, Nz)
-                    s += cnt > 0 ? mx * cnt : mx
-                end
+                s += Float64(mA[n]) + Float64(mpA[n]) + Float64(mxA[n])
             end
             return CType(s)
         end

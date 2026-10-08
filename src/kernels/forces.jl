@@ -70,8 +70,32 @@ end
     return -drag * ux, -drag * uy, -drag * uz
 end
 
-# Anisimov recoil: F = p_r n, p_r = 0.54 p_sat, n = ∇ϕ/|∇ϕ| (into liquid).
-# Λ_v = 0 → off. |F| capped so Guo Δu stays O(0.1).
+# Anisimov recoil pressure p_r = min(0.54 p_sat, 0.5). Same p_sat as
+# evaporative_dT, including T < T_v. Λ_v = 0 → off.
+# Hydrostatics use this as a gas density: p = ρ/3, so Δρ = 3 p_r.
+# Adding p_r as a body force never builds that pressure. Each hydro substep
+# then adds p_r/(2ρ), and the sum runs |u| onto c_s.
+@inline function recoil_pressure(
+    Tn::CType, Λ_v::CType, T_v::CType, p0::CType, β_v::CType
+) where {CType}
+    Λ_v <= zero(CType) && return zero(CType)
+    pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
+    return ifelse(pr > CType(0.5), CType(0.5), pr)
+end
+
+@inline function gas_density_recoil(
+    ρ_gas::CType, Tn::CType, Λ_v::CType, T_v::CType, p0::CType, β_v::CType
+) where {CType}
+    # Δρ = p_r / c_s². Boiling on the IN625 substep is ~0.20. The
+    # interface viscosity floor is what keeps that from locking |u|
+    # on c_s; this only drops a jump the floor has not been shown to carry.
+    Δρ = CType(3) * recoil_pressure(Tn, Λ_v, T_v, p0, β_v)
+    Δρ = ifelse(Δρ > CType(0.08), CType(0.08), Δρ)
+    return clamp(ρ_gas + Δρ, CType(0.2), CType(2))
+end
+
+# Direction of recoil_pressure (into the liquid). The solver applies the
+# pressure through gas_density_recoil, not through this vector.
 @inline function recoil_force(
     Tfield, ϕ, n::Int, x::Int, y::Int, z::Int,
     Nx::Int, Ny::Int, Nz::Int,
@@ -80,8 +104,7 @@ end
     @static if DIM == 3
         Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
         Tn = Tfield[n]
-        pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
-        pr = ifelse(pr > CType(0.5), CType(0.5), pr)
+        pr = recoil_pressure(Tn, Λ_v, T_v, p0, β_v)
         pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
         xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)
         xm = src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz)
@@ -100,8 +123,7 @@ end
     elseif DIM == 2
         Λ_v <= zero(CType) && return zero(CType), zero(CType), zero(CType)
         Tn = Tfield[n]
-        pr = CType(0.54) * p_sat(Tn, T_v, p0, β_v)
-        pr = ifelse(pr > CType(0.5), CType(0.5), pr)
+        pr = recoil_pressure(Tn, Λ_v, T_v, p0, β_v)
         pr <= zero(CType) && return zero(CType), zero(CType), zero(CType)
         # (0,0,±1) on Nz = 1 wraps onto this cell; do not load it.
         xp = src_index(x, y, z, 1, 0, 0, Nx, Ny, Nz)

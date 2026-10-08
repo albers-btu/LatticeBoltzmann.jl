@@ -1,7 +1,7 @@
 # A few rays along +x, all inside the sphere's shadow, onto a metal sphere.
 # Open both in ParaView:
 #   output_laser_rays/lbm.pvd    sphere (color by phi or flags)
-#   output_laser_rays/rays.pvd   one polyline per ray (color by power)
+#   output_laser_rays/rays.pvd   one polyline per ray, plus the 1/e² cylinder (color by power)
 #
 # Rays that hit the sphere reflect. Rays that miss run on to the far wall.
 # SURFACE and TEMPERATURE must be on (src/extensions.jl).

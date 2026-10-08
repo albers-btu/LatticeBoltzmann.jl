@@ -26,6 +26,19 @@ end
     end
 end
 
+# Marangoni on a hydro substep integrates until a component sits on ±c_s.
+# The c_s clamp then holds, because the force is still applied. 0.2 is under
+# that latch (about 2 m/s on the Tim DED substep).
+@inline function cap_interface_velocity(ux::CType, uy::CType, uz::CType) where {CType}
+    umax = CType(0.2)
+    usq = ux * ux + uy * uy + uz * uz
+    if usq > umax * umax
+        s = umax / sqrt(usq)
+        return ux * s, uy * s, uz * s
+    end
+    return ux, uy, uz
+end
+
 @inline function omega_minus(ω::CType) where {CType}
     three_nu = one(CType) / ω - CType(0.5) # 3ν = τ⁺ − 1/2
     return one(CType) / (CType(0.1875) / three_nu + CType(0.5))
@@ -163,6 +176,23 @@ end
     return ifelse(ω > hi, hi, ifelse(ω < lo, lo, ω))
 end
 
+# feq stays below this for ρ≤2 and |u_α|≤c_s. Larger values are the
+# gas-side anti-bounce copying a bad population back in.
+@inline function population_ok(f::CType) where {CType}
+    return isfinite(f) && abs(f) <= CType(2)
+end
+
+@inline function bound_population(f::CType, feq_dir::CType) where {CType}
+    return population_ok(f) ? f : feq_dir
+end
+
+@inline function bound_pair(fp::CType, fm::CType, feqp::CType, feqm::CType) where {CType}
+    if population_ok(fp) && population_ok(fm)
+        return fp, fm
+    end
+    return feqp, feqm
+end
+
 # Deviatoric shear population. c_s²=1/3, w_i/(2 c_s⁴) = (9/2) w_i.
 # Off-diagonal Π_αβ is stored once, so those terms carry a 2.
 @static if DIM == 3
@@ -254,7 +284,7 @@ end
     @static if APPLY_FORCE
         f0 += gscale * guo_fi(w[1], ux, uy, uz, fx, fy, fz, c[1], CType)
     end
-    fi[f_index(n, 1, N)] = eltype(fi)(f0)
+    fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
     for k in 1:NP
         i = 2k
         fp0, fm0 = pairs[k]
@@ -270,6 +300,7 @@ end
             fp += gscale * guo_fi(w[i], ux, uy, uz, fx, fy, fz, c[i], CType)
             fm += gscale * guo_fi(w[i + 1], ux, uy, uz, fx, fy, fz, c[i + 1], CType)
         end
+        fp, fm = bound_pair(fp, fm, feqp, feqm)
         src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
         store_pair!(fi, n, src, i, fp, fm, t_odd, N)
     end
@@ -372,7 +403,7 @@ end
     @static if APPLY_FORCE
         f0 += gscale * guo_fi(w[1], ux, uy, uz, fx, fy, fz, c[1], CType)
     end
-    fi[f_index(n, 1, N)] = eltype(fi)(f0)
+    fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
     for k in 1:NP
         i = 2k
         fp0, fm0 = pairs[k]
@@ -388,6 +419,7 @@ end
             fp += gscale * guo_fi(w[i], ux, uy, uz, fx, fy, fz, c[i], CType)
             fm += gscale * guo_fi(w[i + 1], ux, uy, uz, fx, fy, fz, c[i + 1], CType)
         end
+        fp, fm = bound_pair(fp, fm, feqp, feqm)
         src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
         store_pair!(fi, n, src, i, fp, fm, t_odd, N)
     end

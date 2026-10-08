@@ -92,7 +92,8 @@ end
             end
             if miss_p
                 geg = geq_T_axis(Tw, zero(CType))
-                rec_p = geg + geg - fp_out
+                # |g| past the cap is a mirrored runaway, not a wall population.
+                rec_p = bound_population(geg + geg - fp_out, geg)
                 acc_add!(Eacc, EACC_WALL, fillc * (fm_in - rec_p))
             end
         end
@@ -108,7 +109,7 @@ end
             end
             if miss_m
                 geg = geq_T_axis(Tw, zero(CType))
-                rec_m = geg + geg - fm_out
+                rec_m = bound_population(geg + geg - fm_out, geg)
                 acc_add!(Eacc, EACC_WALL, fillc * (fp_in - rec_m))
             end
         end
@@ -127,6 +128,79 @@ end
         reconstruct_g_boundaries!(Val(true), gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
     else
         reconstruct_g_boundaries!(Val(false), gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
+    end
+    return nothing
+end
+
+# Gas and a plain solid (no Dirichlet, no Robin) never collide, so nothing
+# streams back. The population that arrived from the fluid stays; the missing
+# side is set so the pair sums to 2·geq(T, 0). That sum is the equilibrium
+# pair at any normal speed, and it does not depend on the arrived value, so a
+# recoil spike cannot multiply T. collide_temperature! also drops that normal
+# speed when writing geq, so the spike is not stored into the fluid neighbor.
+@inline function thermal_adiabatic_face(fl::UInt8)
+    plain = ((fl & TYPE_S) != 0x00) & ((fl & TYPE_T) == 0x00) & ((fl & TYPE_H) == 0x00)
+    return plain | ((fl & TYPE_SU) == TYPE_G)
+end
+
+@inline function reconstruct_g_adiabatic!(
+    t_odd::Val{odd}, gi, Tn::CType, flags,
+    x::Int, y::Int, z::Int, n::Int,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType}
+) where {odd, CType}
+    # geq(T, +u) + geq(T, −u) = 2 geq(T, 0) on one axis. The missing side is
+    # that sum minus the population that actually arrived, so a recoil spike
+    # in the arrived link cannot change this cell's temperature.
+    rest = geq_T_axis(Tn, zero(CType))
+    pair0 = rest + rest
+    @static if DIM == 3
+        thermal_axes = ((2, 1, 0, 0), (4, 0, 1, 0), (6, 0, 0, 1))
+    else
+        thermal_axes = ((2, 1, 0, 0), (4, 0, 1, 0))
+    end
+    @inbounds for (i, cx, cy, cz) in thermal_axes
+        srcp = src_index(x, y, z, cx, cy, cz, Nx, Ny, Nz)
+        srcm = src_index(x, y, z, -cx, -cy, -cz, Nx, Ny, Nz)
+        miss_p = thermal_adiabatic_face(flags[srcp])
+        miss_m = thermal_adiabatic_face(flags[srcm])
+        (miss_p | miss_m) || continue
+        gp, gm = load_pair(gi, n, srcp, i, t_odd, N, CType)
+        # First stored value is what this parity's load reads as g₋.
+        if miss_p && miss_m
+            rec_m = rest
+            rec_p = rest
+        elseif miss_p
+            rec_m = pair0 - gp
+            rec_p = gm
+        else
+            rec_m = gp
+            rec_p = pair0 - gm
+        end
+        rec_m = bound_population(rec_m, rest)
+        rec_p = bound_population(rec_p, rest)
+        store_reconstructed_pair!(gi, n, srcp, i, rec_m, rec_p, miss_p, miss_m, t_odd, N)
+    end
+    return nothing
+end
+
+# Drop the normal speed on an axis whose neighbor does not collide. geq's
+# ±u_n terms would otherwise be stored into the fluid and heat it by ~T·u_n.
+@inline function thermal_face_velocity(ucomp::CType, flags, srcp::Int, srcm::Int) where {CType}
+    if thermal_adiabatic_face(flags[srcp]) || thermal_adiabatic_face(flags[srcm])
+        return zero(CType)
+    end
+    return ucomp
+end
+
+@inline function reconstruct_g_adiabatic!(
+    g_odd::Bool, gi, Tn::CType, flags,
+    x::Int, y::Int, z::Int, n::Int,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType}
+) where {CType}
+    if g_odd
+        reconstruct_g_adiabatic!(Val(true), gi, Tn, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
+    else
+        reconstruct_g_adiabatic!(Val(false), gi, Tn, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
     end
     return nothing
 end
@@ -254,18 +328,29 @@ end
     return p0 * exp(x)
 end
 
-# Hertz–Knudsen cooling as lattice dT/step. Zero for T ≤ T_v or Λ_v = 0.
-# Capped so T cannot fall below T_v in one collide.
+# Hertz–Knudsen cooling as lattice dT/step. Λ_v = 0 or T ≤ 0 → off.
+# p_sat is the Clausius–Clapeyron pressure recoil uses, including T < T_v.
+# Above T_v the raw flux is exponential. A cap that stops exactly at T_v
+# pins the cell there: the next laser increment crosses T_v and is removed
+# only back to T_v, so recoil stays at p_sat(T_v) for every later hydro
+# substep. The step may therefore land below T_v, by at most the boiling
+# flux C_hk p0 Λ_v / √T_v on top of the superheat. Below T_v the only
+# limit is T ≥ 0.
 @inline function evaporative_dT(
     Tn::CType, Λ_v::CType, T_v::CType, C_hk::CType, p0::CType, β_v::CType
 ) where {CType}
-    if !(Λ_v > zero(CType) && T_v > zero(CType) && Tn > T_v)
+    if !(Λ_v > zero(CType) && T_v > zero(CType) && Tn > zero(CType))
         return zero(CType)
     end
     ps = p_sat(Tn, T_v, p0, β_v)
     mdot = C_hk * ps / sqrt(Tn)
     Qe = mdot * Λ_v
-    Qmax = Tn - T_v
+    if Tn > T_v
+        Qboil = C_hk * p0 / sqrt(T_v) * Λ_v
+        Qmax = (Tn - T_v) + Qboil
+    else
+        Qmax = Tn
+    end
     return ifelse(Qe > Qmax, Qmax, ifelse(Qe > zero(CType), Qe, zero(CType)))
 end
 
@@ -332,11 +417,26 @@ end
         Tfromg = g0 + gpx + gmx + gpy + gmy + one(CType)
     end
 
+    # SRT would keep a non-finite or runaway g. |g|≤2 covers geq at T≲5 and |u_α|≤c_s.
+    g_bad = !population_ok(g0) | !population_ok(gpx) | !population_ok(gmx) |
+            !population_ok(gpy) | !population_ok(gmy)
+    @static if DIM == 3
+        g_bad = g_bad | !population_ok(gpz) | !population_ok(gmz)
+    end
+    if g_bad
+        Tw = Tfield[n]
+        Tfromg = isfinite(Tw) ? Tw : Ts
+    end
+
     Qn_in = Qin[n]
     Qn = Qn_in
+    if !isfinite(Qn)
+        Qn = zero(CType)
+        Qn_in = zero(CType)
+    end
     dirichlet = (flagsn & TYPE_T) != 0x00
     use_flux = false
-    write_geq = false
+    write_geq = g_bad
     Tn = zero(CType)
     mevap = zero(CType)
     fillc = fill < zero(CType) ? zero(CType) : fill
@@ -413,6 +513,12 @@ end
         end
     end
 
+    # Local copies only. The caller still collides hydro at the real velocity.
+    ux = thermal_face_velocity(ux, flags, srcx, src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz))
+    uy = thermal_face_velocity(uy, flags, srcy, src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz))
+    @static if DIM == 3
+        uz = thermal_face_velocity(uz, flags, srcz, src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz))
+    end
     ge0 = geq_T_rest(Tn)
     gexp, gexm = geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux)
     geyp, geym = geq_T_axis(Tn, uy), geq_T_axis(Tn, -uy)

@@ -126,8 +126,9 @@ using KernelAbstractions
         @static if APPLY_FORCE
             Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
         end
-        fi[f_index(n, 1, N)] = eltype(fi)(
-            (one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)) + Fi0)
+        fe0 = w[1] * ρn * (one(CType) - uu)
+        f0 = (one(CType) - ω) * fn1 + ω * fe0 + Fi0
+        fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
 
         for k in 1:NP
             i = 2k
@@ -143,6 +144,7 @@ using KernelAbstractions
                 fp_s += Fip
                 fm_s += Fim
             end
+            fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
             src = src_index(x, y, z, cp[1], cp[2], cp[3], Nx, Ny, Nz)
             store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
         end
@@ -301,8 +303,9 @@ end
     @static if APPLY_FORCE
         Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
     end
-    fi[f_index(n, 1, N)] = eltype(fi)(
-        (one(CType) - ω) * fn1 + ω * (w[1] * ρn * (one(CType) - uu)) + Fi0)
+    fe0 = w[1] * ρn * (one(CType) - uu)
+    f0 = (one(CType) - ω) * fn1 + ω * fe0 + Fi0
+    fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
 
 
     let feqp = feq(w[2], ρn, ux, uy, uz, uu, c[2], CType)
@@ -313,6 +316,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src2, 2, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[4], ρn, ux, uy, uz, uu, c[4], CType)
@@ -323,6 +327,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src4, 4, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[6], ρn, ux, uy, uz, uu, c[6], CType)
@@ -333,6 +338,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src6, 6, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[8], ρn, ux, uy, uz, uu, c[8], CType)
@@ -343,6 +349,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src8, 8, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[10], ρn, ux, uy, uz, uu, c[10], CType)
@@ -353,6 +360,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src10, 10, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[12], ρn, ux, uy, uz, uu, c[12], CType)
@@ -363,6 +371,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src12, 12, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[14], ρn, ux, uy, uz, uu, c[14], CType)
@@ -373,6 +382,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src14, 14, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[16], ρn, ux, uy, uz, uu, c[16], CType)
@@ -383,6 +393,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src16, 16, fp_s, fm_s, t_odd, N)
     end
     let feqp = feq(w[18], ρn, ux, uy, uz, uu, c[18], CType)
@@ -393,6 +404,7 @@ end
             fp_s += Fip
             fm_s += Fim
         end
+        fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src18, 18, fp_s, fm_s, t_odd, N)
     end
 
@@ -444,7 +456,7 @@ end # not SURFACE
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType,
     do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, Macc
 ) where {odd, Q, CType}
@@ -508,18 +520,30 @@ end # not SURFACE
             fillc = ϕ[n]
             fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
             if τ_p > zero(CType)
+                # Molten parcels join mass on the host. mp is the cold remainder.
                 mp_src = msrc[n] * ρn
                 mpn = mp[n] + mp_src
                 acc_add!(Eacc, EACC_POWDER, mp_src * sensible_H(T_p, γ_s))
                 acc_add!(Macc, MACC_POWDER, mp_src)
                 Tpred = T[n] + Qin[n]
                 if Tpred >= Ts
+                    # mp is cold solid. Mix it. (T − T_p + Λ) charged against ρ
+                    # puts a full cell of powder below H = 0 (about −550 K).
                     dm = mpn < ρn ? mpn : ρn
                     mpn -= dm
-                    mass[n] += dm
-                    debit = (dm / ρn) * (max(Tpred - T_p, zero(CType)) + Λ)
+                    m_store = mass[n]
+                    m_now = m_store > zero(CType) ? m_store : ρn
+                    mass[n] = m_store + dm
+                    fsn = fs[n]
+                    γc = blend_phase(fsn, γ_s, γ_l)
+                    h_now = cell_enthalpy(T[n], fsn, Λ, γc) + Qin[n]
+                    h_p = sensible_H(T_p, γ_s)
+                    m_new = m_now + dm
+                    h_mix = (m_now * h_now + dm * h_p) / m_new
+                    debit = h_now - h_mix
                     Qin[n] -= debit
-                else
+                elseif Tpred < T_stick
+                    # Cold solid sheds. Hot solid holds mp until the cell melts.
                     mpd = mpn * exp(-one(CType) / τ_p)
                     acc_add!(Eacc, EACC_POWDER, (mpd - mpn) * sensible_H(T_p, γ_s))
                     acc_add!(Macc, MACC_POWDER, mpd - mpn)
@@ -557,20 +581,40 @@ end # not SURFACE
                     mx, my, mz = marangoni_force(T, ϕ, flags, σT, x, y, z, n, Nx, Ny, Nz, CType)
                     fxn += mx; fyn += my; fzn += mz
                 end
-                if Λ_v > zero(CType)
-                    rx, ry, rz = recoil_force(T, ϕ, n, x, y, z, Nx, Ny, Nz, Λ_v, T_v, p0v, β_v, CType)
-                    fxn += rx; fyn += ry; fzn += rz
-                end
             end
         end
         @static if TEMPERATURE
             νc = prop_fs_T(fs[n], ν_s, ν_sT, ν_l, ν_lT, T[n], T_avg, CType(1e-8))
+            # Substep ν is ~0.001 (ω ≈ 2), so the anti-bounce does not
+            # damp. A liquid interface cell is held at ν ≥ 0.05 (ω ≈ 1.54).
+            # At 0.02 the same spot still climbed from |u|≈0.08 to 0.56.
+            if (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
+                νc = ifelse(νc > CType(0.05), νc, CType(0.05))
+            end
             ω = omega_from_nu(νc)
             dx, dy, dz = darcy_force(fs[n], ux, uy, uz, ρn, νc, K0)
             if K0 > zero(CType) && (one(CType) - fs[n]) < CType(1e-3)
                 fxn, fyn, fzn = dx, dy, dz
             else
                 fxn += dx; fyn += dy; fzn += dz
+            end
+        end
+        @static if TEMPERATURE
+            # Momentum after Guo. Substep ν never carries Marangoni down to
+            # the wall, so a component walks onto ±c_s and stays there.
+            # Replace the force so a liquid interface streams at |u| ≤ 0.2.
+            if (flagsn & TYPE_SU) == TYPE_I && !is_solid_fraction(fs[n])
+                umax = CType(0.2)
+                umx = ux + fxn * invρ
+                umy = uy + fyn * invρ
+                umz = uz + fzn * invρ
+                usq = umx * umx + umy * umy + umz * umz
+                if usq > umax * umax
+                    s = umax / sqrt(usq)
+                    fxn = ρn * (s * umx - ux)
+                    fyn = ρn * (s * umy - uy)
+                    fzn = ρn * (s * umz - uz)
+                end
             end
         end
         @static if APPLY_FORCE
@@ -597,7 +641,10 @@ end # not SURFACE
         @static if TEMPERATURE
             frozen_i = is_solid_fraction(fs[n])
         end
-        if !frozen_i
+        massn = mass[n]
+        # A solid interface that powder has filled past one cell still opens
+        # the gas neighbor. A solid cell at or below ρ does not.
+        if !frozen_i || massn > ρn
             noF = true; noG = true
             for i in 2:Q
                 src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
@@ -605,10 +652,11 @@ end # not SURFACE
                 noF &= suj != TYPE_F
                 noG &= suj != TYPE_G
             end
-            massn = mass[n]
             if massn > ρn || noG
                 flags[n] = (flagsn & ~TYPE_SU) | TYPE_IF
-            elseif massn < 0 || noF
+            elseif massn < 0 || (noF && !touches_metal(flags, x, y, z, c, Nx, Ny, Nz))
+                # A new cell on an interface parent has no TYPE_F neighbor.
+                # Any metal neighbor keeps a non-negative cell alive.
                 flags[n] = (flagsn & ~TYPE_SU) | TYPE_IG
             end
         end
@@ -631,7 +679,9 @@ end # not SURFACE
         @static if APPLY_FORCE
             Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
         end
-        fi[f_index(n, 1, N)] = eltype(fi)(srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]) + Fi0)
+        fe0 = feq(w[1], ρn, ux, uy, uz, uu, c[1], CType)
+        f0 = srt(ω, fn1, w[1], ρn, ux, uy, uz, uu, c[1]) + Fi0
+        fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
         for k in 1:NP
             i = 2k
             fp, fm = pairs[k]
@@ -643,6 +693,7 @@ end # not SURFACE
                 fp_s += Fip
                 fm_s += Fim
             end
+            fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
             src = src_index(x, y, z, c[i][1], c[i][2], c[i][3], Nx, Ny, Nz)
             store_pair!(fi, n, src, i, fp_s, fm_s, t_odd, N)
         end
@@ -657,11 +708,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, do_thermal::Bool, g_odd::Bool,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType, do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, T_stick, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -671,11 +722,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, do_thermal::Bool, g_odd::Bool,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType, do_thermal::Bool, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
 ) where {Q, CType}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, T_stick, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 # Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).
