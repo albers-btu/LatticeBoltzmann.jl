@@ -50,9 +50,11 @@ include("plic.jl")
 export plic_cube, calculate_curvature, calculate_normal_py
 
 include("laser.jl")
+include("kernels/laser.jl")
 export Laser, set_laser_position!, deposit_laser!, fresnel_absorptance, trace_laser_rays
 
 include("powder.jl")
+include("kernels/powder.jl")
 export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
 export make_powder_jets, place_powder_jets!, set_powder_enabled!, powder_enabled
 
@@ -62,7 +64,7 @@ export PowderBed, read_powder_bed, substrate_top, paint_powder_bed!
 include("model.jl")
 export Model
 export get_D
-export run!, initialize!, moments!
+export run!, initialize!, moments!, note_solid_velocity!
 export update_force_field!, reset_force_field!
 
 include("export.jl")

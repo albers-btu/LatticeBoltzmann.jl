@@ -66,6 +66,13 @@ mutable struct Model{
     laser::Any                              # Laser source (see laser.jl)
     powder_jet::Any                         # Powder source (see powder.jl)
     n_hydro::Int                            # Hydro/interface substeps per thermal step
+    phase_ns::Any                           # nothing, or 6 phase times in ns for the harness
+    solids_move::Bool                       # A TYPE_S cell has a nonzero velocity
+    moving_clear::Bool                      # One more moving-boundary pass to clear TYPE_MS
+    deposit_lock::Any                       # Int32 cell locks for parcel deposits
+    powder_ledger::Any                      # Device (ΔE, ΔM) from the parcel walk
+    parcel_pending::Any                     # Device parcel state waiting for a host copy
+    cached_powder_gas_kernel!::Any          # Cached kernel
 end
 
 function Model(
@@ -254,6 +261,11 @@ function Model(
         cached_surface_2_odd = surface_2_odd_kernel!(backend, workgroup)
         cached_surface_3 = surface_3_kernel!(backend, workgroup)
     end
+    @static if SURFACE
+        cached_powder = powder_gas_kernel!(backend, workgroup)
+    else
+        cached_powder = nothing
+    end
 
     Dx = UInt(1)
     Dy = UInt(1)
@@ -397,6 +409,7 @@ function Model(
                 laser,
                 powder_jet,
                 max(1, n_hydro),
+                nothing, false, false, nothing, nothing, nothing, cached_powder,
             )
         else
             Model(
@@ -428,6 +441,7 @@ function Model(
                 laser,
                 powder_jet,
                 max(1, n_hydro),
+                nothing, false, false, nothing, nothing, nothing, cached_powder,
             )
         end
     else
@@ -455,6 +469,7 @@ function Model(
                 laser,
                 powder_jet,
                 max(1, n_hydro),
+                nothing, false, false, nothing, nothing, nothing, cached_powder,
             )
         else
             Model(
@@ -479,6 +494,7 @@ function Model(
                 laser,
                 powder_jet,
                 max(1, n_hydro),
+                nothing, false, false, nothing, nothing, nothing, cached_powder,
             )
         end
     end
@@ -614,6 +630,7 @@ end
 function initialize!(model::Model)
     @info "starting init"
     kernel = model.cached_initialize_kernel!
+    founds = Any[]
     for domain in model.domains
         N = get_N(domain)
         @static if SURFACE
@@ -641,15 +658,35 @@ function initialize!(model::Model)
             )
         end
         @static if MOVING_BOUNDARIES
-            model.cached_moving_kernel!(
-                domain.u.data, domain.flags.data, model.velocities,
-                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
-                ndrange = N
-            )
+            found = similar(domain.u.data, Int32, 1)
+            fill!(found, Int32(0))
+            any_solid_u_kernel!(model.backend, model.workgroup)(
+                domain.u.data, domain.flags.data, found, Int(domain.N);
+                ndrange = N)
+            push!(founds, (domain, found))
         end
     end
 
     KernelAbstractions.synchronize(model.backend)
+    @static if MOVING_BOUNDARIES
+        model.solids_move = false
+        model.moving_clear = false
+        for (_, found) in founds
+            if Array(found)[1] != 0
+                model.solids_move = true
+            end
+        end
+        if model.solids_move
+            for (domain, _) in founds
+                N = get_N(domain)
+                model.cached_moving_kernel!(
+                    domain.u.data, domain.flags.data, model.velocities,
+                    Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz);
+                    ndrange = N)
+            end
+            KernelAbstractions.synchronize(model.backend)
+        end
+    end
     model.initialized = true
     @static if TEMPERATURE
         reset_energy_budget!(model)
@@ -658,6 +695,24 @@ function initialize!(model::Model)
         end
     end
     @info "finished init"
+end
+
+# A TYPE_S velocity written after initialize! stays invisible to the
+# moving-boundary skip until this runs. moving=false queues one clearing pass.
+function note_solid_velocity!(model::Model; moving::Bool=true)
+    model.solids_move = moving
+    model.moving_clear = !moving
+    return nothing
+end
+
+# Harness only. Production leaves phase_ns as nothing and adds no synchronizes.
+function _phase_mark(model, phase::Int, t0::UInt)
+    clock = model.phase_ns
+    clock === nothing && return t0
+    KernelAbstractions.synchronize(model.backend)
+    now = time_ns()
+    clock[phase] += Float64(now - t0)
+    return now
 end
 
 function step!(model::Model)
@@ -686,17 +741,22 @@ function step!(model::Model)
         νsT = domain.ν_sT * sν; νlT = domain.ν_lT * sν
         ω = omega_from_nu(domain.ν * sν)
 
+        tmark = model.phase_ns === nothing ? UInt(0) : time_ns()
         @static if SURFACE && TEMPERATURE
             heat_powder_beam!(model, domain)
             refreshed = deposit_laser!(model, domain)
             advance_powder_jet!(model, domain, refreshed)
+        end
+        tmark = _phase_mark(model, 1, tmark)
+        @static if SURFACE && TEMPERATURE
             if domain.τ_p > 0
-                powder_gas_kernel!(model.backend, model.workgroup)(
-                                   domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
-                                   domain.τ_p, domain.T_p, domain.γ_s,
-                                   domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
+                model.cached_powder_gas_kernel!(
+                    domain.flags.data, domain.mp.data, domain.msrc.data, domain.ρ.data,
+                    domain.τ_p, domain.T_p, domain.γ_s,
+                    domain.Eacc.data, domain.Macc.data, Nd; ndrange = N)
             end
         end
+        tmark = _phase_mark(model, 2, tmark)
 
         # gi streams once per outer step. Init writes it for an even load,
         # so that load is isodd(t), not the hydro substep index.
@@ -713,45 +773,85 @@ function step!(model::Model)
 
             @static if SURFACE
                 sk0 = t_odd ? model.cached_surface_0_odd_kernel! : model.cached_surface_0_even_kernel!
-                sk0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
-                    domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
-                    domain.fs.data, domain.gi.data,
-                    model.weights, model.velocities,
-                    fx, fy, fz, σ, σT, domain.Tσ,
-                    domain.Λ_v, domain.T_v, p0v, domain.β_v,
-                    Nd, Nx, Ny, Nz, domain.Eacc.data,
-                    domain.h.data, domain.Q.data, domain.ω_T,
-                    thermal, g_odd; ndrange = N)
+                if thermal
+                    sk0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+                        domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+                        domain.fs.data, domain.gi.data,
+                        model.weights, model.velocities,
+                        fx, fy, fz, σ, σT, domain.Tσ,
+                        domain.Λ_v, domain.T_v, p0v, domain.β_v,
+                        Nd, Nx, Ny, Nz, domain.Eacc.data,
+                        domain.h.data, domain.Q.data, domain.ω_T,
+                        Val(true), g_odd; ndrange = N)
+                else
+                    sk0(domain.fi.data, domain.ρ.data, domain.u.data, domain.flags.data,
+                        domain.mass.data, domain.massex.data, domain.ϕ.data, domain.T.data,
+                        domain.fs.data, domain.gi.data,
+                        model.weights, model.velocities,
+                        fx, fy, fz, σ, σT, domain.Tσ,
+                        domain.Λ_v, domain.T_v, p0v, domain.β_v,
+                        Nd, Nx, Ny, Nz, domain.Eacc.data,
+                        domain.h.data, domain.Q.data, domain.ω_T,
+                        Val(false), g_odd; ndrange = N)
+                end
             end
+            tmark = _phase_mark(model, 3, tmark)
 
             @static if MOVING_BOUNDARIES
-                model.cached_moving_kernel!(
-                    domain.u.data, domain.flags.data, model.velocities,
-                    Nd, Nx, Ny, Nz; ndrange = N)
+                if model.solids_move || model.moving_clear
+                    model.cached_moving_kernel!(
+                        domain.u.data, domain.flags.data, model.velocities,
+                        Nd, Nx, Ny, Nz; ndrange = N)
+                    model.moving_clear = false
+                end
             end
+            tmark = _phase_mark(model, 4, tmark)
 
             kernel = t_odd ? model.cached_collide_odd_kernel! : model.cached_collide_even_kernel!
             @static if SURFACE
-                kernel(domain.flags.data, domain.fi.data,
-                       domain.ρ.data, domain.u.data, domain.F.data,
-                       domain.mass.data,
-                       domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                       domain.ϕ.data,
-                       domain.fs.data,
-                       domain.msrc.data, domain.mp.data,
-                       model.weights, model.velocities,
-                       ω, fx, fy, fz,
-                       domain.ω_T, domain.β, domain.T_avg, σT,
-                       domain.Λ, domain.Ts, domain.Tl, domain.K0,
-                       domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
-                       domain.γ_s, domain.γ_l,
-                       νs, νl, νsT, νlT,
-                       domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
-                       domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p, domain.T_stick,
-                       thermal, g_odd,
-                       Nd, Nx, Ny, Nz, domain.Eacc.data,
-                       domain.Macc.data;
-                       ndrange = N)
+                if thermal
+                    kernel(domain.flags.data, domain.fi.data,
+                           domain.ρ.data, domain.u.data, domain.F.data,
+                           domain.mass.data,
+                           domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                           domain.ϕ.data,
+                           domain.fs.data,
+                           domain.msrc.data, domain.mp.data,
+                           model.weights, model.velocities,
+                           ω, fx, fy, fz,
+                           domain.ω_T, domain.β, domain.T_avg, σT,
+                           domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                           domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                           domain.γ_s, domain.γ_l,
+                           νs, νl, νsT, νlT,
+                           domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
+                           domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p, domain.T_stick,
+                           Val(true), g_odd,
+                           Nd, Nx, Ny, Nz, domain.Eacc.data,
+                           domain.Macc.data;
+                           ndrange = N)
+                else
+                    kernel(domain.flags.data, domain.fi.data,
+                           domain.ρ.data, domain.u.data, domain.F.data,
+                           domain.mass.data,
+                           domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                           domain.ϕ.data,
+                           domain.fs.data,
+                           domain.msrc.data, domain.mp.data,
+                           model.weights, model.velocities,
+                           ω, fx, fy, fz,
+                           domain.ω_T, domain.β, domain.T_avg, σT,
+                           domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                           domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                           domain.γ_s, domain.γ_l,
+                           νs, νl, νsT, νlT,
+                           domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
+                           domain.C_rad, domain.T_rad, domain.τ_p, domain.T_p, domain.T_stick,
+                           Val(false), g_odd,
+                           Nd, Nx, Ny, Nz, domain.Eacc.data,
+                           domain.Macc.data;
+                           ndrange = N)
+                end
             else
                 kernel(domain.flags.data, domain.fi.data,
                        domain.ρ.data, domain.u.data, domain.F.data,
@@ -769,6 +869,7 @@ function step!(model::Model)
                        thermal, g_odd,
                        Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
             end
+            tmark = _phase_mark(model, 5, tmark)
 
             @static if SURFACE
                 model.cached_surface_1_kernel!(domain.flags.data, domain.ϕ.data, domain.mass.data,
@@ -782,11 +883,16 @@ function step!(model::Model)
                                                domain.massex.data, domain.ϕ.data, domain.fs.data, model.velocities,
                                                Nd, Nx, Ny, Nz; ndrange = N)
             end
+            tmark = _phase_mark(model, 6, tmark)
         end
 
         increment_time_step!(domain, 1)
     end
     KernelAbstractions.synchronize(model.backend)
+    flush_parcel_state!(model)
+    if !isempty(model.domains)
+        flush_powder_ledger!(model, model.domains[1])
+    end
 end
 
 @inline function last_collide_odd(model::Model, domain::Domain)
@@ -802,7 +908,7 @@ end
     return isodd(t - 1)
 end
 
-function moments!(model::Model)
+function launch_moments!(model::Model)
     for domain in model.domains
         N = get_N(domain)
         kernel = last_collide_odd(model, domain) ? model.cached_moments_odd_kernel! : model.cached_moments_even_kernel!
@@ -818,7 +924,13 @@ function moments!(model::Model)
             ndrange = N
         )
     end
+    return nothing
+end
+
+function moments!(model::Model)
+    launch_moments!(model)
     KernelAbstractions.synchronize(model.backend)
+    return nothing
 end
 
 function reset_force_field!(model::Model)

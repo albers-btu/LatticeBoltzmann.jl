@@ -25,8 +25,8 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, hT, Qin, ω_T::CType,
-    do_thermal::Bool, g_odd::Bool
-) where {odd, Q, CType}
+    ::Val{thermal}, g_odd::Bool
+) where {odd, Q, CType, thermal}
     flagsn = flags[n]
     bo = flagsn & TYPE_BO
     su = flagsn & TYPE_SU
@@ -75,7 +75,7 @@ end
         mass[n] = massn
 
         @static if TEMPERATURE
-            if do_thermal
+            if thermal
                 fillc = ϕ[n]
                 fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
                 reconstruct_g_adiabatic!(g_odd, gi, CType(T[n]), flags, x, y, z, n, N, Nx, Ny, Nz, CType)
@@ -243,7 +243,7 @@ end
     end
     mass[n] = massn
     @static if TEMPERATURE
-        if do_thermal
+        if thermal
             fillc = ϕn
             fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
             reconstruct_g_adiabatic!(g_odd, gi, CType(T[n]), flags, x, y, z, n, N, Nx, Ny, Nz, CType)
@@ -259,10 +259,10 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
-    do_thermal::Bool, g_odd::Bool
-) where {Q, CType}
+    ::Val{thermal}, g_odd::Bool
+) where {Q, CType, thermal}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, do_thermal, g_odd)
+    @inbounds surface_0_body!(Val(false), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, Val(thermal), g_odd)
 end
 
 @kernel function surface_0_odd_kernel!(
@@ -271,10 +271,10 @@ end
     fx::CType, fy::CType, fz::CType, σ::CType, σT::CType, Tσ::CType,
     Λ_v::CType, T_v::CType, p0v::CType, β_v::CType,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, hT, Qin, ω_T::CType,
-    do_thermal::Bool, g_odd::Bool
-) where {Q, CType}
+    ::Val{thermal}, g_odd::Bool
+) where {Q, CType, thermal}
     n = @index(Global)
-    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, do_thermal, g_odd)
+    @inbounds surface_0_body!(Val(true), fi, ρ, u, flags, mass, massex, ϕ, T, fs, gi, w, c, fx, fy, fz, σ, σT, Tσ, Λ_v, T_v, p0v, β_v, N, Nx, Ny, Nz, Int(n), Eacc, hT, Qin, ω_T, Val(thermal), g_odd)
 end
 
 # True when j will run surface_0 and add the donor's massex.

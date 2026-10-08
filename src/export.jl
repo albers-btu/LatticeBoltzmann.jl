@@ -164,11 +164,19 @@ function _vtk_offsets(mask::Int)
 end
 
 # Two host slots so a write of frame k can overlap the copy of frame k+1.
+# dev_flags and dev_phi are device snapshots the next step! is not allowed to overwrite.
 mutable struct _VtkSlot
     host::Vector{Float32}
+    flags::Vector{UInt8}
+    phi::Any
+    dev_flags::Any
+    dev_phi::Any
 end
 
-const _VTK_SLOTS = _VtkSlot[_VtkSlot(Float32[]), _VtkSlot(Float32[])]
+const _VTK_SLOTS = _VtkSlot[
+    _VtkSlot(Float32[], UInt8[], Float32[], nothing, nothing),
+    _VtkSlot(Float32[], UInt8[], Float32[], nothing, nothing),
+]
 const _VTK_FREE = Channel{Int}(2)
 const _VTK_JOBS = Channel{Any}(2)
 const _VTK_STARTED = Ref(false)
@@ -190,6 +198,15 @@ struct _VtkJob
     slot::Int
     event::Any
     ctx::Any
+    flags::Vector{UInt8}
+    phi::Any
+    geom::Any
+end
+
+function _vtk_emit(job::_VtkJob)
+    _vtk_write(job)
+    _vtk_write_geometry(job)
+    return nothing
 end
 
 function _vtk_writer_loop()
@@ -202,7 +219,7 @@ function _vtk_writer_loop()
                     CUDA.synchronize(job.event)
                 end
             end
-            _vtk_write(job)
+            _vtk_emit(job)
         catch err
             @error "VTK export failed" exception=(err, catch_backtrace())
         finally
@@ -388,15 +405,56 @@ function _vtk_write_poly(dir, stem, t, t_si, xs, ys, zs, groups, data)
     return nothing
 end
 
+# Host copy of the beam and the nozzles. The writer must not read the live model.
+function _export_geom(model)
+    L = model.laser
+    laser = nothing
+    if L !== nothing && L.enabled && L.P > 0
+        laser = (
+            x = L.x, y = L.y, z = L.z, dx = L.dx, dy = L.dy, dz = L.dz,
+            ox = copy(L.ox), oy = copy(L.oy), Pray = copy(L.Pray),
+            n_re = L.n_re, n_im = L.n_im, max_bounce = L.max_bounce, skin = L.skin,
+            w = L.w, P = L.P, transmit = powder_beam_transmit(model),
+        )
+    end
+    jets = NamedTuple[]
+    for J in _powder_jet_list(model.powder_jet)
+        push!(jets, (
+            x = J.x, y = J.y, z = J.z, dx = J.dx, dy = J.dy, dz = J.dz,
+            w = J.w, mdot = J.mdot, enabled = J.enabled,
+        ))
+    end
+    need = laser !== nothing || any(j -> j.enabled && j.w > 0, jets)
+    return (laser = laser, jets = jets, need = need)
+end
+
+function _trace_snap(laser, flags, phi, Nx, Ny, Nz)
+    laser === nothing && return Vector{NTuple{4,Float64}}[]
+    isempty(laser.Pray) && return Vector{NTuple{4,Float64}}[]
+    T = typeof(laser.x)
+    Q = zeros(T, 1)
+    rays = Vector{NTuple{4,Float64}}[]
+    scale = T(laser.transmit)
+    for rid in eachindex(laser.Pray)
+        path = NTuple{4,Float64}[]
+        rx, ry, rz = ray_origin(laser.x, laser.y, laser.z, laser.dx, laser.dy, laser.dz,
+                                laser.ox[rid], laser.oy[rid])
+        _walk_laser_ray!(
+            Q, flags, phi, rx, ry, rz,
+            laser.dx, laser.dy, laser.dz, laser.Pray[rid] * scale,
+            laser.n_re, laser.n_im, laser.max_bounce, laser.skin, zero(T),
+            Nx, Ny, Nz, path)
+        length(path) >= 2 && push!(rays, path)
+    end
+    return rays
+end
+
 # Ray polylines in rays.pvd, and the incident 1/e² cylinder in beam.pvd.
 # Point data "power" is watts left on a ray, and the incident power on the cylinder.
-function _write_laser_rays(model, domain, dir)
-    L = model.laser
-    (L === nothing || !L.enabled || L.P <= 0) && return nothing
-    rays = trace_laser_rays(model, domain)
-    U = model.units
-    dx = Float32(U.m)
-    isfinite(dx) && dx > 0 || (dx = 1.0f0)
+# flags and phi are a snapshot. This does not read the live grid.
+function _write_laser_rays(dir, t, t_si, dx, laser, flags, phi, Nx, Ny, Nz)
+    laser === nothing && return nothing
+    rays = _trace_snap(laser, flags, phi, Nx, Ny, Nz)
     xs = Float32[]
     ys = Float32[]
     zs = Float32[]
@@ -413,9 +471,6 @@ function _write_laser_rays(model, domain, dir)
         end
         length(ids) >= 2 && push!(lines, MeshCell(PolyData.Lines(), ids))
     end
-    t = Int(domain.t)
-    t_si = Float64(si_t(U, t))
-    isfinite(t_si) || (t_si = Float64(t))
     _vtk_write_poly(dir, "rays", t, t_si, xs, ys, zs,
                     (lines,), ("power" => power,))
     cxs = Float32[]
@@ -423,12 +478,10 @@ function _write_laser_rays(model, domain, dir)
     czs = Float32[]
     strips = MeshCell{PolyData.Strips, Vector{Int}}[]
     polys = MeshCell{PolyData.Polys, Vector{Int}}[]
-    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    flags = Array(domain.flags.data)
     if _vtk_add_cylinder!(cxs, cys, czs, strips, polys,
-                          L.x, L.y, L.z, L.dx, L.dy, L.dz, L.w,
+                          laser.x, laser.y, laser.z, laser.dx, laser.dy, laser.dz, laser.w,
                           flags, Nx, Ny, Nz, dx)
-        cpower = fill(Float32(L.P), length(cxs))
+        cpower = fill(Float32(laser.P), length(cxs))
         _vtk_write_poly(dir, "beam", t, t_si, cxs, cys, czs,
                         (strips, polys), ("power" => cpower,))
     end
@@ -438,20 +491,14 @@ end
 # One 1/e² cylinder per enabled jet, from the nozzle along its axis to the
 # first wall or metal. Open powder.pvd beside lbm.pvd. "mdot" on a tube is
 # that nozzle's share, kg/s. A jet that is off draws nothing.
-function _write_powder_jet(model, domain, dir)
-    jets = _powder_jet_list(model.powder_jet)
+function _write_powder_jet(dir, t, t_si, dx, jets, flags, Nx, Ny, Nz)
     isempty(jets) && return nothing
-    U = model.units
-    dx = Float32(U.m)
-    isfinite(dx) && dx > 0 || (dx = 1.0f0)
     xs = Float32[]
     ys = Float32[]
     zs = Float32[]
     mdot = Float32[]
     strips = MeshCell{PolyData.Strips, Vector{Int}}[]
     polys = MeshCell{PolyData.Polys, Vector{Int}}[]
-    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    flags = Array(domain.flags.data)
     wrote = false
     for J in jets
         (J.enabled && J.w > 0) || continue
@@ -465,11 +512,18 @@ function _write_powder_jet(model, domain, dir)
         wrote = true
     end
     wrote || return nothing
-    t = Int(domain.t)
-    t_si = Float64(si_t(U, t))
-    isfinite(t_si) || (t_si = Float64(t))
     _vtk_write_poly(dir, "powder", t, t_si, xs, ys, zs,
                     (strips, polys), ("mdot" => mdot,))
+    return nothing
+end
+
+function _vtk_write_geometry(job::_VtkJob)
+    job.geom === nothing && return nothing
+    g = job.geom
+    _write_laser_rays(job.dir, job.t, job.t_si, job.dx, g.laser,
+                      job.flags, job.phi, job.Nx, job.Ny, job.Nz)
+    _write_powder_jet(job.dir, job.t, job.t_si, job.dx, g.jets,
+                      job.flags, job.Nx, job.Ny, job.Nz)
     return nothing
 end
 
@@ -485,8 +539,26 @@ end
 function _vtk_grow!(slot::_VtkSlot, n::Int, pin::Bool)
     length(slot.host) == n && return slot.host
     slot.host = Vector{Float32}(undef, n)
-    pin && CUDA.pin(slot.host)
+    pin && n > 0 && CUDA.pin(slot.host)
     return slot.host
+end
+
+function _vtk_host_vec(current, ::Type{T}, n::Int, pin::Bool) where {T}
+    if current isa Vector{T} && length(current) == n
+        return current
+    end
+    v = Vector{T}(undef, n)
+    pin && n > 0 && CUDA.pin(v)
+    return v
+end
+
+function _vtk_snapbuf(current, proto)
+    n = length(proto)
+    if current !== nothing && length(current) == n && eltype(current) === eltype(proto) &&
+       (current isa Array) == (proto isa Array)
+        return current
+    end
+    return similar(proto, n)
 end
 
 """
@@ -506,19 +578,28 @@ end
 function export!(model::Model; dir::AbstractString="output", fields=nothing, sync::Bool=false)
     start_run_log!(dir)
     model.initialized || initialize!(model)
-    moments!(model)
     mkpath(dir)
 
     domain = model.domains[1]
-    _write_laser_rays(model, domain, dir)
-    _write_powder_jet(model, domain, dir)
+    geom = _export_geom(model)
     t = Int(domain.t)
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
     N = Nx * Ny * Nz
     U = model.units
     mask = _vtk_mask(fields)
     offs, ncomp = _vtk_offsets(mask)
-    ncomp == 0 && return nothing
+    dx = Float32(U.m)
+    isfinite(dx) && dx > 0 || (dx = 1.0f0)
+    t_si = Float64(si_t(U, t))
+    isfinite(t_si) || (t_si = Float64(t))
+    # Moments and the pack stay on the default stream, ahead of the next step!.
+    # The file write, the ray retrace, and the cylinders run on the writer thread.
+    launch_moments!(model)
+    if ncomp == 0
+        KernelAbstractions.synchronize(model.backend)
+        return _export_geometry_now(dir, t, t_si, dx, geom, domain, Nx, Ny, Nz)
+    end
+
     ρs = Float32(U.kg / U.m^3)
     us = Float32(U.m / U.s)
     ps = Float32(ρs * us * us / 3)
@@ -532,6 +613,17 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
     mpdata = @static SURFACE ? domain.mp.data : domain.ρ.data
     Sdata = @static SURFACE ? domain.msrc.data : domain.ρ.data
 
+    # The write runs on a second Julia thread. With one thread it would never
+    # start, and the next export would block forever waiting for a free slot.
+    use_async = !sync && model.backend isa CUDABackend && CUDA.functional() && Threads.nthreads() >= 2
+    if use_async
+        _ensure_vtk_writer()
+        prev = _VTK_COPY_EV[]
+        if prev !== nothing
+            CUDA.synchronize(prev)
+        end
+    end
+
     dev = _vtk_devbuf(domain.ρ.data, N * ncomp)
     pack_vtk_kernel!(model.backend, model.workgroup)(
         dev, domain.ρ.data, domain.u.data, domain.flags.data,
@@ -539,28 +631,38 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
         N, offs.rho, offs.p, offs.u, offs.T, offs.fs, offs.phi, offs.mp, offs.S, offs.Q, offs.flags,
         ρs, ps, us, Ts, Ss, Qs; ndrange=N)
 
-    dx = Float32(U.m)
-    isfinite(dx) && dx > 0 || (dx = 1.0f0)
-    t_si = Float64(si_t(U, t))
-    isfinite(t_si) || (t_si = Float64(t))
-    # The write runs on a second Julia thread. With one thread it would never
-    # start, and the next export would block forever waiting for a free slot.
-    use_async = !sync && model.backend isa CUDABackend && CUDA.functional() && Threads.nthreads() >= 2
-
     if !use_async
         host = Array{Float32}(undef, N * ncomp)
         copyto!(host, @view(dev[1:(N * ncomp)]))
-        _vtk_write(_VtkJob(dir, t, t_si, dx, Nx, Ny, Nz, host, offs, 0, nothing, nothing))
+        flags_h, phi_h, g = _export_host_geom(geom, domain, ϕdata)
+        _vtk_emit(_VtkJob(dir, t, t_si, dx, Nx, Ny, Nz, host, offs, 0, nothing, nothing,
+                          flags_h, phi_h, g))
         return nothing
     end
 
-    _ensure_vtk_writer()
-    prev = _VTK_COPY_EV[]
-    if prev !== nothing
-        CUDA.synchronize(prev)
-    end
     slot_i = take!(_VTK_FREE)
-    host = _vtk_grow!(_VTK_SLOTS[slot_i], N * ncomp, true)
+    slot = _VTK_SLOTS[slot_i]
+    host = _vtk_grow!(slot, N * ncomp, true)
+    flags_h = UInt8[]
+    phi_h = Float32[]
+    dev_flags = nothing
+    dev_phi = nothing
+    g = nothing
+    if geom.need
+        dev_flags = _vtk_snapbuf(slot.dev_flags, domain.flags.data)
+        slot.dev_flags = dev_flags
+        copyto!(dev_flags, domain.flags.data)
+        flags_h = _vtk_host_vec(slot.flags, UInt8, length(dev_flags), true)
+        slot.flags = flags_h
+        if geom.laser !== nothing
+            dev_phi = _vtk_snapbuf(slot.dev_phi, ϕdata)
+            slot.dev_phi = dev_phi
+            copyto!(dev_phi, ϕdata)
+            phi_h = _vtk_host_vec(slot.phi, eltype(ϕdata), length(dev_phi), true)
+            slot.phi = phi_h
+        end
+        g = geom
+    end
     if _VTK_STREAM[] === nothing
         _VTK_STREAM[] = CUDA.CuStream()
     end
@@ -568,12 +670,37 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
     CUDA.record(packed)
     cs = _VTK_STREAM[]
     CUDA.wait(packed, cs)
-    GC.@preserve host dev begin
+    GC.@preserve host dev flags_h phi_h dev_flags dev_phi begin
         unsafe_copyto!(pointer(host), pointer(dev), N * ncomp; stream=cs, async=true)
+        if dev_flags !== nothing
+            unsafe_copyto!(pointer(flags_h), pointer(dev_flags), length(flags_h); stream=cs, async=true)
+        end
+        if dev_phi !== nothing
+            unsafe_copyto!(pointer(phi_h), pointer(dev_phi), length(phi_h); stream=cs, async=true)
+        end
     end
     done = CUDA.CuEvent()
     CUDA.record(done, cs)
     _VTK_COPY_EV[] = done
-    put!(_VTK_JOBS, _VtkJob(dir, t, t_si, dx, Nx, Ny, Nz, host, offs, slot_i, done, CUDA.context()))
+    put!(_VTK_JOBS, _VtkJob(dir, t, t_si, dx, Nx, Ny, Nz, host, offs, slot_i, done, CUDA.context(),
+                            flags_h, phi_h, g))
+    return nothing
+end
+
+# Blocking geometry path used when the frame has no volume fields, and the
+# host half of a synchronous frame. One flags download feeds every mesh.
+function _export_host_geom(geom, domain, ϕdata)
+    geom.need || return UInt8[], Float32[], nothing
+    flags_h = Array(domain.flags.data)
+    phi_h = geom.laser === nothing ? Float32[] : Array(ϕdata)
+    return flags_h, phi_h, geom
+end
+
+function _export_geometry_now(dir, t, t_si, dx, geom, domain, Nx, Ny, Nz)
+    geom.need || return nothing
+    ϕdata = @static SURFACE ? domain.ϕ.data : domain.ρ.data
+    flags_h, phi_h, g = _export_host_geom(geom, domain, ϕdata)
+    _write_laser_rays(dir, t, t_si, dx, g.laser, flags_h, phi_h, Nx, Ny, Nz)
+    _write_powder_jet(dir, t, t_si, dx, g.jets, flags_h, Nx, Ny, Nz)
     return nothing
 end

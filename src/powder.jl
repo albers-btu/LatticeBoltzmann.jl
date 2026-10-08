@@ -31,13 +31,14 @@ mutable struct PowderJet{T<:AbstractFloat}
     d::T                 # Median / fallback sphere diameter in cells. 0 disables absorption when pd is 0.
     Tfeed::T             # Spawn temperature. 0 uses domain.T_p.
     absorbed::T          # Geometric shadow, watts removed from the wall beam
-    qhold::Vector{T}     # Enthalpy debit currently subtracted from Q
+    qhold::AbstractVector{T} # Enthalpy debit currently subtracted from Q
     pd::Vector{T}        # Per-parcel sphere diameter in cells. 0 uses d.
     d10::T               # Lognormal D10 in cells. 0, with d50 and d90, disables the distribution.
     d50::T               # Median diameter in cells.
     d90::T               # Lognormal D90 in cells.
     dmin::T              # Smallest accepted diameter in cells.
     dmax::T              # Largest accepted diameter in cells.
+    qhold_dirty::Bool    # A walk left a debit that a later step adds back into Q
 end
 
 # Standard-normal 10% and 90% quantiles. Same width rule as a lognormal
@@ -144,6 +145,7 @@ function PowderJet{T}(;
         zeros(T, nmax), fill(false, nmax), fill(T(Tfeed), nmax),
         T(d), T(Tfeed), zero(T), T[],
         zeros(T, nmax), d10, d50, d90, dmin, dmax,
+        false,
     )
 end
 
@@ -292,7 +294,38 @@ end
 # A cold parcel on solid metal stays in mp and sheds on τ_p.
 # τ_p == 0: mass on TYPE_I / TYPE_F, no temperature.
 # Returns (lattice mass captured, lattice enthalpy brought in).
+@inline function _lock_cell!(::Nothing, ::Int)
+    return nothing
+end
+@inline function _lock_cell!(locks, n::Int)
+    while true
+        r = Atomix.@atomicreplace locks[n] Int32(0) => Int32(1)
+        r.success && return nothing
+    end
+end
+@inline function _unlock_cell!(::Nothing, ::Int)
+    return nothing
+end
+@inline function _unlock_cell!(locks, n::Int)
+    @inbounds Atomix.@atomic locks[n] = Int32(0)
+    return nothing
+end
+
 @inline function _deposit_parcel!(
+    mp, mass, Q, qhold, Tfield, fs, ρ, flags, n::Int,
+    pmass::T, pT::T, τ_p, Ts::T, Λ::T, γs::T, γl::T,
+    locks=nothing,
+) where {T}
+    pmass <= zero(T) && return zero(T), zero(T)
+    _lock_cell!(locks, n)
+    dm, dE = _deposit_parcel_body!(
+        mp, mass, Q, qhold, Tfield, fs, ρ, flags, n,
+        pmass, pT, τ_p, Ts, Λ, γs, γl)
+    _unlock_cell!(locks, n)
+    return dm, dE
+end
+
+@inline function _deposit_parcel_body!(
     mp, mass, Q, qhold, Tfield, fs, ρ, flags, n::Int,
     pmass::T, pT::T, τ_p, Ts::T, Λ::T, γs::T, γl::T,
 ) where {T}
@@ -345,7 +378,7 @@ end
     mp, mass, Q, qhold, Tfield, fs, ρ, flags, ϕ, τ_p,
     o0x::T, o0y::T, o0z::T, dirx::T, diry::T, dirz::T,
     dist_max::T, pmass::T, pT::T, Ts::T, Λ::T, γs::T, γl::T,
-    Nx::Int, Ny::Int, Nz::Int,
+    Nx::Int, Ny::Int, Nz::Int, locks=nothing,
 ) where {T}
     @static if DIM == 3
         ox, oy, oz = o0x, o0y, o0z
@@ -383,14 +416,14 @@ end
                 if hit && t >= zero(T) && t <= remaining + T(0.5)
                     dm, dE = _deposit_parcel!(
                         mp, mass, Q, qhold, Tfield, fs, ρ, flags, n,
-                        pmass, pT, τ_p, Ts, Λ, γs, γl)
+                        pmass, pT, τ_p, Ts, Λ, γs, γl, locks)
                     return ox, oy, oz, false, dm, dE
                 end
             # Deposit into Fluid
             elseif su == TYPE_F
                 dm, dE = _deposit_parcel!(
                         mp, mass, Q, qhold, Tfield, fs, ρ, flags, n,
-                        pmass, pT, τ_p, Ts, Λ, γs, γl)
+                        pmass, pT, τ_p, Ts, Λ, γs, γl, locks)
                 return ox, oy, oz, false, dm, dE
             end
             tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
@@ -451,14 +484,14 @@ end
                 if hit && t >= zero(T) && t <= remaining + T(0.5)
                     dm, dE = _deposit_parcel!(
                         mp, mass, Q, qhold, Tfield, fs, ρ, flags, n,
-                        pmass, pT, τ_p, Ts, Λ, γs, γl)
+                        pmass, pT, τ_p, Ts, Λ, γs, γl, locks)
                     return ox, oy, oz, false, dm, dE
                 end
             # Deposit into Fluid
             elseif su == TYPE_F
                 dm, dE = _deposit_parcel!(
                         mp, mass, Q, qhold, Tfield, fs, ρ, flags, n,
-                        pmass, pT, τ_p, Ts, Λ, γs, γl)
+                        pmass, pT, τ_p, Ts, Λ, γs, γl, locks)
                 return ox, oy, oz, false, dm, dE
             end
             tMaxX = dirx > 0 ? (T(ix) + T(0.5) - ox) / dirx :
@@ -611,12 +644,125 @@ function heat_powder_beam!(model, domain)
     return nothing
 end
 
+# Device copies of the parcel vectors, reused across steps. Keyed by jet.
+const _PARCEL_DEV = Dict{UInt, NamedTuple}()
+
+function _as_backend(proto, host::AbstractVector)
+    if proto isa Array
+        return host
+    end
+    dst = similar(proto, eltype(host), length(host))
+    copyto!(dst, host)
+    return dst
+end
+
+function _ensure_qhold!(J, Q)
+    if length(J.qhold) != length(Q) || typeof(J.qhold) !== typeof(Q)
+        J.qhold = similar(Q)
+        fill!(J.qhold, zero(eltype(Q)))
+        J.qhold_dirty = false
+    end
+    return J.qhold
+end
+
+function _deposit_locks(model, Q)
+    n = length(Q)
+    L = model.deposit_lock
+    if L === nothing || length(L) != n || eltype(L) !== Int32
+        model.deposit_lock = similar(Q, Int32, n)
+        fill!(model.deposit_lock, Int32(0))
+    end
+    return model.deposit_lock
+end
+
+function _powder_ledger(model, Q)
+    led = model.powder_ledger
+    if led === nothing || length(led) != 2 || eltype(led) !== eltype(Q) || (led isa Array) != (Q isa Array)
+        model.powder_ledger = similar(Q, 2)
+        fill!(model.powder_ledger, zero(eltype(Q)))
+    end
+    return model.powder_ledger
+end
+
+function flush_powder_ledger!(model, domain)
+    led = model.powder_ledger
+    led === nothing && return nothing
+    h = Array(led)
+    @static if TEMPERATURE
+        domain.E_powder += h[1]
+        domain.M_powder += h[2]
+    end
+    fill!(led, zero(eltype(led)))
+    return nothing
+end
+
+# Copy parcel positions back. On CUDA this runs after step!'s synchronize,
+# so it does not sit between the parcel kernel and the hydro kernels.
+function flush_parcel_state!(model)
+    pending = model.parcel_pending
+    pending === nothing && return nothing
+    for item in pending
+        J = item.jet
+        copyto!(J.px, item.px)
+        copyto!(J.py, item.py)
+        copyto!(J.pz, item.pz)
+        au = Array(item.alive)
+        @inbounds for i in eachindex(J.alive)
+            J.alive[i] = au[i] != 0
+        end
+    end
+    model.parcel_pending = nothing
+    return nothing
+end
+
+function _upload_alive!(dst, src)
+    n = length(src)
+    host = Vector{UInt8}(undef, n)
+    @inbounds for i in 1:n
+        host[i] = src[i] ? 0x01 : 0x00
+    end
+    copyto!(dst, host)
+    return dst
+end
+
+function _dev_parcels(J, Q)
+    key = objectid(J)
+    n = J.nmax
+    buf = get(_PARCEL_DEV, key, nothing)
+    mismatch = buf === nothing || length(buf.px) != n || eltype(buf.px) !== eltype(J.px) ||
+               (buf.px isa Array) != (Q isa Array)
+    if mismatch
+        buf = (
+            px = similar(Q, eltype(J.px), n),
+            py = similar(Q, eltype(J.py), n),
+            pz = similar(Q, eltype(J.pz), n),
+            pvx = similar(Q, eltype(J.pvx), n),
+            pvy = similar(Q, eltype(J.pvy), n),
+            pvz = similar(Q, eltype(J.pvz), n),
+            pm = similar(Q, eltype(J.pm), n),
+            pT = similar(Q, eltype(J.pT), n),
+            alive = similar(Q, UInt8, n),
+        )
+        _PARCEL_DEV[key] = buf
+    end
+    copyto!(buf.px, J.px)
+    copyto!(buf.py, J.py)
+    copyto!(buf.pz, J.pz)
+    copyto!(buf.pvx, J.pvx)
+    copyto!(buf.pvy, J.pvy)
+    copyto!(buf.pvz, J.pvz)
+    copyto!(buf.pm, J.pm)
+    copyto!(buf.pT, J.pT)
+    _upload_alive!(buf.alive, J.alive)
+    return buf
+end
+
 # Move one step, then deposit. `refreshed` is true when deposit_laser! just
 # rewrote Q, so a debit from the previous step is already gone.
-# Every jet is restored into one Q, then walked. Landings share the first
-# jet's qhold so two nozzles that hit one cell mix once; the other qholds
-# stay zero and the next step adds the shared debit back.
+# Landings share the first jet's qhold. A zero-length or all-zero debit is
+# not a restore: powder that is off and has no live parcel does not copy Q.
 function advance_powder_jet!(model, domain, refreshed::Bool=false)
+    flush_parcel_state!(model)
     jets = _powder_jet_list(model.powder_jet)
     isempty(jets) && return nothing
     FT = eltype(first(jets).px)
@@ -624,82 +770,73 @@ function advance_powder_jet!(model, domain, refreshed::Bool=false)
     restore = false
     for J in jets
         moving |= (J.enabled || any(J.alive))
-        restore |= (!refreshed && !isempty(J.qhold))
+        restore |= (!refreshed && J.qhold_dirty)
     end
     if !moving && !restore
         return nothing
     end
-    Qh = Array(domain.Q.data)
-    for J in jets
-        if length(J.qhold) != length(Qh)
-            resize!(J.qhold, length(Qh))
-            fill!(J.qhold, zero(FT))
-        elseif !refreshed
-            @inbounds for i in eachindex(Qh)
-                Qh[i] += J.qhold[i]
-            end
-            fill!(J.qhold, zero(FT))
-        else
-            fill!(J.qhold, zero(FT))
-        end
+
+    Q = domain.Q.data
+    qshared = _ensure_qhold!(first(jets), Q)
+    if refreshed
+        fill!(qshared, zero(eltype(Q)))
+        first(jets).qhold_dirty = false
+    elseif restore
+        add_qhold_kernel!(model.backend, model.workgroup)(
+            Q, qshared; ndrange = length(Q))
+        first(jets).qhold_dirty = false
     end
     if !moving
-        copyto!(domain.Q.data, Qh)
         return nothing
     end
 
     U = model.units
-    τ_p = domain.τ_p
-    Ts = FT(domain.Ts)
-    Λ = FT(domain.Λ)
-    γs = FT(domain.γ_s)
-    γl = FT(domain.γ_l)
-    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    flags = Array(domain.flags.data)
-    ϕ = Array(domain.ϕ.data)
-    mp = Array(domain.mp.data)
-    mass = Array(domain.mass.data)
-    Th = Array(domain.T.data)
-    fsh = Array(domain.fs.data)
-    ρh = Array(domain.ρ.data)
-    qshared = first(jets).qhold
-    captured = zero(FT)
-    e_add = zero(FT)
-
     for J in jets
         if J.enabled && J.mdot > 0 && J.nparcels > 0
             m_step = FT(J.mdot * U.s / U.kg)
             Tspawn = J.Tfeed > zero(FT) ? J.Tfeed : FT(domain.T_p)
             _spawn_parcels!(J, m_step / FT(J.nparcels), Tspawn)
         end
-        invv = J.v > 0 ? one(FT) / J.v : one(FT)
-        @inbounds for i in 1:J.nmax
-            J.alive[i] || continue
-            dirx, diry, dirz = J.pvx[i]*invv, J.pvy[i]*invv, J.pvz[i]*invv
-            nd = sqrt(dirx*dirx + diry*diry + dirz*dirz)
-            if nd <= 0
-                J.alive[i] = false
-                continue
-            end
-            dirx /= nd; diry /= nd; dirz /= nd
-            ox, oy, oz, live, dm, dE = _walk_parcel!(
-                mp, mass, Qh, qshared, Th, fsh, ρh, flags, ϕ, τ_p,
-                J.px[i], J.py[i], J.pz[i], dirx, diry, dirz,
-                J.v, J.pm[i], J.pT[i], Ts, Λ, γs, γl, Nx, Ny, Nz,
-            )
-            J.px[i] = ox; J.py[i] = oy; J.pz[i] = oz
-            J.alive[i] = live
-            captured += dm
-            e_add += dE
-        end
     end
 
-    @static if TEMPERATURE
-        domain.E_powder += e_add
-        domain.M_powder += captured
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    locks = _deposit_locks(model, Q)
+    ledger = _powder_ledger(model, Q)
+    gpu = !(Q isa Array)
+    pending = NamedTuple[]
+    walked = false
+    τp = FT(domain.τ_p)
+    Ts = FT(domain.Ts)
+    Λ = FT(domain.Λ)
+    γs = FT(domain.γ_s)
+    γl = FT(domain.γ_l)
+    for J in jets
+        any(J.alive) || continue
+        walked = true
+        buf = _dev_parcels(J, Q)
+        walk_parcels_kernel!(model.backend, model.workgroup)(
+            domain.mp.data, domain.mass.data, Q, qshared,
+            domain.T.data, domain.fs.data, domain.ρ.data,
+            domain.flags.data, domain.ϕ.data, locks, ledger,
+            buf.px, buf.py, buf.pz, buf.pvx, buf.pvy, buf.pvz, buf.pm, buf.pT, buf.alive,
+            τp, Ts, Λ, γs, γl, FT(J.v), Nx, Ny, Nz;
+            ndrange = J.nmax)
+        if gpu
+            push!(pending, (jet = J, px = buf.px, py = buf.py, pz = buf.pz, alive = buf.alive))
+        else
+            copyto!(J.px, buf.px)
+            copyto!(J.py, buf.py)
+            copyto!(J.pz, buf.pz)
+            @inbounds for i in eachindex(J.alive)
+                J.alive[i] = buf.alive[i] != 0
+            end
+        end
     end
-    copyto!(domain.mp.data, mp)
-    copyto!(domain.mass.data, mass)
-    copyto!(domain.Q.data, Qh)
+    walked && (first(jets).qhold_dirty = true)
+    if gpu
+        isempty(pending) || (model.parcel_pending = pending)
+    else
+        flush_powder_ledger!(model, domain)
+    end
     return nothing
 end

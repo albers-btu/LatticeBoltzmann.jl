@@ -457,9 +457,9 @@ end # not SURFACE
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType,
-    do_thermal::Bool, g_odd::Bool,
+    ::Val{thermal}, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc, Macc
-) where {odd, Q, CType}
+) where {odd, Q, CType, thermal}
     flagsn = flags[n]
     if (flagsn & TYPE_BO) == TYPE_S || (flagsn & TYPE_SU) == TYPE_G
         return nothing
@@ -514,7 +514,7 @@ end # not SURFACE
         invρ = one(CType) / ρn
         ux *= invρ; uy *= invρ; uz *= invρ
         @static if TEMPERATURE
-          if do_thermal
+          if thermal
             ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
             debit = zero(CType)
             fillc = ϕ[n]
@@ -708,11 +708,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType, do_thermal::Bool, g_odd::Bool,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType, ::Val{thermal}, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
-) where {Q, CType}
+) where {Q, CType, thermal}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, T_stick, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
+    @inbounds stream_collide_surface_body!(Val(false), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, T_stick, Val(thermal), g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 @kernel function stream_collide_odd_kernel!(
@@ -722,11 +722,11 @@ end
     ω_T::CType, β::CType, T_avg::CType, σT::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
     α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
-    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType, do_thermal::Bool, g_odd::Bool,
+    C_rad::CType, T_rad::CType, τ_p::CType, T_p::CType, T_stick::CType, ::Val{thermal}, g_odd::Bool,
     N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc, Macc
-) where {Q, CType}
+) where {Q, CType, thermal}
     n = @index(Global)
-    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, T_stick, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
+    @inbounds stream_collide_surface_body!(Val(true), flags, fi, ρ, u, F, mass, gi, T, Qin, hT, ϕ, fs, msrc, mp, w, c, ω, fx, fy, fz, ω_T, β, T_avg, σT, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, τ_p, T_p, T_stick, Val(thermal), g_odd, N, Nx, Ny, Nz, Int(n), Eacc, Macc)
 end
 
 # Loose powder on TYPE_G: feed + decay. Never becomes metal (no hydro DDF).

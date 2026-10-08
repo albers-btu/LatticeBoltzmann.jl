@@ -1,4 +1,5 @@
 using KernelAbstractions
+using Atomix
 
 @inline function load_gi_pair(gi, n, src, i, g_odd::Bool, N, ::Type{CType}) where {CType}
     if g_odd
@@ -128,6 +129,17 @@ end
 end
 
 @static if MOVING_BOUNDARIES
+
+@kernel function any_solid_u_kernel!(u, flags, found, N::Int)
+    n = @index(Global)
+    @inbounds begin
+        if n <= N && (flags[n] & TYPE_BO) == TYPE_S
+            if u[n, 1] != zero(eltype(u)) || u[n, 2] != zero(eltype(u)) || u[n, 3] != zero(eltype(u))
+                Atomix.@atomic found[1] = Int32(1)
+            end
+        end
+    end
+end
 
 @kernel function update_moving_boundaries_kernel!(
     u, flags, c::NTuple{Q, SVector{3, Int}},

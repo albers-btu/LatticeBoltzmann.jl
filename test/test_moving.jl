@@ -45,3 +45,24 @@ using KernelAbstractions
     @test count(under) > 0
     @test sum(u[under, 1]) / count(under) > 0
 end
+
+@testset "static plate skips the moving-boundary kernel" begin
+    Nx, Ny, Nz = 8, 8, 8
+    model = Model(Nx, Ny, Nz, 0.02; backend=CPU(), workgroup=32)
+    host = fill(TYPE_F, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        if x == 1 || x == Nx || y == 1 || y == Ny || z == 1 || z == Nz
+            host[n] = TYPE_S
+        end
+    end
+    copyto!(model.domains[1].flags.data, host)
+    initialize!(model)
+    @test model.solids_move == false
+    LatticeBoltzmann.step!(model)
+    flags = Array(model.domains[1].flags.data)
+    for z in 2:(Nz - 1), y in 2:(Ny - 1), x in 2:(Nx - 1)
+        n = x + (y - 1) * Nx + (z - 1) * Nx * Ny
+        @test (flags[n] & TYPE_MS) == 0
+    end
+end

@@ -18,6 +18,9 @@ mutable struct Laser{T<:AbstractFloat}
     ox::Vector{T}        # Ray offsets in x
     oy::Vector{T}        # Ray offsets in y
     Pray::Vector{T}      # Incident power per ray in W
+    dev_ox::Any          # Device copy of ox, or nothing
+    dev_oy::Any          # Device copy of oy, or nothing
+    dev_pray::Any        # Device copy of Pray, or nothing
 end
 
 # Unpolarized Fresnel absorptance, vacuum to metal ñ = n + i k.
@@ -94,7 +97,7 @@ function Laser{T}(;
     ox, oy, Pray = _build_ray_bundle(T(P), T(w), Int(nrays))
     return Laser{T}(enabled, T(P), T(w), T(x), T(y), T(z), d[1], d[2], d[3],
                     T(n_re), T(n_im), Int(nrays), Int(max_bounce), Int(every),
-                    max(1, Int(skin)), ox, oy, Pray)
+                    max(1, Int(skin)), ox, oy, Pray, nothing, nothing, nothing)
 end
 
 # SI Wrapper of default Laser
@@ -123,7 +126,7 @@ end
 # Add heat into cell n
 @inline function _add_q!(Q, n::Int, dq)
     dq == 0 && return nothing
-    @inbounds Q[n] += dq
+    @inbounds Atomix.@atomic Q[n] += dq
     return nothing
 end
 
@@ -447,12 +450,9 @@ end
 
 # Bundle offsets (ox, oy) live in the plane normal to the beam.
 # A downward beam keeps ox along x and oy along y.
-function _ray_origin(L, rid)
-    T = eltype(L.x)
-    dx, dy, dz = L.dx, L.dy, L.dz
-    ox, oy = L.ox[rid], L.oy[rid]
+@inline function ray_origin(x::T, y::T, z::T, dx::T, dy::T, dz::T, ox::T, oy::T) where {T}
     if abs(dz) >= abs(dx) && abs(dz) >= abs(dy)
-        return L.x + ox, L.y + oy, L.z
+        return x + ox, y + oy, z
     end
     ax, ay, az = abs(dx), abs(dy), abs(dz)
     hx, hy, hz = ax <= ay && ax <= az ? (one(T), zero(T), zero(T)) :
@@ -469,9 +469,40 @@ function _ray_origin(L, rid)
     n2 = sqrt(e2x * e2x + e2y * e2y + e2z * e2z)
     n2 = max(n2, T(1e-12))
     e2x /= n2; e2y /= n2; e2z /= n2
-    return L.x + ox * e1x + oy * e2x,
-           L.y + ox * e1y + oy * e2y,
-           L.z + ox * e1z + oy * e2z
+    return x + ox * e1x + oy * e2x,
+           y + ox * e1y + oy * e2y,
+           z + ox * e1z + oy * e2z
+end
+
+function _ray_origin(L, rid)
+    T = eltype(L.x)
+    return ray_origin(L.x, L.y, L.z, L.dx, L.dy, L.dz, T(L.ox[rid]), T(L.oy[rid]))
+end
+
+# ox, oy, and Pray do not change when the beam moves. Upload them once.
+function _ray_device_ok(buf, host, proto)
+    return buf !== nothing && length(buf) == length(host) && eltype(buf) === eltype(host) &&
+           (buf isa Array) == (proto isa Array)
+end
+
+function _ensure_ray_device!(L, Q)
+    if _ray_device_ok(L.dev_ox, L.ox, Q) && _ray_device_ok(L.dev_oy, L.oy, Q) &&
+       _ray_device_ok(L.dev_pray, L.Pray, Q)
+        return nothing
+    end
+    if Q isa Array
+        L.dev_ox = L.ox
+        L.dev_oy = L.oy
+        L.dev_pray = L.Pray
+        return nothing
+    end
+    L.dev_ox = similar(Q, eltype(L.ox), length(L.ox))
+    L.dev_oy = similar(Q, eltype(L.oy), length(L.oy))
+    L.dev_pray = similar(Q, eltype(L.Pray), length(L.Pray))
+    copyto!(L.dev_ox, L.ox)
+    copyto!(L.dev_oy, L.oy)
+    copyto!(L.dev_pray, L.Pray)
+    return nothing
 end
 
 # True when this outer step recomputes the beam. Other steps keep the last Q.
@@ -487,12 +518,12 @@ laser_hold_steps(L) = max(1, Int(L.every))
 
 # Retrace the current bundle on the host. Each entry is one ray of (x,y,z,P_left)
 # in cell coordinates. Does not deposit heat. Pray is not rewritten.
-function trace_laser_rays(model, domain)
+function trace_laser_rays(model, domain; flags=nothing, phi=nothing)
     L = model.laser
     (L === nothing || !L.enabled || L.P <= 0 || isempty(L.Pray)) && return Vector{NTuple{4,Float64}}[]
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    flags = Array(domain.flags.data)
-    ϕ = Array(domain.ϕ.data)
+    flags = flags === nothing ? Array(domain.flags.data) : flags
+    ϕ = phi === nothing ? Array(domain.ϕ.data) : phi
     Q = zeros(Float32, 1)
     rays = Vector{NTuple{4,Float64}}[]
     T = eltype(L.x)
@@ -529,22 +560,17 @@ function deposit_laser!(model, domain)
         fill!(Q, zero(eltype(Q)))
         return true
     end
-    qfac = laser_qfac(model.units)
-    scale = powder_beam_transmit(model)
+    T = eltype(L.x)
+    qfac = T(laser_qfac(model.units))
+    scale = T(powder_beam_transmit(model))
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    flags = Array(domain.flags.data)
-    ϕ = Array(domain.ϕ.data)
-    Qh = zeros(eltype(Q), length(Q))
-    @inbounds for rid in 1:nray
-        rx, ry, rz = _ray_origin(L, rid)
-        _walk_laser_ray!(
-            Qh, flags, ϕ,
-            rx, ry, rz,
-            L.dx, L.dy, L.dz, L.Pray[rid] * scale,
-            L.n_re, L.n_im, L.max_bounce, L.skin, qfac,
-            Nx, Ny, Nz,
-        )
-    end
-    copyto!(Q, Qh)
+    _ensure_ray_device!(L, Q)
+    fill!(Q, zero(eltype(Q)))
+    deposit_rays_kernel!(model.backend, model.workgroup)(
+        Q, domain.flags.data, domain.ϕ.data,
+        L.dev_ox, L.dev_oy, L.dev_pray,
+        L.x, L.y, L.z, L.dx, L.dy, L.dz,
+        L.n_re, L.n_im, L.max_bounce, L.skin, qfac, scale,
+        Nx, Ny, Nz; ndrange = nray)
     return true
 end
