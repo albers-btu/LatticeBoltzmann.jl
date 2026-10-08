@@ -1,7 +1,8 @@
 # A few rays along +x, all inside the sphere's shadow, onto a metal sphere.
 # Open both in ParaView:
 #   output_laser_rays/lbm.pvd    sphere (color by phi or flags)
-#   output_laser_rays/rays.pvd   one polyline per ray, plus the 1/e² cylinder (color by power)
+#   output_laser_rays/rays.pvd   one polyline per ray (color by power)
+#   output_laser_rays/beam.pvd   the 1/e² cylinder (color by power)
 #
 # Rays that hit the sphere reflect. Rays that miss run on to the far wall.
 # SURFACE and TEMPERATURE must be on (src/extensions.jl).
@@ -49,5 +50,5 @@ initialize!(model)
 
 dir = "output_laser_rays"
 export!(model; dir=dir, fields=(:phi, :flags, :Q))
-println("Wrote $dir/lbm.pvd and $dir/rays.pvd ($(length(laser.Pray)) rays)")
-println("ParaView: open both, color the sphere by phi and the rays by power.")
+println("Wrote $dir/lbm.pvd, $dir/rays.pvd, and $dir/beam.pvd ($(length(laser.Pray)) rays)")
+println("ParaView: color the sphere by phi, the rays by power, and open beam.pvd for the 1/e² cylinder.")

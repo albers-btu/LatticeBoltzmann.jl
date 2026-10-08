@@ -1,4 +1,4 @@
-# IN625 directed-energy deposition: one weld line, front-fed powder, clean plate.
+# IN625 directed-energy deposition: one weld line, three powder jets, clean plate.
 # 726 W, 1.0 mm 1/e² spot, 500 mm/min, 9.5 g/min. No powder-bed file.
 # Material is input/material_IN625.jl. Plate, mesh, powder, and absorption
 # depth come from the shared DED inputs; power, spot, speed, and the scan
@@ -15,18 +15,22 @@
 # diameter. At 80 µm the 1.0 mm spot is ~12 cells across. The 9.5 g/min feed on
 # this narrower track builds a taller bead (~2.3 mm), added above the plate.
 # Particles are drawn from the d10/d50/d90 distribution in input/DED_powder.jl.
-# They absorb the beam in flight and shade the plate by their geometric cross
-# section. Molten particles, and any particle that lands in liquid, join the
-# surface. A cell filled past one ρ sends that surplus along the outward
-# interface normal. A new cell opens only in the leading direction, and only
-# when its share would be at least half a cell. Powder on solid metal hotter
-# than 0.9 Ts stays. Colder metal still sheds on powder_τ.
+# input/Tim_DED_powder.jl places three nozzles on a circle about the beam:
+# 30° from the vertical, 120° apart, starting at 90° so none lies on the
+# scan axis. Each jet is aimed at the laser focus. The 9.5 g/min feed is
+# split evenly across the three. They absorb the beam in flight and shade
+# the plate by their combined geometric cross section. Molten particles, and
+# any particle that lands in liquid, join the surface. A cell filled past
+# one ρ sends that surplus along the outward interface normal. A new cell
+# opens only in the leading direction, and only when its share would be at
+# least half a cell. Powder on solid metal hotter than 0.9 Ts stays. Colder
+# metal still sheds on powder_τ.
 # The log line prints the real counts.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
-# isosurface slider. Open lbm.pvd, rays.pvd, and powder.pvd.
-# rays.pvd has the ray lines and the 1/e² beam cylinder (colour by power).
-# powder.pvd is the 1/e² jet cylinder (colour by mdot).
+# isosurface slider. Open lbm.pvd, rays.pvd, beam.pvd, and powder.pvd.
+# rays.pvd has the ray lines (colour by power). beam.pvd is the 1/e² beam cylinder.
+# powder.pvd is one 1/e² cylinder per jet (colour by that jet's share of mdot).
 # Colour the volume by T (or phi / mp), then Contour.
 # Type the isosurface in the text box (e.g. T=1623, or phi=0.5 for the
 # free surface). Do not drag the slider if the range looks empty.
@@ -48,6 +52,7 @@ include(joinpath(input_dir, "material_IN625.jl"))
 include(joinpath(input_dir, "DED_build.jl"))
 include(joinpath(input_dir, "DED_laser.jl"))
 include(joinpath(input_dir, "DED_powder.jl"))
+include(joinpath(input_dir, "Tim_DED_powder.jl"))
 
 # Tim process. The shared DED files stay the 316L example (1000 W, 2 mm, 10 mm/s, 8 g/min).
 # 500 mm/min = 8.333 mm/s. Line energy P/v is about 87 J/mm.
@@ -57,26 +62,15 @@ si_v          = 500.0u"mm/minute"
 si_mdot       = 9.5u"g/minute"
 si_d_powder   = 1.2e-3u"m"              # 1.2 mm 1/e² powder focus; shared file stays 2.4 mm
 si_end_margin = 1.0e-3u"m"              # one spot diameter in from each x wall
-# Nozzle ahead of the spot, in the scan direction. The axis hits the plate
-# at the laser focus, so the stream is this far from vertical.
-si_powder_tilt = 45u"°"
 
 # Lattice caps. n_hydro brings the physical σ down so σ_lat stays ≤ σ_lat_cap.
 σ_lat_cap = 0.03f0
 q_max     = 0.04f0
 
-# Front-fed nozzle. The origin is ahead of the beam along the scan, at the
-# lid. The axis passes through the laser focus on the plate, so the landing
-# is the spot and the flight is tilted by si_powder_tilt. Against the far
-# wall the origin stops and the tilt steepens; the aim stays on the focus.
-function place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx, sgn)
-    drop = max(z_noz - z_aim, one(Float32))
-    lead = drop * Float32(tan(ustrip(u"rad", si_powder_tilt)))
-    x_noz = clamp(x_las + sgn * lead, 2.5f0, Float32(Nx) - 1.5f0)
-    set_powder_jet_position!(jet, x_noz, y_las, z_noz)
-    aim_powder_jet!(jet, x_las, y_las, z_aim)
-    return jet
-end
+# Powder ring: input/Tim_DED_powder.jl. si_mdot is the whole feed and is
+# split across powder_jet_azimuths. place_powder_jets! puts each nozzle on
+# the circle and aims it at the laser focus. Against a wall the origin
+# stops and the tilt steepens; the aim stays on the focus.
 
 function track_metrics(fsA, flags, TA, uA, Nx, Ny, Nz, Hfill, x_las, y_las, U)
     nliq = 0
@@ -238,7 +232,9 @@ model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
                     n_re = fresnel_n, n_im = fresnel_k,
                     nrays = nrays, max_bounce = 8, every = qevery, skin = nskin)
-model.powder_jet = PowderJet(units; mdot = si_mdot, w = 0.5 * si_d_powder,
+model.powder_jet = make_powder_jets(units; mdot = si_mdot,
+                             n = length(powder_jet_azimuths),
+                             w = 0.5 * si_d_powder,
                              v = si_v_powder, d = si_d_particle,
                              d10 = si_d10, d50 = si_d50, d90 = si_d90,
                              dmin = si_dmin, dmax = si_dmax,
@@ -287,7 +283,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             (:Mres_g, round(1e3 * si_mass(U, m.residual); digits=3)),
             (:umax, round(umax; digits=3)),
             (:zI, zI),
-            (:powder, model.powder_jet.enabled),
+            (:powder, powder_enabled(model.powder_jet)),
             (:MLUPS, round(mlups_ema; digits=1)),
         ])
         return nothing
@@ -295,9 +291,13 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
 
     function do_step!(layer, x_las, powder, sgn, force=false)
         set_laser_position!(model.laser, x_las, y_las)
-        jet = model.powder_jet
-        jet.enabled = powder && use_powder
-        jet.enabled && place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx, sgn)
+        jets = model.powder_jet
+        set_powder_enabled!(jets, powder && use_powder)
+        if powder_enabled(jets)
+            az = ntuple(i -> ustrip(u"rad", powder_jet_azimuths[i]), length(powder_jet_azimuths))
+            place_powder_jets!(jets, x_las, y_las, z_noz, z_aim, Nx, Ny, sgn,
+                               ustrip(u"rad", si_powder_tilt), az)
+        end
         t0 = time_ns()
         with_logger(NullLogger()) do
             run!(model, 1)

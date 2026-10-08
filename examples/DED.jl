@@ -5,16 +5,18 @@
 # Bottom is TYPE_S|TYPE_H Robin into a cold backing (not a Dirichlet sink).
 # σ stays the physical 1.6 N/m; n_hydro shortens the flow step so σ_lat stays small.
 #
-# The plate is bare TYPE_F. The jet sits on the beam axis and aims at the
-# track. Cold cells shed powder on powder_τ; a cell at or above Tm keeps it,
+# The plate is bare TYPE_F. The powder ring is input/DED_powder.jl: tilt 0
+# and one azimuth keeps a single coaxial jet aimed at the track. si_mdot is
+# the whole feed and is split across powder_jet_azimuths. Cold cells shed
+# powder on powder_τ; a cell at or above Tm keeps it,
 # which is the pool catchment. At si_dx = 80 µm the 2 mm spot is ~25 cells
 # across. Expect on the order of 160×80×80 cells, n_hydro around 10, and ~10⁴
 # scan steps plus a 0.2 s freeze. The log line prints the real counts.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
-# isosurface slider. Open lbm.pvd, rays.pvd, and powder.pvd.
-# rays.pvd has the ray lines and the 1/e² beam cylinder (colour by power).
-# powder.pvd is the 1/e² jet cylinder (colour by mdot).
+# isosurface slider. Open lbm.pvd, rays.pvd, beam.pvd, and powder.pvd.
+# rays.pvd has the ray lines (colour by power). beam.pvd is the 1/e² beam cylinder.
+# powder.pvd is one 1/e² cylinder per jet (colour by that jet's share of mdot).
 # Colour the volume by T (or phi / mp), then Contour.
 # Type the isosurface in the text box (e.g. T=1673, or phi=0.5 for the
 # free surface). Do not drag the slider if the range looks empty.
@@ -41,13 +43,8 @@ include(joinpath(input_dir, "DED_powder.jl"))
 σ_lat_cap = 0.03f0
 q_max     = 0.04f0
 
-# Coaxial nozzle: origin on the beam axis, aimed at the plate under the spot.
-function place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx)
-    x_noz = clamp(x_las, 2.5f0, Float32(Nx) - 1.5f0)
-    set_powder_jet_position!(jet, x_noz, y_las, z_noz)
-    aim_powder_jet!(jet, x_las, y_las, z_aim)
-    return jet
-end
+# Powder ring: input/DED_powder.jl. Tilt 0 with one azimuth is coaxial.
+# si_mdot is split across powder_jet_azimuths.
 
 function track_metrics(fsA, flags, TA, uA, Nx, Ny, Nz, Hfill, x_las, y_las, U)
     nliq = 0
@@ -208,7 +205,9 @@ d = model.domains[1]
 model.laser = Laser(units; P = si_P, w = 0.5 * si_d_spot,
                     x = x0, y = y_las, z = Float32(Nz) - 1.1f0,
                     nrays = nrays, max_bounce = 8, every = qevery, skin = nskin)
-model.powder_jet = PowderJet(units; mdot = si_mdot, w = 0.5 * si_d_powder,
+model.powder_jet = make_powder_jets(units; mdot = si_mdot,
+                             n = length(powder_jet_azimuths),
+                             w = 0.5 * si_d_powder,
                              v = si_v_powder, d = si_d_particle,
                              d10 = si_d10, d50 = si_d50, d90 = si_d90,
                              dmin = si_dmin, dmax = si_dmax,
@@ -257,7 +256,7 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
             (:Mres_g, round(1e3 * si_mass(U, m.residual); digits=3)),
             (:umax, round(umax; digits=3)),
             (:zI, zI),
-            (:powder, model.powder_jet.enabled),
+            (:powder, powder_enabled(model.powder_jet)),
             (:MLUPS, round(mlups_ema; digits=1)),
         ])
         return nothing
@@ -265,9 +264,13 @@ function run_layers!(model, d, x0, x1, y_las, v_lat, n_layers, bidirectional,
 
     function do_step!(layer, x_las, powder, sgn, force=false)
         set_laser_position!(model.laser, x_las, y_las)
-        jet = model.powder_jet
-        jet.enabled = powder && use_powder
-        jet.enabled && place_powder_jet!(jet, x_las, y_las, z_noz, z_aim, Nx)
+        jets = model.powder_jet
+        set_powder_enabled!(jets, powder && use_powder)
+        if powder_enabled(jets)
+            az = ntuple(i -> ustrip(u"rad", powder_jet_azimuths[i]), length(powder_jet_azimuths))
+            place_powder_jets!(jets, x_las, y_las, z_noz, z_aim, Nx, Ny, sgn,
+                               ustrip(u"rad", si_powder_tilt), az)
+        end
         t0 = time_ns()
         with_logger(NullLogger()) do
             run!(model, 1)

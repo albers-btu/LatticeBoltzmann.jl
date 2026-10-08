@@ -1,6 +1,8 @@
 # Powder parcels, sampled from a Gaussian and streamed along the jet.
 # Heated by the beam in flight. Cold solid landings go into mp; molten
 # parcels and landings in liquid join mass.
+# model.powder_jet is one PowderJet or a vector of them. One feed is split
+# evenly across the vector. The beam shadow cap is the sum of every jet.
 # Sphere diameters are one size (`d`) or a lognormal drawn from d10/d50/d90
 # and rejected outside [dmin, dmax]. The sampled diameter is the optical
 # diameter: parcel mass stays mdot/nparcels, and N = m_parcel/m_sphere(d).
@@ -184,6 +186,60 @@ function aim_powder_jet!(J::PowderJet{T}, tx, ty, tz) where {T}
     nrm <= 0 && return J
     J.dx = dx/nrm; J.dy = dy/nrm; J.dz = dz/nrm
     return J
+end
+
+# One jet, or the list stored on the model. An empty list does no work.
+_powder_jet_list(::Nothing) = ()
+_powder_jet_list(J::PowderJet) = (J,)
+_powder_jet_list(J::AbstractVector{<:PowderJet}) = J
+
+# Even share of one feed. The shares sum to mdot.
+powder_feed_share(mdot, n::Integer) = n == 1 ? mdot : mdot / n
+
+# n jets, each carrying an even share of mdot. Other keywords match PowderJet.
+function make_powder_jets(U::Units; mdot, n::Integer, kwargs...)
+    n >= 1 || throw(ArgumentError("powder feed needs at least one jet"))
+    share = powder_feed_share(mdot, n)
+    return [PowderJet(U; mdot = share, kwargs...) for _ in 1:n]
+end
+
+function set_powder_enabled!(J::PowderJet, on::Bool)
+    J.enabled = on
+    return J
+end
+function set_powder_enabled!(jets::AbstractVector{<:PowderJet}, on::Bool)
+    for J in jets
+        J.enabled = on
+    end
+    return jets
+end
+
+powder_enabled(::Nothing) = false
+powder_enabled(J::PowderJet) = J.enabled
+powder_enabled(jets::AbstractVector{<:PowderJet}) = any(J -> J.enabled, jets)
+
+# Place every jet on a circle about the focus and aim it there.
+# tilt_rad is the angle from the vertical. azimuth_rad is around the beam,
+# 0 along the scan (sgn), positive toward +y when sgn is +1.
+# The circle radius is (z_noz − z_aim) tan(tilt). A jet that would leave the
+# box stops at the wall; the aim stays on the focus.
+function place_powder_jets!(jets, x_las, y_las, z_noz, z_aim, Nx, Ny, sgn, tilt_rad, azimuth_rad)
+    n = length(jets)
+    n == length(azimuth_rad) || throw(ArgumentError("one azimuth per powder jet"))
+    n == 0 && return jets
+    T = eltype(first(jets).x)
+    drop = max(float(z_noz) - float(z_aim), 1.0)
+    R = drop * tan(float(tilt_rad))
+    sg = float(sgn)
+    for (J, ψ) in zip(jets, azimuth_rad)
+        c = cos(float(ψ))
+        s = sin(float(ψ))
+        x_noz = clamp(float(x_las) + sg * R * c, 2.5, float(Nx) - 1.5)
+        y_noz = clamp(float(y_las) + sg * R * s, 2.5, float(Ny) - 1.5)
+        set_powder_jet_position!(J, T(x_noz), T(y_noz), T(z_noz))
+        aim_powder_jet!(J, x_las, y_las, z_aim)
+    end
+    return jets
 end
 
 # Returns the first free parcel slot, or 0 if all slots are alive.
@@ -419,39 +475,10 @@ end
     end
 end
 
-# Fraction of the beam that still reaches the plate. The shadow is the
-# geometric cross section, so a particle already at T_v still blocks the wall.
-function powder_beam_transmit(model)
-    L = model.laser
-    L === nothing && return 1.0f0
-    FT = eltype(L.P)
-    J = model.powder_jet
-    (J === nothing || !(L.P > 0)) && return one(FT)
-    return clamp(one(FT) - J.absorbed / L.P, zero(FT), one(FT))
-end
-
-# Optically thin cloud. Parcel i, standing for N = m/m_one spheres of diameter
-# d, shadows S_i = I(r) N π d²/4 and absorbs A_i = η S_i. r is the perpendicular
-# distance to the beam axis, and only downstream of the source. η is
-# normal-incidence Fresnel. I(r) = 2P/(π w²) exp(-2 r²/w²), w the 1/e² radius.
-# The laser rewrites Q every `every` steps and that Q is applied on each of the
-# held steps, so this refresh deposits `every` steps of beam energy at once.
-# Σ S_i is capped at P and that shadow is what the wall loses. Temperature
-# stops at T_v; power the particle cannot take is reflected, not given to the wall.
-function heat_powder_beam!(model, domain)
-    J = model.powder_jet
-    J === nothing && return nothing
-    L = model.laser
-    FT = eltype(J.px)
-    if L === nothing || !L.enabled || !(L.P > 0) || !(L.w > 0)
-        J.absorbed = zero(FT)
-        return nothing
-    end
-    laser_deposits_now(L, Int(domain.t)) || return nothing
-    if !any(J.alive)
-        J.absorbed = zero(FT)
-        return nothing
-    end
+# Raw geometric shadow of each parcel, watts, before the cap at beam power.
+# nothing when this jet shades nothing. Downstream of the source only.
+function _powder_raw_shadow(J::PowderJet{FT}, L, U) where {FT}
+    any(J.alive) || return nothing
     has_d = J.d > 0
     if !has_d
         @inbounds for i in eachindex(J.alive)
@@ -461,25 +488,12 @@ function heat_powder_beam!(model, domain)
             end
         end
     end
-    if !has_d
-        J.absorbed = zero(FT)
-        return nothing
-    end
-    U = model.units
-    cp = FT(U.cp)
-    K = FT(U.K)
-    dt = FT(U.s)
-    if !(cp > 0 && K > 0 && dt > 0)
-        J.absorbed = zero(FT)
-        return nothing
-    end
-    gap = FT(laser_hold_steps(L))
+    has_d || return nothing
     P = FT(L.P)
     w = FT(L.w)
     wm = w * FT(U.m)
     I0 = FT(2) * P / (FT(π) * wm * wm)
     ρsi = FT(U.kg) / (FT(U.m)^3)
-    η = fresnel_absorptance(one(FT), FT(L.n_re), FT(L.n_im))
     w2 = w * w
     raw = zeros(FT, J.nmax)
     @inbounds for i in 1:J.nmax
@@ -502,52 +516,132 @@ function heat_powder_beam!(model, domain)
         # N = m/m_one spheres. Shadow per mass scales as area/volume ∝ 1/d.
         raw[i] = I * (m_kg / m_one) * area1
     end
-    sraw = sum(raw)
+    return raw
+end
+
+# Fraction of the beam that still reaches the plate. The shadow is the
+# geometric cross section of every jet, so a particle already at T_v still
+# blocks the wall.
+function powder_beam_transmit(model)
+    L = model.laser
+    L === nothing && return 1.0f0
+    FT = eltype(L.P)
+    !(L.P > 0) && return one(FT)
+    jets = _powder_jet_list(model.powder_jet)
+    isempty(jets) && return one(FT)
+    shadowed = zero(FT)
+    for J in jets
+        shadowed += FT(J.absorbed)
+    end
+    return clamp(one(FT) - shadowed / FT(L.P), zero(FT), one(FT))
+end
+
+# Optically thin cloud. Parcel i, standing for N = m/m_one spheres of diameter
+# d, shadows S_i = I(r) N π d²/4 and absorbs A_i = η S_i. r is the perpendicular
+# distance to the beam axis, and only downstream of the source. η is
+# normal-incidence Fresnel. I(r) = 2P/(π w²) exp(-2 r²/w²), w the 1/e² radius.
+# The laser rewrites Q every `every` steps and that Q is applied on each of the
+# held steps, so this refresh deposits `every` steps of beam energy at once.
+# The sum of S_i over every jet is capped at P, and that shadow is what the
+# wall loses. Each jet stores its own share on J.absorbed. Temperature stops
+# at T_v; power the particle cannot take is reflected, not given to the wall.
+function heat_powder_beam!(model, domain)
+    jets = _powder_jet_list(model.powder_jet)
+    isempty(jets) && return nothing
+    FT = eltype(first(jets).px)
+    L = model.laser
+    if L === nothing || !L.enabled || !(L.P > 0) || !(L.w > 0)
+        for J in jets
+            J.absorbed = zero(FT)
+        end
+        return nothing
+    end
+    laser_deposits_now(L, Int(domain.t)) || return nothing
+    U = model.units
+    cp = FT(U.cp)
+    K = FT(U.K)
+    dt = FT(U.s)
+    if !(cp > 0 && K > 0 && dt > 0)
+        for J in jets
+            J.absorbed = zero(FT)
+        end
+        return nothing
+    end
+    raws = Vector{Vector{FT}}()
+    live = PowderJet{FT}[]
+    for J in jets
+        raw = _powder_raw_shadow(J, L, U)
+        if raw === nothing
+            J.absorbed = zero(FT)
+        else
+            push!(raws, raw)
+            push!(live, J)
+        end
+    end
+    isempty(live) && return nothing
+    P = FT(L.P)
+    sraw = zero(FT)
+    for raw in raws
+        sraw += sum(raw)
+    end
     scale = sraw > P ? P / sraw : one(FT)
     Tv = FT(domain.T_v)
     cap = Tv > 0
-    shadowed = zero(FT)
-    @inbounds for i in 1:J.nmax
-        S = raw[i] * scale
-        S > 0 || continue
-        shadowed += S
-        Pi = η * S
-        m_kg = J.pm[i] * FT(U.kg)
-        dT = Pi * dt * gap / (m_kg * cp * K)
-        if cap
-            room = Tv - J.pT[i]
-            if dT > room
-                dT = room > 0 ? room : zero(FT)
+    η = fresnel_absorptance(one(FT), FT(L.n_re), FT(L.n_im))
+    gap = FT(laser_hold_steps(L))
+    for (J, raw) in zip(live, raws)
+        shadowed = zero(FT)
+        @inbounds for i in 1:J.nmax
+            S = raw[i] * scale
+            S > 0 || continue
+            shadowed += S
+            Pi = η * S
+            m_kg = J.pm[i] * FT(U.kg)
+            dT = Pi * dt * gap / (m_kg * cp * K)
+            if cap
+                room = Tv - J.pT[i]
+                if dT > room
+                    dT = room > 0 ? room : zero(FT)
+                end
             end
+            J.pT[i] += dT
         end
-        J.pT[i] += dT
+        J.absorbed = shadowed
     end
-    J.absorbed = shadowed
     return nothing
 end
 
 # Move one step, then deposit. `refreshed` is true when deposit_laser! just
 # rewrote Q, so a debit from the previous step is already gone.
+# Every jet is restored into one Q, then walked. Landings share the first
+# jet's qhold so two nozzles that hit one cell mix once; the other qholds
+# stay zero and the next step adds the shared debit back.
 function advance_powder_jet!(model, domain, refreshed::Bool=false)
-    J = model.powder_jet
-    J === nothing && return nothing
-    FT = eltype(J.px)
-    moving = J.enabled || any(J.alive)
-    restore = !refreshed && !isempty(J.qhold)
+    jets = _powder_jet_list(model.powder_jet)
+    isempty(jets) && return nothing
+    FT = eltype(first(jets).px)
+    moving = false
+    restore = false
+    for J in jets
+        moving |= (J.enabled || any(J.alive))
+        restore |= (!refreshed && !isempty(J.qhold))
+    end
     if !moving && !restore
         return nothing
     end
     Qh = Array(domain.Q.data)
-    if length(J.qhold) != length(Qh)
-        resize!(J.qhold, length(Qh))
-        fill!(J.qhold, zero(FT))
-    elseif !refreshed
-        @inbounds for i in eachindex(Qh)
-            Qh[i] += J.qhold[i]
+    for J in jets
+        if length(J.qhold) != length(Qh)
+            resize!(J.qhold, length(Qh))
+            fill!(J.qhold, zero(FT))
+        elseif !refreshed
+            @inbounds for i in eachindex(Qh)
+                Qh[i] += J.qhold[i]
+            end
+            fill!(J.qhold, zero(FT))
+        else
+            fill!(J.qhold, zero(FT))
         end
-        fill!(J.qhold, zero(FT))
-    else
-        fill!(J.qhold, zero(FT))
     end
     if !moving
         copyto!(domain.Q.data, Qh)
@@ -568,33 +662,36 @@ function advance_powder_jet!(model, domain, refreshed::Bool=false)
     Th = Array(domain.T.data)
     fsh = Array(domain.fs.data)
     ρh = Array(domain.ρ.data)
-    if J.enabled && J.mdot > 0 && J.nparcels > 0
-        m_step = FT(J.mdot * U.s / U.kg)
-        Tspawn = J.Tfeed > zero(FT) ? J.Tfeed : FT(domain.T_p)
-        _spawn_parcels!(J, m_step / FT(J.nparcels), Tspawn)
-    end
-    invv = J.v > 0 ? one(FT) / J.v : one(FT)
+    qshared = first(jets).qhold
     captured = zero(FT)
     e_add = zero(FT)
 
-    @inbounds for i in 1:J.nmax
-        J.alive[i] || continue
-        dirx, diry, dirz = J.pvx[i]*invv, J.pvy[i]*invv, J.pvz[i]*invv
-        nd = sqrt(dirx*dirx + diry*diry + dirz*dirz)
-        if nd <= 0
-            J.alive[i] = false
-            continue
+    for J in jets
+        if J.enabled && J.mdot > 0 && J.nparcels > 0
+            m_step = FT(J.mdot * U.s / U.kg)
+            Tspawn = J.Tfeed > zero(FT) ? J.Tfeed : FT(domain.T_p)
+            _spawn_parcels!(J, m_step / FT(J.nparcels), Tspawn)
         end
-        dirx /= nd; diry /= nd; dirz /= nd
-        ox, oy, oz, live, dm, dE = _walk_parcel!(
-            mp, mass, Qh, J.qhold, Th, fsh, ρh, flags, ϕ, τ_p,
-            J.px[i], J.py[i], J.pz[i], dirx, diry, dirz,
-            J.v, J.pm[i], J.pT[i], Ts, Λ, γs, γl, Nx, Ny, Nz,
-        )
-        J.px[i] = ox; J.py[i] = oy; J.pz[i] = oz
-        J.alive[i] = live
-        captured += dm
-        e_add += dE
+        invv = J.v > 0 ? one(FT) / J.v : one(FT)
+        @inbounds for i in 1:J.nmax
+            J.alive[i] || continue
+            dirx, diry, dirz = J.pvx[i]*invv, J.pvy[i]*invv, J.pvz[i]*invv
+            nd = sqrt(dirx*dirx + diry*diry + dirz*dirz)
+            if nd <= 0
+                J.alive[i] = false
+                continue
+            end
+            dirx /= nd; diry /= nd; dirz /= nd
+            ox, oy, oz, live, dm, dE = _walk_parcel!(
+                mp, mass, Qh, qshared, Th, fsh, ρh, flags, ϕ, τ_p,
+                J.px[i], J.py[i], J.pz[i], dirx, diry, dirz,
+                J.v, J.pm[i], J.pT[i], Ts, Λ, γs, γl, Nx, Ny, Nz,
+            )
+            J.px[i] = ox; J.py[i] = oy; J.pz[i] = oz
+            J.alive[i] = live
+            captured += dm
+            e_add += dE
+        end
     end
 
     @static if TEMPERATURE

@@ -388,7 +388,7 @@ function _vtk_write_poly(dir, stem, t, t_si, xs, ys, zs, groups, data)
     return nothing
 end
 
-# Ray polylines plus the incident 1/e² cylinder. Open rays.pvd with lbm.pvd.
+# Ray polylines in rays.pvd, and the incident 1/e² cylinder in beam.pvd.
 # Point data "power" is watts left on a ray, and the incident power on the cylinder.
 function _write_laser_rays(model, domain, dir)
     L = model.laser
@@ -402,8 +402,6 @@ function _write_laser_rays(model, domain, dir)
     zs = Float32[]
     power = Float32[]
     lines = MeshCell{PolyData.Lines, Vector{Int}}[]
-    strips = MeshCell{PolyData.Strips, Vector{Int}}[]
-    polys = MeshCell{PolyData.Polys, Vector{Int}}[]
     for ray in rays
         ids = Int[]
         for (x, y, z, p) in ray
@@ -415,46 +413,61 @@ function _write_laser_rays(model, domain, dir)
         end
         length(ids) >= 2 && push!(lines, MeshCell(PolyData.Lines(), ids))
     end
-    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
-    flags = Array(domain.flags.data)
-    if _vtk_add_cylinder!(xs, ys, zs, strips, polys,
-                          L.x, L.y, L.z, L.dx, L.dy, L.dz, L.w,
-                          flags, Nx, Ny, Nz, dx)
-        P = Float32(L.P)
-        while length(power) < length(xs)
-            push!(power, P)
-        end
-    end
     t = Int(domain.t)
     t_si = Float64(si_t(U, t))
     isfinite(t_si) || (t_si = Float64(t))
     _vtk_write_poly(dir, "rays", t, t_si, xs, ys, zs,
-                    (lines, strips, polys), ("power" => power,))
+                    (lines,), ("power" => power,))
+    cxs = Float32[]
+    cys = Float32[]
+    czs = Float32[]
+    strips = MeshCell{PolyData.Strips, Vector{Int}}[]
+    polys = MeshCell{PolyData.Polys, Vector{Int}}[]
+    Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
+    flags = Array(domain.flags.data)
+    if _vtk_add_cylinder!(cxs, cys, czs, strips, polys,
+                          L.x, L.y, L.z, L.dx, L.dy, L.dz, L.w,
+                          flags, Nx, Ny, Nz, dx)
+        cpower = fill(Float32(L.P), length(cxs))
+        _vtk_write_poly(dir, "beam", t, t_si, cxs, cys, czs,
+                        (strips, polys), ("power" => cpower,))
+    end
     return nothing
 end
 
-# 1/e² cylinder of the powder jet, from the nozzle along its axis to the
-# first wall or metal. Open powder.pvd beside lbm.pvd. "mdot" is kg/s.
+# One 1/e² cylinder per enabled jet, from the nozzle along its axis to the
+# first wall or metal. Open powder.pvd beside lbm.pvd. "mdot" on a tube is
+# that nozzle's share, kg/s. A jet that is off draws nothing.
 function _write_powder_jet(model, domain, dir)
-    J = model.powder_jet
-    (J === nothing || !J.enabled || J.w <= 0) && return nothing
+    jets = _powder_jet_list(model.powder_jet)
+    isempty(jets) && return nothing
     U = model.units
     dx = Float32(U.m)
     isfinite(dx) && dx > 0 || (dx = 1.0f0)
     xs = Float32[]
     ys = Float32[]
     zs = Float32[]
+    mdot = Float32[]
     strips = MeshCell{PolyData.Strips, Vector{Int}}[]
     polys = MeshCell{PolyData.Polys, Vector{Int}}[]
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
     flags = Array(domain.flags.data)
-    _vtk_add_cylinder!(xs, ys, zs, strips, polys,
-                       J.x, J.y, J.z, J.dx, J.dy, J.dz, J.w,
-                       flags, Nx, Ny, Nz, dx) || return nothing
+    wrote = false
+    for J in jets
+        (J.enabled && J.w > 0) || continue
+        n0 = length(xs)
+        _vtk_add_cylinder!(xs, ys, zs, strips, polys,
+                           J.x, J.y, J.z, J.dx, J.dy, J.dz, J.w,
+                           flags, Nx, Ny, Nz, dx) || continue
+        share = Float32(J.mdot)
+        resize!(mdot, length(xs))
+        mdot[(n0 + 1):end] .= share
+        wrote = true
+    end
+    wrote || return nothing
     t = Int(domain.t)
     t_si = Float64(si_t(U, t))
     isfinite(t_si) || (t_si = Float64(t))
-    mdot = fill(Float32(J.mdot), length(xs))
     _vtk_write_poly(dir, "powder", t, t_si, xs, ys, zs,
                     (strips, polys), ("mdot" => mdot,))
     return nothing

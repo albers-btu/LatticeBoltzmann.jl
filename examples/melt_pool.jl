@@ -5,8 +5,8 @@
 # σ is capped below the physical 1.6 N/m — see the note after Units.
 #
 # ParaView 6 + Qt6: Contour on a constant array (rho, Q, S) crashes the
-# isosurface slider. Open lbm.pvd and rays.pvd.
-# rays.pvd has the ray lines and the 1/e² beam cylinder (colour by power).
+# isosurface slider. Open lbm.pvd, rays.pvd, and beam.pvd.
+# rays.pvd has the ray lines (colour by power). beam.pvd is the 1/e² beam cylinder.
 # Colour the volume by T (or phi), then Contour.
 # Type the isosurface in the text box (e.g. T=1673, or phi=0.5 for the
 # free surface). Do not drag the slider if the range looks empty.

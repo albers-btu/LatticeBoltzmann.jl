@@ -54,6 +54,7 @@ export Laser, set_laser_position!, deposit_laser!, fresnel_absorptance, trace_la
 
 include("powder.jl")
 export PowderJet, set_powder_jet_position!, aim_powder_jet!, advance_powder_jet!
+export make_powder_jets, place_powder_jets!, set_powder_enabled!, powder_enabled
 
 include("powderbed.jl")
 export PowderBed, read_powder_bed, substrate_top, paint_powder_bed!

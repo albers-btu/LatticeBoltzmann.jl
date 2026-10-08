@@ -1,6 +1,7 @@
 using Test
 using LatticeBoltzmann
 using KernelAbstractions
+using Unitful
 
 @inline function lbm_n(x, y, z, Nx, Ny)
     return x + (y - 1) * Nx + (z - 1) * Nx * Ny
@@ -2571,11 +2572,17 @@ end
     mktempdir() do d
         export!(model; dir=d)
         @test isfile(joinpath(d, "rays.pvd"))
+        @test isfile(joinpath(d, "beam.pvd"))
         @test isfile(joinpath(d, "powder.pvd"))
         ray = read(joinpath(d, "rays_00000000.vtp"), String)
         @test occursin("Lines", ray)
-        @test occursin("Strips", ray)
-        @test occursin("Polys", ray)
+        @test !occursin("Strips", ray)
+        @test !occursin("Polys", ray)
+        beam = read(joinpath(d, "beam_00000000.vtp"), String)
+        @test occursin("Strips", beam)
+        @test occursin("Polys", beam)
+        @test occursin("NumberOfPoints=\"48\"", beam)
+        @test !occursin("Lines", beam)
         pow = read(joinpath(d, "powder_00000000.vtp"), String)
         @test occursin("Strips", pow)
         @test occursin("Polys", pow)
@@ -2593,6 +2600,165 @@ end
     @test maximum(zring) < Float32(Hfill + 2) * dx
     r = hypot(xs[1] - (4 - 1) * dx, ys[1] - (4 - 1) * dx)
     @test isapprox(r, 1.5f0 * dx; rtol=1.0f-5)
+end
+
+@testset "powder feed splits across a ring of jets" begin
+    pkg = dirname(dirname(pathof(LatticeBoltzmann)))
+    include(joinpath(pkg, "input", "DED_powder.jl"))
+    @test si_powder_tilt == 0u"°"
+    @test powder_jet_azimuths == (0u"°",)
+    include(joinpath(pkg, "input", "Tim_DED_powder.jl"))
+    @test si_powder_tilt == 30u"°"
+    @test powder_jet_azimuths == (90u"°", 210u"°", 330u"°")
+    degs = sort([mod(ustrip(u"°", a), 360.0) for a in powder_jet_azimuths])
+    gaps = (degs[2] - degs[1], degs[3] - degs[2], degs[1] + 360 - degs[3])
+    @test all(isapprox.(gaps, 120.0; atol=1e-6))
+    for a in powder_jet_azimuths
+        deg = mod(ustrip(u"°", a), 360.0)
+        @test min(abs(deg), abs(deg - 180), abs(deg - 360)) > 1
+    end
+
+    Nx, Ny, Nz = 32, 32, 24
+    Hfill = 8
+    model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0.2f0,
+                  Ts=1.0f0, Tl=1.0f0, T_avg=1.0f0, T_v=80.0f0,
+                  τ_p=1.0f5, T_p=0.3f0, n_hydro=1, backend=CPU(), workgroup=64)
+    flags = fill(TYPE_G, Nx * Ny * Nz)
+    Th = fill(0.3f0, Nx * Ny * Nz)
+    fsh = ones(Float32, Nx * Ny * Nz)
+    for z in 1:Nz, y in 1:Ny, x in 1:Nx
+        n = lbm_n(x, y, z, Nx, Ny)
+        if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+            flags[n] = TYPE_S
+        elseif z <= Hfill
+            flags[n] = TYPE_F
+        end
+    end
+    copyto!(model.domains[1].flags.data, flags)
+    copyto!(model.domains[1].T.data, Th)
+    copyto!(model.domains[1].fs.data, fsh)
+    initialize!(model)
+    U = model.units
+    mdot = 9.5u"g/minute"
+    want = Float32(ustrip(u"kg/s", mdot))
+    jets = make_powder_jets(U; mdot=mdot, n=length(powder_jet_azimuths),
+                             w=2.0, v=8.0, d=0.4, nparcels=4, nmax=32, enabled=false)
+    @test length(jets) == 3
+    @test all(J -> J.nparcels == 4, jets)
+    @test all(J -> isapprox(J.mdot, want / 3; rtol=1.0f-5), jets)
+    @test isapprox(sum(J.mdot for J in jets), want; rtol=1.0f-5)
+    one = make_powder_jets(U; mdot=mdot, n=1, w=2.0, v=8.0, d=0.4, nparcels=4)
+    @test isapprox(one[1].mdot, want; rtol=1.0f-5)
+    @test_throws ArgumentError make_powder_jets(U; mdot=mdot, n=0, w=1.0, v=1.0)
+
+    x_las, y_las = 16.0, 16.0
+    z_noz, z_aim = Float32(Nz) - 1.5f0, Float32(Hfill)
+    tilt = ustrip(u"rad", si_powder_tilt)
+    az = ntuple(i -> ustrip(u"rad", powder_jet_azimuths[i]), length(powder_jet_azimuths))
+    place_powder_jets!(jets, x_las, y_las, z_noz, z_aim, Nx, Ny, 1, tilt, az)
+    drop = float(z_noz) - float(z_aim)
+    R = drop * tan(tilt)
+    angs = Float64[]
+    for (J, ψ) in zip(jets, az)
+        @test isapprox(J.x, x_las + R * cos(ψ); atol=1e-3)
+        @test isapprox(J.y, y_las + R * sin(ψ); atol=1e-3)
+        @test isapprox(J.z, z_noz; atol=1e-4)
+        @test 2.5 <= J.x <= Nx - 1.5
+        @test 2.5 <= J.y <= Ny - 1.5
+        @test abs(J.y - y_las) > 0.4 * R
+        tox = x_las - J.x
+        toy = y_las - J.y
+        toz = z_aim - J.z
+        nrm = hypot(tox, toy, toz)
+        @test isapprox(J.dx * tox + J.dy * toy + J.dz * toz, nrm; atol=1e-4)
+        @test isapprox(atan(hypot(J.x - x_las, J.y - y_las), J.z - z_aim), tilt; atol=1e-4)
+        push!(angs, atan(J.y - y_las, J.x - x_las))
+    end
+    for i in 1:3
+        dψ = abs(mod(angs[i] - angs[mod1(i + 1, 3)] + π, 2π) - π)
+        @test isapprox(dψ, 2π / 3; atol=1e-4)
+    end
+
+    d = model.domains[1]
+    model.laser = Laser(U; P=10.0, w=2.0, x=x_las, y=y_las, z=z_noz,
+                         nrays=3, max_bounce=1, every=1, skin=1)
+    for J in jets
+        J.alive[1] = true
+        J.px[1] = x_las
+        J.py[1] = y_las
+        J.pz[1] = (z_noz + z_aim) / 2
+        J.pm[1] = 1.0f0
+        J.pT[1] = 0.3f0
+        J.pd[1] = 0.2f0
+    end
+    probe = LatticeBoltzmann._powder_raw_shadow(jets[1], model.laser, U)
+    @test probe !== nothing && sum(probe) > 0
+    share_m = Float32(jets[1].pm[1] * (0.1f0 * model.laser.P) / sum(probe))
+    for J in jets
+        J.pm[1] = share_m
+    end
+    model.powder_jet = jets[1]
+    LatticeBoltzmann.heat_powder_beam!(model, d)
+    alone = jets[1].absorbed
+    @test isapprox(alone, 0.1f0 * model.laser.P; rtol=1.0f-3)
+    model.powder_jet = jets
+    LatticeBoltzmann.heat_powder_beam!(model, d)
+    @test isapprox(jets[1].absorbed, alone; rtol=1.0f-4)
+    @test isapprox(jets[2].absorbed, alone; rtol=1.0f-4)
+    @test isapprox(jets[3].absorbed, alone; rtol=1.0f-4)
+    @test jets[1].absorbed + jets[2].absorbed + jets[3].absorbed < model.laser.P
+    for J in jets
+        J.pm[1] = share_m * 1.0f4
+        J.pT[1] = 0.3f0
+    end
+    LatticeBoltzmann.heat_powder_beam!(model, d)
+    shadowed = sum(J.absorbed for J in jets)
+    @test isapprox(shadowed, Float32(model.laser.P); rtol=1.0f-4)
+    @test all(J -> isapprox(J.absorbed, Float32(model.laser.P) / 3; rtol=1.0f-3), jets)
+    @test isapprox(LatticeBoltzmann.powder_beam_transmit(model), 0.0f0; atol=1.0f-4)
+    model.powder_jet = jets[1]
+    LatticeBoltzmann.heat_powder_beam!(model, d)
+    @test isapprox(jets[1].absorbed, Float32(model.laser.P); rtol=1.0f-4)
+
+    model.powder_jet = jets
+    for J in jets
+        fill!(J.alive, false)
+        J.pm[1] = 0
+    end
+    set_powder_enabled!(jets, false)
+    mktempdir() do dir
+        export!(model; dir)
+        @test !isfile(joinpath(dir, "powder.pvd"))
+    end
+    set_powder_enabled!(jets, true)
+    mktempdir() do dir
+        export!(model; dir)
+        pow = read(joinpath(dir, "powder_00000000.vtp"), String)
+        @test occursin("Strips", pow)
+        @test occursin("Polys", pow)
+        @test occursin("mdot", pow)
+        @test occursin("NumberOfPoints=\"144\"", pow)
+    end
+    model.powder_jet = one[1]
+    one[1].enabled = true
+    set_powder_jet_position!(one[1], x_las, y_las, z_noz)
+    aim_powder_jet!(one[1], x_las, y_las, z_aim)
+    mktempdir() do dir
+        export!(model; dir)
+        pow = read(joinpath(dir, "powder_00000000.vtp"), String)
+        @test occursin("NumberOfPoints=\"48\"", pow)
+    end
+
+    model.powder_jet = jets
+    set_powder_enabled!(jets, true)
+    place_powder_jets!(jets, x_las, y_las, z_noz, z_aim, Nx, Ny, 1, tilt, az)
+    for J in jets
+        fill!(J.alive, false)
+    end
+    run!(model, 6)
+    @test mass_budget(model).powder > 0
+    @test all(isfinite, Array(d.T.data))
+    @test all(isfinite, Array(d.u.data))
 end
 
 # Heat collides once per outer step. An even hydro count used to reload one gi slot.
