@@ -14,7 +14,8 @@ using KernelAbstractions
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
     do_thermal::Bool, g_odd::Bool,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc,
+    phi = nothing, rho_a = nothing, rho_b = nothing, nu_a = nothing, nu_b = nothing,
 ) where {odd, Q, CType}
     flagsn = flags[n]
     if (flagsn & TYPE_BO) == TYPE_S
@@ -65,13 +66,29 @@ using KernelAbstractions
         @static if FORCE_FIELD
             fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
         end
+        @static if ALLEN_CAHN
+            φn = CType(phi[n])
+            ρφ = rho_a + φn * (rho_b - rho_a)
+            νφ = nu_a + φn * (nu_b - nu_a)
+        end
         if ρn <= zero(CType)
             ρn = one(CType)
             ux = zero(CType); uy = zero(CType); uz = zero(CType)
             fxn = zero(CType); fyn = zero(CType); fzn = zero(CType)
         else
-            invρ = one(CType) / ρn
-            ux *= invρ; uy *= invρ; uz *= invρ
+            @static if ALLEN_CAHN
+                # Population sum is p_h. Momentum is ρ(φ) u; do not divide by p_h.
+                if ρφ <= zero(CType)
+                    ux = zero(CType); uy = zero(CType); uz = zero(CType)
+                    invρ = zero(CType)
+                else
+                    invρ = one(CType) / ρφ
+                    ux *= invρ; uy *= invρ; uz *= invρ
+                end
+            else
+                invρ = one(CType) / ρn
+                ux *= invρ; uy *= invρ; uz *= invρ
+            end
             @static if TEMPERATURE
                 if do_thermal
                     ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
@@ -98,6 +115,9 @@ using KernelAbstractions
                     fxn += dx; fyn += dy; fzn += dz
                 end
             end
+            @static if ALLEN_CAHN
+                ω = omega_from_nu(νφ)
+            end
             @static if APPLY_FORCE
                 ux += fxn * invρ * CType(0.5)
                 uy += fyn * invρ * CType(0.5)
@@ -115,6 +135,10 @@ using KernelAbstractions
         @static if DIM == 2
             uz = zero(CType)
         end
+        @static if ALLEN_CAHN
+            # collide_phi advects φ with this velocity.
+            u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz
+        end
         uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
         @static if TRT
             ωm = omega_minus(ω)
@@ -126,18 +150,27 @@ using KernelAbstractions
         @static if APPLY_FORCE
             Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
         end
-        fe0 = w[1] * ρn * (one(CType) - uu)
-        f0 = (one(CType) - ω) * fn1 + ω * fe0 + Fi0
-        fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
+        @static if ALLEN_CAHN
+            feq0 = feq_pressure(w[1], ρn, ρφ, ux, uy, uz, uu, c[1], CType)
+        else
+            feq0 = feq(w[1], ρn, ux, uy, uz, uu, c[1], CType)
+        end
+        f0 = (one(CType) - ω) * fn1 + ω * feq0 + Fi0
+        fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, feq0))
 
         for k in 1:NP
             i = 2k
             fp, fm = pairs[k]
             cp, cm = c[i], c[i + 1]
-            cup = CType(cp[1])*ux + CType(cp[2])*uy + CType(cp[3])*uz
-            cum = CType(cm[1])*ux + CType(cm[2])*uy + CType(cm[3])*uz
-            feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
-            feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
+            @static if ALLEN_CAHN
+                feqp = feq_pressure(w[i], ρn, ρφ, ux, uy, uz, uu, cp, CType)
+                feqm = feq_pressure(w[i + 1], ρn, ρφ, ux, uy, uz, uu, cm, CType)
+            else
+                cup = CType(cp[1])*ux + CType(cp[2])*uy + CType(cp[3])*uz
+                cum = CType(cm[1])*ux + CType(cm[2])*uy + CType(cm[3])*uz
+                feqp = w[i]     * ρn * (one(CType) + CType(3.0)*cup + CType(4.5)*cup*cup - uu)
+                feqm = w[i + 1] * ρn * (one(CType) + CType(3.0)*cum + CType(4.5)*cum*cum - uu)
+            end
             fp_s, fm_s = collide_pair(ω, ωm, fp, fm, feqp, feqm)
             @static if APPLY_FORCE
                 Fip, Fim = guo_pair(ω, ωm, w[i], w[i + 1], ux, uy, uz, fxn, fyn, fzn, cp, cm, CType)
@@ -162,7 +195,8 @@ end
     Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
     C_rad::CType, T_rad::CType,
     do_thermal::Bool, g_odd::Bool,
-    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc
+    N::Int, Nx::Int, Ny::Int, Nz::Int, n, Eacc,
+    phi = nothing, rho_a = nothing, rho_b = nothing, nu_a = nothing, nu_b = nothing,
 ) where {odd, CType}
     flagsn = flags[n]
     if (flagsn & TYPE_BO) == TYPE_S
@@ -251,13 +285,29 @@ end
     @static if FORCE_FIELD
         fxn += F[n, 1]; fyn += F[n, 2]; fzn += F[n, 3]
     end
+    @static if ALLEN_CAHN
+        φn = CType(phi[n])
+        ρφ = rho_a + φn * (rho_b - rho_a)
+        νφ = nu_a + φn * (nu_b - nu_a)
+    end
     if ρn <= zero(CType)
         ρn = one(CType)
         ux = zero(CType); uy = zero(CType); uz = zero(CType)
         fxn = zero(CType); fyn = zero(CType); fzn = zero(CType)
     else
-        invρ = one(CType) / ρn
-        ux *= invρ; uy *= invρ; uz *= invρ
+        @static if ALLEN_CAHN
+            # Population sum is p_h. Momentum is ρ(φ) u; do not divide by p_h.
+            if ρφ <= zero(CType)
+                ux = zero(CType); uy = zero(CType); uz = zero(CType)
+                invρ = zero(CType)
+            else
+                invρ = one(CType) / ρφ
+                ux *= invρ; uy *= invρ; uz *= invρ
+            end
+        else
+            invρ = one(CType) / ρn
+            ux *= invρ; uy *= invρ; uz *= invρ
+        end
         @static if TEMPERATURE
             if do_thermal
                 ωTn = omega_T_from_alpha(prop_fs_T(fs[n], α_s, α_sT, α_l, α_lT, T[n], T_avg, CType(1e-6)))
@@ -282,6 +332,9 @@ end
                 fxn += dx; fyn += dy; fzn += dz
             end
         end
+        @static if ALLEN_CAHN
+            ω = omega_from_nu(νφ)
+        end
         @static if APPLY_FORCE
             ux += fxn * invρ * CType(0.5)
             uy += fyn * invρ * CType(0.5)
@@ -290,6 +343,10 @@ end
         ux = clamp(ux, -cs, cs)
         uy = clamp(uy, -cs, cs)
         uz = clamp(uz, -cs, cs)
+    end
+    @static if ALLEN_CAHN
+        # collide_phi advects φ with this velocity.
+        u[n, 1] = ux; u[n, 2] = uy; u[n, 3] = uz
     end
     uu = CType(1.5) * (ux*ux + uy*uy + uz*uz)
 
@@ -303,13 +360,23 @@ end
     @static if APPLY_FORCE
         Fi0 = guo_rest(ω, w[1], ux, uy, uz, fxn, fyn, fzn, c[1], CType)
     end
-    fe0 = w[1] * ρn * (one(CType) - uu)
-    f0 = (one(CType) - ω) * fn1 + ω * fe0 + Fi0
-    fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, fe0))
+    @static if ALLEN_CAHN
+        feq0 = feq_pressure(w[1], ρn, ρφ, ux, uy, uz, uu, c[1], CType)
+    else
+        feq0 = feq(w[1], ρn, ux, uy, uz, uu, c[1], CType)
+    end
+    f0 = (one(CType) - ω) * fn1 + ω * feq0 + Fi0
+    fi[f_index(n, 1, N)] = eltype(fi)(bound_population(f0, feq0))
 
 
-    let feqp = feq(w[2], ρn, ux, uy, uz, uu, c[2], CType)
-        feqm = feq(w[3], ρn, ux, uy, uz, uu, c[3], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[2], ρn, ρφ, ux, uy, uz, uu, c[2], CType)
+            feqm = feq_pressure(w[3], ρn, ρφ, ux, uy, uz, uu, c[3], CType)
+        else
+            feqp = feq(w[2], ρn, ux, uy, uz, uu, c[2], CType)
+            feqm = feq(w[3], ρn, ux, uy, uz, uu, c[3], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp2, fm3, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[2], w[3], ux, uy, uz, fxn, fyn, fzn, c[2], c[3], CType)
@@ -319,8 +386,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src2, 2, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[4], ρn, ux, uy, uz, uu, c[4], CType)
-        feqm = feq(w[5], ρn, ux, uy, uz, uu, c[5], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[4], ρn, ρφ, ux, uy, uz, uu, c[4], CType)
+            feqm = feq_pressure(w[5], ρn, ρφ, ux, uy, uz, uu, c[5], CType)
+        else
+            feqp = feq(w[4], ρn, ux, uy, uz, uu, c[4], CType)
+            feqm = feq(w[5], ρn, ux, uy, uz, uu, c[5], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp4, fm5, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[4], w[5], ux, uy, uz, fxn, fyn, fzn, c[4], c[5], CType)
@@ -330,8 +403,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src4, 4, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[6], ρn, ux, uy, uz, uu, c[6], CType)
-        feqm = feq(w[7], ρn, ux, uy, uz, uu, c[7], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[6], ρn, ρφ, ux, uy, uz, uu, c[6], CType)
+            feqm = feq_pressure(w[7], ρn, ρφ, ux, uy, uz, uu, c[7], CType)
+        else
+            feqp = feq(w[6], ρn, ux, uy, uz, uu, c[6], CType)
+            feqm = feq(w[7], ρn, ux, uy, uz, uu, c[7], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp6, fm7, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[6], w[7], ux, uy, uz, fxn, fyn, fzn, c[6], c[7], CType)
@@ -341,8 +420,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src6, 6, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[8], ρn, ux, uy, uz, uu, c[8], CType)
-        feqm = feq(w[9], ρn, ux, uy, uz, uu, c[9], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[8], ρn, ρφ, ux, uy, uz, uu, c[8], CType)
+            feqm = feq_pressure(w[9], ρn, ρφ, ux, uy, uz, uu, c[9], CType)
+        else
+            feqp = feq(w[8], ρn, ux, uy, uz, uu, c[8], CType)
+            feqm = feq(w[9], ρn, ux, uy, uz, uu, c[9], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp8, fm9, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[8], w[9], ux, uy, uz, fxn, fyn, fzn, c[8], c[9], CType)
@@ -352,8 +437,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src8, 8, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[10], ρn, ux, uy, uz, uu, c[10], CType)
-        feqm = feq(w[11], ρn, ux, uy, uz, uu, c[11], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[10], ρn, ρφ, ux, uy, uz, uu, c[10], CType)
+            feqm = feq_pressure(w[11], ρn, ρφ, ux, uy, uz, uu, c[11], CType)
+        else
+            feqp = feq(w[10], ρn, ux, uy, uz, uu, c[10], CType)
+            feqm = feq(w[11], ρn, ux, uy, uz, uu, c[11], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp10, fm11, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[10], w[11], ux, uy, uz, fxn, fyn, fzn, c[10], c[11], CType)
@@ -363,8 +454,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src10, 10, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[12], ρn, ux, uy, uz, uu, c[12], CType)
-        feqm = feq(w[13], ρn, ux, uy, uz, uu, c[13], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[12], ρn, ρφ, ux, uy, uz, uu, c[12], CType)
+            feqm = feq_pressure(w[13], ρn, ρφ, ux, uy, uz, uu, c[13], CType)
+        else
+            feqp = feq(w[12], ρn, ux, uy, uz, uu, c[12], CType)
+            feqm = feq(w[13], ρn, ux, uy, uz, uu, c[13], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp12, fm13, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[12], w[13], ux, uy, uz, fxn, fyn, fzn, c[12], c[13], CType)
@@ -374,8 +471,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src12, 12, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[14], ρn, ux, uy, uz, uu, c[14], CType)
-        feqm = feq(w[15], ρn, ux, uy, uz, uu, c[15], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[14], ρn, ρφ, ux, uy, uz, uu, c[14], CType)
+            feqm = feq_pressure(w[15], ρn, ρφ, ux, uy, uz, uu, c[15], CType)
+        else
+            feqp = feq(w[14], ρn, ux, uy, uz, uu, c[14], CType)
+            feqm = feq(w[15], ρn, ux, uy, uz, uu, c[15], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp14, fm15, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[14], w[15], ux, uy, uz, fxn, fyn, fzn, c[14], c[15], CType)
@@ -385,8 +488,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src14, 14, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[16], ρn, ux, uy, uz, uu, c[16], CType)
-        feqm = feq(w[17], ρn, ux, uy, uz, uu, c[17], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[16], ρn, ρφ, ux, uy, uz, uu, c[16], CType)
+            feqm = feq_pressure(w[17], ρn, ρφ, ux, uy, uz, uu, c[17], CType)
+        else
+            feqp = feq(w[16], ρn, ux, uy, uz, uu, c[16], CType)
+            feqm = feq(w[17], ρn, ux, uy, uz, uu, c[17], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp16, fm17, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[16], w[17], ux, uy, uz, fxn, fyn, fzn, c[16], c[17], CType)
@@ -396,8 +505,14 @@ end
         fp_s, fm_s = bound_pair(fp_s, fm_s, feqp, feqm)
         store_pair!(fi, n, src16, 16, fp_s, fm_s, t_odd, N)
     end
-    let feqp = feq(w[18], ρn, ux, uy, uz, uu, c[18], CType)
-        feqm = feq(w[19], ρn, ux, uy, uz, uu, c[19], CType)
+    let
+        @static if ALLEN_CAHN
+            feqp = feq_pressure(w[18], ρn, ρφ, ux, uy, uz, uu, c[18], CType)
+            feqm = feq_pressure(w[19], ρn, ρφ, ux, uy, uz, uu, c[19], CType)
+        else
+            feqp = feq(w[18], ρn, ux, uy, uz, uu, c[18], CType)
+            feqm = feq(w[19], ρn, ux, uy, uz, uu, c[19], CType)
+        end
         fp_s, fm_s = collide_pair(ω, ωm, fp18, fm19, feqp, feqm)
         @static if APPLY_FORCE
             Fip, Fim = guo_pair(ω, ωm, w[18], w[19], ux, uy, uz, fxn, fyn, fzn, c[18], c[19], CType)
@@ -411,6 +526,41 @@ end
     return nothing
 end
 
+@static if ALLEN_CAHN
+@kernel function stream_collide_even_kernel!(
+    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT, fs,
+    w::NTuple{Q, CType},
+    c::NTuple{Q, SVector{3, Int}},
+    ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
+    Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
+    do_thermal::Bool, g_odd::Bool,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc,
+    phi, rho_a::CType, rho_b::CType, nu_a::CType, nu_b::CType,
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds stream_collide_body!(Val(false), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, phi, rho_a, rho_b, nu_a, nu_b)
+end
+
+@kernel function stream_collide_odd_kernel!(
+    @Const(flags), fi, ρ, u, F, gi, T, Qin, hT, fs,
+    w::NTuple{Q, CType},
+    c::NTuple{Q, SVector{3, Int}},
+    ω::CType, fx::CType, fy::CType, fz::CType,
+    ω_T::CType, β::CType, T_avg::CType, Λ::CType, Ts::CType, Tl::CType, K0::CType,
+    α_s::CType, α_l::CType, α_sT::CType, α_lT::CType, γ_s::CType, γ_l::CType, ν_s::CType, ν_l::CType, ν_sT::CType, ν_lT::CType,
+    Λ_v::CType, T_v::CType, C_hk::CType, p0v::CType, β_v::CType,
+    C_rad::CType, T_rad::CType,
+    do_thermal::Bool, g_odd::Bool,
+    N::Int, Nx::Int, Ny::Int, Nz::Int, Eacc,
+    phi, rho_a::CType, rho_b::CType, nu_a::CType, nu_b::CType,
+) where {Q, CType}
+    n = @index(Global)
+    @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc, phi, rho_a, rho_b, nu_a, nu_b)
+end
+else
 @kernel function stream_collide_even_kernel!(
     @Const(flags), fi, ρ, u, F, gi, T, Qin, hT, fs,
     w::NTuple{Q, CType}, 
@@ -442,6 +592,7 @@ end
     n = @index(Global)
     @inbounds stream_collide_body!(Val(true), flags, fi, ρ, u, F, gi, T, Qin, hT, fs, w, c, ω, fx, fy, fz, ω_T, β, T_avg, Λ, Ts, Tl, K0, α_s, α_l, α_sT, α_lT, γ_s, γ_l, ν_s, ν_l, ν_sT, ν_lT, Λ_v, T_v, C_hk, p0v, β_v, C_rad, T_rad, do_thermal, g_odd, N, Nx, Ny, Nz, Int(n), Eacc)
 end
+end # ALLEN_CAHN kernel args
 
 end # not SURFACE
 

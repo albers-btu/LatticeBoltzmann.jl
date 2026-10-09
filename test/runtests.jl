@@ -8,6 +8,17 @@ using Test, StaticArrays, CUDA
 	include("test_memory.jl")
 	include("test_plic.jl")
 	include("test_dim_alloc.jl")
+	include("test_interface_pref.jl")
+	include("test_allen_cahn_stencil.jl")
+
+	@static if ALLEN_CAHN
+		include("test_allen_cahn_alloc.jl")
+		include("test_allen_cahn_spinodal.jl")
+		@static if DIM == 3
+			include("test_allen_cahn_droplet.jl")
+			include("test_allen_cahn_wave.jl")
+		end
+	end
 
 	@static if DIM == 2
 		include("test_kbc_2d.jl")

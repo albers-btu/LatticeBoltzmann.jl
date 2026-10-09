@@ -3,6 +3,12 @@
     return wi * ρn * (one(CType) + CType(3)*cu + CType(4.5)*cu*cu - uu)
 end
 
+# p_h is not multiplied by the velocity polynomial. feq would scale that leading term too.
+@inline function feq_pressure(wi, p_h, ρφ, ux, uy, uz, uu, ci, ::Type{CType}) where {CType}
+    cu = CType(ci[1])*ux + CType(ci[2])*uy + CType(ci[3])*uz
+    return wi * (p_h + ρφ * (CType(3)*cu + CType(4.5)*cu*cu - uu))
+end
+
 @inline function srt(ω::CType, f::CType, wi::CType, ρn::CType, ux::CType, uy::CType, uz::CType, uu::CType, ci) where {CType}
     return (one(CType) - ω) * f + ω * feq(wi, ρn, ux, uy, uz, uu, ci, CType)
 end

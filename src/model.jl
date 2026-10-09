@@ -107,6 +107,12 @@ function Model(
     T_rad = nothing,                        # Far-field temperature for radiation
     powder_τ = 0.0,                         # Unmelted powder lifetime 
     powder_T = nothing,                     # Powder temperature
+    W = 4,
+    Mphi = 0.05,
+    rho_a = 1,
+    rho_b = 1,
+    nu_a = nothing,
+    nu_b = nothing,
     T_stick = nothing,                      # Hold powder on solid at or above this T; default 0.9 Ts
     laser = nothing,
     powder_jet = nothing,
@@ -152,6 +158,9 @@ function Model(
     τp = powder_τ isa Quantity ? CType(ustrip(u"s", powder_τ) / units.s) : CType(powder_τ)
     Tp = powder_T === nothing ? CType(T_avg) :
          powder_T isa Quantity ? CType(lbm_T(units, powder_T)) : CType(powder_T)
+    # nu_a/nu_b share units with the SI viscosity; nothing stays nothing until lattice ν exists.
+    nua = nu_a === nothing ? nothing : lbm_ν(units, nu_a)
+    nub = nu_b === nothing ? nothing : lbm_ν(units, nu_b)
     Tstick = T_stick === nothing ? CType(0.9) * Tsl :
              T_stick isa Quantity ? CType(lbm_T(units, T_stick)) : CType(T_stick)
     εr = emissivity isa Quantity ? ustrip(emissivity) : Float64(emissivity)
@@ -166,6 +175,7 @@ function Model(
                   Λ_v=CType(Λv), T_v=Tvl, C_hk=CType(Chk), p0v=CType(p0l), β_v=CType(βv),
                   C_rad=Crad, T_rad=Trad,
                   τ_p=τp, T_p=Tp, T_stick=Tstick,
+                  W=W, Mphi=Mphi, rho_a=rho_a, rho_b=rho_b, nu_a=nua, nu_b=nub,
                   laser=laser, powder_jet=powder_jet, n_hydro=n_hydro, CType, SType, scheme, backend, workgroup)
     model.units = units
     return model
@@ -203,6 +213,12 @@ function Model(
     T_rad = nothing,
     τ_p = 0.0f0,
     T_p = nothing,
+    W = 4,
+    Mphi = 0.05,
+    rho_a = 1,
+    rho_b = 1,
+    nu_a = nothing,
+    nu_b = nothing,
     T_stick = nothing,
     laser = nothing,
     powder_jet = nothing,
@@ -228,10 +244,14 @@ function Model(
         end
     end
 
+    @static if ALLEN_CAHN
+        n_hydro == 1 || throw(ArgumentError("Allen–Cahn requires n_hydro == 1, got $n_hydro"))
+    end
+
     w = weights(scheme, CType)
     c = velocities(scheme)
     Q_T = @static DIM == 3 ? 7 : 5
-    @info "lattice image" DIM SCHEME SCHEME_T scheme Q=length(w) Q_T
+    @info "lattice image" DIM SCHEME SCHEME_T interface=INTERFACE scheme Q=length(w) Q_T
 
     cached_collide_even = stream_collide_even_kernel!(backend, workgroup)
     cached_collide_odd = stream_collide_odd_kernel!(backend, workgroup)
@@ -342,6 +362,12 @@ function Model(
             T_rad=T_rad === nothing ? CType(T_avg) : CType(T_rad),
             τ_p=CType(τ_p),
             T_p=T_p === nothing ? CType(T_avg) : CType(T_p),
+            W=W,
+            Mphi=Mphi,
+            rho_a=rho_a,
+            rho_b=rho_b,
+            nu_a=nu_a,
+            nu_b=nu_b,
             T_stick=T_stick === nothing ?
                 CType(0.9) * (Ts === nothing ? CType(T_avg) : CType(Ts)) : CType(T_stick),
         )
@@ -646,16 +672,30 @@ function initialize!(model::Model)
                 ndrange = N
             )
         else
-            kernel(
-                domain.ρ.data,
-                domain.u.data,
-                domain.fi.data,
-                domain.flags.data,
-                model.weights, model.velocities,
-                Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
-                domain.gi.data, domain.T.data;
-                ndrange = N
-            )
+            @static if ALLEN_CAHN
+                kernel(
+                    domain.ρ.data,
+                    domain.u.data,
+                    domain.fi.data,
+                    domain.flags.data,
+                    model.weights, model.velocities,
+                    Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
+                    domain.gi.data, domain.T.data,
+                    domain.hi.data, domain.phi.data;
+                    ndrange = N
+                )
+            else
+                kernel(
+                    domain.ρ.data,
+                    domain.u.data,
+                    domain.fi.data,
+                    domain.flags.data,
+                    model.weights, model.velocities,
+                    Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
+                    domain.gi.data, domain.T.data;
+                    ndrange = N
+                )
+            end
         end
         @static if MOVING_BOUNDARIES
             found = similar(domain.u.data, Int32, 1)
@@ -761,6 +801,19 @@ function step!(model::Model)
         # gi streams once per outer step. Init writes it for an even load,
         # so that load is isodd(t), not the hydro substep index.
         g_odd = isodd(Int(domain.t))
+        @static if ALLEN_CAHN
+            # domain.F holds μ ∇φ plus the density-weighted acceleration.
+            # Hydro scalars are cleared so that acceleration is not applied twice.
+            capillary_force_kernel!(model.backend, model.workgroup)(
+                domain.F.data, domain.phi.data,
+                model.weights, model.velocities,
+                σ, domain.W,
+                fx, fy, fz,
+                domain.rho_a, domain.rho_b,
+                Nx, Ny, Nz;
+                ndrange = N)
+            fx = zero(CT); fy = zero(CT); fz = zero(CT)
+        end
         for sub in 1:nsub
             # fi parity advances every hydro substep and stays continuous across outer steps.
             t_odd = isodd(Int(domain.t) * nsub + sub - 1)
@@ -853,21 +906,41 @@ function step!(model::Model)
                            ndrange = N)
                 end
             else
-                kernel(domain.flags.data, domain.fi.data,
-                       domain.ρ.data, domain.u.data, domain.F.data,
-                       domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
-                       domain.fs.data,
-                       model.weights, model.velocities,
-                       ω, fx, fy, fz,
-                       domain.ω_T, domain.β, domain.T_avg,
-                       domain.Λ, domain.Ts, domain.Tl, domain.K0,
-                       domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
-                       domain.γ_s, domain.γ_l,
-                       νs, νl, νsT, νlT,
-                       domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
-                       domain.C_rad, domain.T_rad,
-                       thermal, g_odd,
-                       Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
+                @static if ALLEN_CAHN
+                    kernel(domain.flags.data, domain.fi.data,
+                           domain.ρ.data, domain.u.data, domain.F.data,
+                           domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                           domain.fs.data,
+                           model.weights, model.velocities,
+                           ω, fx, fy, fz,
+                           domain.ω_T, domain.β, domain.T_avg,
+                           domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                           domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                           domain.γ_s, domain.γ_l,
+                           νs, νl, νsT, νlT,
+                           domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
+                           domain.C_rad, domain.T_rad,
+                           thermal, g_odd,
+                           Nd, Nx, Ny, Nz, domain.Eacc.data,
+                           domain.phi.data, domain.rho_a, domain.rho_b, domain.nu_a, domain.nu_b;
+                           ndrange = N)
+                else
+                    kernel(domain.flags.data, domain.fi.data,
+                           domain.ρ.data, domain.u.data, domain.F.data,
+                           domain.gi.data, domain.T.data, domain.Q.data, domain.h.data,
+                           domain.fs.data,
+                           model.weights, model.velocities,
+                           ω, fx, fy, fz,
+                           domain.ω_T, domain.β, domain.T_avg,
+                           domain.Λ, domain.Ts, domain.Tl, domain.K0,
+                           domain.α_s, domain.α_l, domain.α_sT, domain.α_lT,
+                           domain.γ_s, domain.γ_l,
+                           νs, νl, νsT, νlT,
+                           domain.Λ_v, domain.T_v, C_hk, p0v, domain.β_v,
+                           domain.C_rad, domain.T_rad,
+                           thermal, g_odd,
+                           Nd, Nx, Ny, Nz, domain.Eacc.data; ndrange = N)
+                end
             end
             tmark = _phase_mark(model, 5, tmark)
 
@@ -884,6 +957,18 @@ function step!(model::Model)
                                                Nd, Nx, Ny, Nz; ndrange = N)
             end
             tmark = _phase_mark(model, 6, tmark)
+        end
+
+        @static if ALLEN_CAHN
+            # hi streams once per outer step, on the same parity as gi.
+            ac_kernel! = isodd(Int(domain.t)) ? allen_cahn_odd_kernel! : allen_cahn_even_kernel!
+            phi_read = copy(domain.phi.data)
+            ac_kernel!(model.backend, model.workgroup)(
+                domain.hi.data, phi_read, domain.phi.data, domain.u.data, domain.flags.data,
+                model.weights, model.velocities,
+                domain.Mphi, domain.W,
+                Nd, Nx, Ny, Nz;
+                ndrange = N)
         end
 
         increment_time_step!(domain, 1)

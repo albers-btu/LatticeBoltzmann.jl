@@ -10,7 +10,7 @@ export velocities
 
 include("extensions.jl")
 export DIM, SCHEME, SCHEME_T
-export TRT, KBC, SURFACE, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE
+export TRT, KBC, SURFACE, INTERFACE, ALLEN_CAHN, VOLUME_FORCE, UPDATE_FIELDS, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, FORCE_FIELD, TEMPERATURE
 
 include("units.jl")
 export Units
@@ -37,6 +37,7 @@ include("log.jl")
 export start_run_log!, stop_run_log!
 
 include("kernels/helper.jl")
+include("kernels/allen_cahn.jl")
 include("kernels/hydro.jl")
 include("kernels/temperature.jl")
 include("kernels/forces.jl")

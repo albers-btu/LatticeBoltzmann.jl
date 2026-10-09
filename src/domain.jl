@@ -109,6 +109,17 @@ mutable struct Domain{
         end
     end
 
+    @static if ALLEN_CAHN
+        hi::Memory{SType, Afi}          # Phase-field populations on the hydro lattice
+        phi::Memory{CType, Aρ}          # Phase field
+        W::CType                        # Interface width in cells
+        Mphi::CType                     # Phase-field mobility
+        rho_a::CType                    # Density at φ = 0
+        rho_b::CType                    # Density at φ = 1
+        nu_a::CType                     # Viscosity at φ = 0
+        nu_b::CType                     # Viscosity at φ = 1
+    end
+
     t::UInt64                           # Lattice time-step counter
 end
 
@@ -148,6 +159,12 @@ function Domain(
     T_rad::CType = one(CType),
     τ_p::CType = zero(CType),
     T_p::CType = one(CType),
+    W = 4,
+    Mphi = 0.05,
+    rho_a = 1,
+    rho_b = 1,
+    nu_a = nothing,
+    nu_b = nothing,
     T_stick::CType = zero(CType),
 ) where {CType, SType}
     nvel = length(WEIGHTS[scheme])
@@ -227,6 +244,20 @@ function Domain(
         end
     end
 
+    @static if ALLEN_CAHN
+        # nothing means the hydro viscosity already stored on the domain.
+        W = CType(W)
+        Mphi = CType(Mphi)
+        rho_a = CType(rho_a)
+        rho_b = CType(rho_b)
+        nu_a = CType(nu_a === nothing ? ν : nu_a)
+        nu_b = CType(nu_b === nothing ? ν : nu_b)
+        hi = Memory(AT{SType}(undef, N * nvel))
+        fill!(hi.data, zero(SType))
+        phi = Memory(AT{CType}(undef, N))
+        fill!(phi.data, zero(CType))
+    end
+
     @static if SURFACE
         @static if TEMPERATURE
             Domain(
@@ -260,31 +291,62 @@ function Domain(
             )
         end
     else
-        @static if TEMPERATURE
-            Domain(
-                UInt(Nx), UInt(Ny), UInt(Nz),
-                Int(Ox), Int(Oy), Int(Oz),
-                CType(ν), N, ω,
-                CType(fx), CType(fy), CType(fz),
-                CType(σ), CType(σT), CType(Tσ),
-                ρ, u, F, fi, flags,
-                αT, αs, αl, CType(α_sT), CType(α_lT), 
-                CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), 
-                β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
-                Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
-                Eacc, zero(CType), zero(CType),
-                UInt64(0)
-            )
+        @static if ALLEN_CAHN
+            @static if TEMPERATURE
+                Domain(
+                    UInt(Nx), UInt(Ny), UInt(Nz),
+                    Int(Ox), Int(Oy), Int(Oz),
+                    CType(ν), N, ω,
+                    CType(fx), CType(fy), CType(fz),
+                    CType(σ), CType(σT), CType(Tσ),
+                    ρ, u, F, fi, flags,
+                    αT, αs, αl, CType(α_sT), CType(α_lT), 
+                    CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), 
+                    β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                    Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
+                    Eacc, zero(CType), zero(CType),
+                    hi, phi, W, Mphi, rho_a, rho_b, nu_a, nu_b,
+                    UInt64(0)
+                )
+            else
+                Domain(
+                    UInt(Nx), UInt(Ny), UInt(Nz),
+                    Int(Ox), Int(Oy), Int(Oz),
+                    CType(ν), N, ω,
+                    CType(fx), CType(fy), CType(fz),
+                    CType(σ), CType(σT), CType(Tσ),
+                    ρ, u, F, fi, flags,
+                    hi, phi, W, Mphi, rho_a, rho_b, nu_a, nu_b,
+                    UInt64(0)
+                )
+            end
         else
-            Domain(
-                UInt(Nx), UInt(Ny), UInt(Nz),
-                Int(Ox), Int(Oy), Int(Oz),
-                CType(ν), N, ω,
-                CType(fx), CType(fy), CType(fz),
-                CType(σ), CType(σT), CType(Tσ),
-                ρ, u, F, fi, flags,
-                UInt64(0)
-            )
+            @static if TEMPERATURE
+                Domain(
+                    UInt(Nx), UInt(Ny), UInt(Nz),
+                    Int(Ox), Int(Oy), Int(Oz),
+                    CType(ν), N, ω,
+                    CType(fx), CType(fy), CType(fz),
+                    CType(σ), CType(σT), CType(Tσ),
+                    ρ, u, F, fi, flags,
+                    αT, αs, αl, CType(α_sT), CType(α_lT), 
+                    CType(γ_s), CType(γ_l), νs, νl, CType(ν_sT), CType(ν_lT), 
+                    β, T_avg, ω_T, Tmem, gi, Qmem, hmem, Λ, Ts, Tl, K0, fsmem,
+                    Λ_v, T_v, C_hk, p0v, β_v, CType(C_rad), CType(T_rad),
+                    Eacc, zero(CType), zero(CType),
+                    UInt64(0)
+                )
+            else
+                Domain(
+                    UInt(Nx), UInt(Ny), UInt(Nz),
+                    Int(Ox), Int(Oy), Int(Oz),
+                    CType(ν), N, ω,
+                    CType(fx), CType(fy), CType(fz),
+                    CType(σ), CType(σT), CType(Tσ),
+                    ρ, u, F, fi, flags,
+                    UInt64(0)
+                )
+            end
         end
     end
 end
