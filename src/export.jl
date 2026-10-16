@@ -109,6 +109,11 @@ end
             buf[off_S * N + n] = _vtk_lim(Float32(msrc[n]) * Ss, -1.0f6, 1.0f6)
         end
     end
+    @static if ALLEN_CAHN
+        if off_phi >= 0
+            buf[off_phi * N + n] = _vtk_num(Float32(ϕ[n]))
+        end
+    end
     if off_flags >= 0
         buf[off_flags * N + n] = Float32(flags[n])
     end
@@ -133,7 +138,10 @@ function _vtk_mask(fields)
         mask &= ~(VTK_T | VTK_FS | VTK_Q)
     end
     @static if !SURFACE
-        mask &= ~(VTK_PHI | VTK_MP | VTK_S)
+        mask &= ~(VTK_MP | VTK_S)
+        @static if !ALLEN_CAHN
+            mask &= ~VTK_PHI
+        end
     end
     return mask
 end
@@ -243,6 +251,12 @@ function _vtk_comp(host, off, N, Nx, Ny, Nz)
     return reshape(@view(host[(off * N + 1):((off + 1) * N)]), Nx, Ny, Nz)
 end
 
+# A Nz = 1 image has points and no cells, so ParaView's surface is empty.
+# One repeated plane makes a sheet one cell thick.
+function _vtk_sheet(A::AbstractArray{<:Any,3})
+    return size(A, 3) == 1 ? cat(A, A; dims=3) : A
+end
+
 function _vtk_write(job::_VtkJob)
     host, N = job.host, job.Nx * job.Ny * job.Nz
     offs = job.offs
@@ -257,32 +271,42 @@ function _vtk_write(job::_VtkJob)
             @warn "max |u|=$umax at t=$(job.t) is high (Ma = $(umax * sqrt(3f0)))"
         end
     end
+    sheet = job.Nz == 1
     xs = range(0.0f0, step=job.dx, length=job.Nx)
     ys = range(0.0f0, step=job.dx, length=job.Ny)
-    zs = range(0.0f0, step=job.dx, length=job.Nz)
+    zs = range(0.0f0, step=job.dx, length=sheet ? 2 : job.Nz)
+    layer(off) = _vtk_sheet(_vtk_comp(host, off, N, job.Nx, job.Ny, job.Nz))
     pvd_path = joinpath(job.dir, "lbm")
     pvd = paraview_collection(pvd_path; append = job.t > 0 && isfile(pvd_path * ".pvd"))
     vtk_grid(joinpath(job.dir, @sprintf("lbm_%08d", job.t)), xs, ys, zs) do vtk
-        offs.u >= 0 && (vtk["u"] = (
-            _vtk_comp(host, offs.u, N, job.Nx, job.Ny, job.Nz),
-            _vtk_comp(host, offs.u + 1, N, job.Nx, job.Ny, job.Nz),
-            _vtk_comp(host, offs.u + 2, N, job.Nx, job.Ny, job.Nz)))
-        offs.rho >= 0 && (vtk["rho"] = _vtk_comp(host, offs.rho, N, job.Nx, job.Ny, job.Nz))
-        offs.p >= 0 && (vtk["p"] = _vtk_comp(host, offs.p, N, job.Nx, job.Ny, job.Nz))
+        offs.u >= 0 && (vtk["u"] = (layer(offs.u), layer(offs.u + 1), layer(offs.u + 2)))
+        offs.rho >= 0 && (vtk["rho"] = layer(offs.rho))
+        offs.p >= 0 && (vtk["p"] = layer(offs.p))
         @static if TEMPERATURE
-            offs.T >= 0 && (vtk["T"] = _vtk_comp(host, offs.T, N, job.Nx, job.Ny, job.Nz))
-            offs.fs >= 0 && (vtk["fs"] = _vtk_comp(host, offs.fs, N, job.Nx, job.Ny, job.Nz))
-            offs.Q >= 0 && (vtk["Q"] = _vtk_comp(host, offs.Q, N, job.Nx, job.Ny, job.Nz))
+            offs.T >= 0 && (vtk["T"] = layer(offs.T))
+            offs.fs >= 0 && (vtk["fs"] = layer(offs.fs))
+            offs.Q >= 0 && (vtk["Q"] = layer(offs.Q))
         end
         @static if SURFACE
-            offs.phi >= 0 && (vtk["phi"] = _vtk_comp(host, offs.phi, N, job.Nx, job.Ny, job.Nz))
-            offs.mp >= 0 && (vtk["mp"] = _vtk_comp(host, offs.mp, N, job.Nx, job.Ny, job.Nz))
-            offs.S >= 0 && (vtk["S"] = _vtk_comp(host, offs.S, N, job.Nx, job.Ny, job.Nz))
+            offs.phi >= 0 && (vtk["phi"] = layer(offs.phi))
+            offs.mp >= 0 && (vtk["mp"] = layer(offs.mp))
+            offs.S >= 0 && (vtk["S"] = layer(offs.S))
+        end
+        @static if ALLEN_CAHN
+            offs.phi >= 0 && (vtk["phi"] = layer(offs.phi))
         end
         if offs.flags >= 0
-            vtk["flags"] = Int32.(_vtk_comp(host, offs.flags, N, job.Nx, job.Ny, job.Nz))
+            vtk["flags"] = Int32.(layer(offs.flags))
         end
-        @static if TEMPERATURE
+        @static if ALLEN_CAHN
+            if offs.phi >= 0
+                vtk[VTKPointData()] = ("Scalars" => "phi", "Vectors" => "u")
+            elseif offs.T >= 0
+                vtk[VTKPointData()] = ("Scalars" => "T", "Vectors" => "u")
+            else
+                vtk[VTKPointData()] = ("Vectors" => "u",)
+            end
+        elseif TEMPERATURE
             vtk[VTKPointData()] = ("Scalars" => "T", "Vectors" => "u")
         elseif SURFACE
             vtk[VTKPointData()] = ("Scalars" => "phi", "Vectors" => "u")
@@ -594,7 +618,14 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
     isfinite(t_si) || (t_si = Float64(t))
     # Moments and the pack stay on the default stream, ahead of the next step!.
     # The file write, the ray retrace, and the cylinders run on the writer thread.
+    # Allen–Cahn already stored u = momentum / ρ(φ). Moments would replace that
+    # with momentum over the population sum, which is the pressure, not ρ(φ).
+    u_keep = @static ALLEN_CAHN ? copy(domain.u.data) : nothing
     launch_moments!(model)
+    @static if ALLEN_CAHN
+        KernelAbstractions.synchronize(model.backend)
+        copyto!(domain.u.data, u_keep)
+    end
     if ncomp == 0
         KernelAbstractions.synchronize(model.backend)
         return _export_geometry_now(dir, t, t_si, dx, geom, domain, Nx, Ny, Nz)
@@ -609,7 +640,13 @@ function export!(model::Model; dir::AbstractString="output", fields=nothing, syn
     Tdata = @static TEMPERATURE ? domain.T.data : domain.ρ.data
     fsdata = @static TEMPERATURE ? domain.fs.data : domain.ρ.data
     Qdata = @static TEMPERATURE ? domain.Q.data : domain.ρ.data
-    ϕdata = @static SURFACE ? domain.ϕ.data : domain.ρ.data
+    ϕdata = @static if SURFACE
+        domain.ϕ.data
+    elseif ALLEN_CAHN
+        domain.phi.data
+    else
+        domain.ρ.data
+    end
     mpdata = @static SURFACE ? domain.mp.data : domain.ρ.data
     Sdata = @static SURFACE ? domain.msrc.data : domain.ρ.data
 

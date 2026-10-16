@@ -37,13 +37,15 @@ include("log.jl")
 export start_run_log!, stop_run_log!
 
 include("kernels/helper.jl")
-include("kernels/allen_cahn.jl")
 include("kernels/hydro.jl")
 include("kernels/temperature.jl")
 include("kernels/forces.jl")
-include("kernels/init.jl")
-include("kernels/collide.jl")
-include("kernels/surface.jl")
+include("kernels/sharp/init.jl")
+include("kernels/sharp/collide.jl")
+include("kernels/sharp/surface.jl")
+include("kernels/allen_cahn/phase.jl")
+include("kernels/allen_cahn/init.jl")
+include("kernels/allen_cahn/collide.jl")
 include("kernels/moments.jl")
 export initialize_kernel!, stream_collide_even_kernel!, stream_collide_odd_kernel!, powder_gas_kernel!
 

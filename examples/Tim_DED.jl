@@ -1,5 +1,5 @@
 # IN625 directed-energy deposition: one weld line, three powder jets, clean plate.
-# 726 W, 1.0 mm 1/e² spot, 500 mm/min, 9.5 g/min. No powder-bed file.
+# 726 W, 1.0 mm 1/e² spot, 500 mm/min, 3.8 g/min, 98 nm. No powder-bed file.
 # Material is input/material_IN625.jl. Plate, mesh, powder, and absorption
 # depth come from the shared DED inputs; power, spot, speed, and the scan
 # inset are overridden below so examples/DED.jl stays the 316L case.
@@ -12,12 +12,12 @@
 # 160×80×100. This track uses a 1.2 mm powder focus; the shared file stays
 # 2.4 mm for the 316L case. The scan
 # inset is one spot diameter (1.0 mm); the original inset was one 2 mm
-# diameter. At 80 µm the 1.0 mm spot is ~12 cells across. The 9.5 g/min feed on
-# this narrower track builds a taller bead (~2.3 mm), added above the plate.
-# Particles are drawn from the d10/d50/d90 distribution in input/DED_powder.jl.
+# diameter. At 80 µm the 1.0 mm spot is ~12 cells across. The 3.8 g/min feed on
+# this narrower track builds a bead (~0.9 mm), added above the plate.
+# d10 and d90 are set below. d50 stays 75 µm from input/DED_powder.jl.
 # input/Tim_DED_powder.jl places three nozzles on a circle about the beam:
 # 30° from the vertical, 120° apart, starting at 90° so none lies on the
-# scan axis. Each jet is aimed at the laser focus. The 9.5 g/min feed is
+# scan axis. Each jet is aimed at the laser focus. The 3.8 g/min feed is
 # split evenly across the three. They absorb the beam in flight and shade
 # the plate by their combined geometric cross section. Molten particles, and
 # any particle that lands in liquid, join the surface. A cell filled past
@@ -59,9 +59,14 @@ include(joinpath(input_dir, "Tim_DED_powder.jl"))
 si_P          = 726.0u"W"
 si_d_spot     = 1.0e-3u"m"              # 1.0 mm 1/e² focus diameter
 si_v          = 500.0u"mm/minute"
-si_mdot       = 9.5u"g/minute"
+si_mdot       = 3.8u"g/minute"          # 40% of the 9.5 g/min feeder rate reaches the pool
 si_d_powder   = 1.2e-3u"m"              # 1.2 mm 1/e² powder focus; shared file stays 2.4 mm
+si_d10        = 45.0e-6u"m"             # shared file stays d10 = 45 µm, d90 = 125 µm
+si_d90        = 90.0e-6u"m"
 si_end_margin = 1.0e-3u"m"              # one spot diameter in from each x wall
+# 98 nm. k/n is the IN625 ratio. Normal incidence then absorbs 0.36.
+fresnel_n     = 3.082907f0
+fresnel_k     = 4.193375f0
 
 # Lattice caps. n_hydro brings the physical σ down so σ_lat stays ≤ σ_lat_cap.
 σ_lat_cap = 0.03f0

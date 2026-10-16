@@ -21,6 +21,7 @@ mutable struct Laser{T<:AbstractFloat}
     dev_ox::Any          # Device copy of ox, or nothing
     dev_oy::Any          # Device copy of oy, or nothing
     dev_pray::Any        # Device copy of Pray, or nothing
+    planes::Any          # 4N Parker–Youngs plane (nx,ny,nz,dpl), or nothing
 end
 
 # Unpolarized Fresnel absorptance, vacuum to metal ñ = n + i k.
@@ -97,7 +98,7 @@ function Laser{T}(;
     ox, oy, Pray = _build_ray_bundle(T(P), T(w), Int(nrays))
     return Laser{T}(enabled, T(P), T(w), T(x), T(y), T(z), d[1], d[2], d[3],
                     T(n_re), T(n_im), Int(nrays), Int(max_bounce), Int(every),
-                    max(1, Int(skin)), ox, oy, Pray, nothing, nothing, nothing)
+                    max(1, Int(skin)), ox, oy, Pray, nothing, nothing, nothing, nothing)
 end
 
 # SI Wrapper of default Laser
@@ -155,6 +156,20 @@ end
 ) where {T}
     nϕ = calculate_normal_py(phij)
     n2 = nϕ[1]*nϕ[1] + nϕ[2]*nϕ[2] + nϕ[3]*nϕ[3]
+    dpl = n2 <= eps(T) ? zero(T) : plic_cube(ϕ0, nϕ)
+    return plic_hit_plane(ϕ0, nϕ[1], nϕ[2], nϕ[3], dpl,
+                          ox, oy, oz, dirx, diry, dirz, cx, cy, cz)
+end
+
+# Same intersection as plic_hit once the Parker–Youngs plane is known.
+# n is metal → gas. dpl is plic_cube(φ, n). A zero normal is the full-cell case.
+@inline function plic_hit_plane(
+    ϕ0::T, nx::T, ny::T, nz::T, dpl::T,
+    ox::T, oy::T, oz::T,
+    dirx::T, diry::T, dirz::T,
+    cx::T, cy::T, cz::T,
+) where {T}
+    n2 = nx * nx + ny * ny + nz * nz
     # ∇φ cancels when gas lies on both sides of a full cell. φ = 1 means
     # every point in the cell is metal, so a ray already inside it has hit.
     # The face normal is the incoming direction: normal incidence, as in bulk.
@@ -165,26 +180,25 @@ end
         if ϕ0 >= one(T) - T(1.0e-3) && inside
             return true, zero(T), SVector{3,T}(-dirx, -diry, -dirz)
         end
-        return false, zero(T), nϕ
+        return false, zero(T), SVector{3,T}(nx, ny, nz)
     end
-    dpl = plic_cube(ϕ0, nϕ)
-    nd = nϕ[1]*dirx + nϕ[2]*diry + nϕ[3]*dirz
+    nd = nx * dirx + ny * diry + nz * dirz
     t = zero(T)
     if abs(nd) > T(1e-8)
-        t = (nϕ[1]*(cx - ox) + nϕ[2]*(cy - oy) + nϕ[3]*(cz - oz) + dpl) / nd
+        t = (nx * (cx - ox) + ny * (cy - oy) + nz * (cz - oz) + dpl) / nd
         if t > T(1e-6)
             hx = ox + t * dirx
             hy = oy + t * diry
             hz = oz + t * dirz
-            inside = abs(hx - cx) <= T(0.5) + T(1e-4) &&
-                     abs(hy - cy) <= T(0.5) + T(1e-4) &&
-                     abs(hz - cz) <= T(0.5) + T(1e-4)
-            inside && return true, t, nϕ
+            inside = abs(hx - cx) <= T(0.5) + T(1.0e-4) &&
+                     abs(hy - cy) <= T(0.5) + T(1.0e-4) &&
+                     abs(hz - cz) <= T(0.5) + T(1.0e-4)
+            inside && return true, t, SVector{3,T}(nx, ny, nz)
         end
     end
-    _plic_in_metal(ox, oy, oz, cx, cy, cz, nϕ[1], nϕ[2], nϕ[3], dpl) &&
-        return true, zero(T), nϕ
-    return false, t, nϕ
+    _plic_in_metal(ox, oy, oz, cx, cy, cz, nx, ny, nz, dpl) &&
+        return true, zero(T), SVector{3,T}(nx, ny, nz)
+    return false, t, SVector{3,T}(nx, ny, nz)
 end
 
 # Trailing ::T keeps this more specific than the untyped-phij method.
@@ -261,6 +275,52 @@ end
     return nothing
 end
 
+
+# Interface plane for one cell. Layout is nx[1:N], ny[1:N], nz[1:N], dpl[1:N].
+# φ is fixed for the deposit, so the walk reloads this instead of a 3×3×3 gather.
+@inline function _store_laser_plane!(planes, flags, ϕ, n::Int, Nx::Int, Ny::Int, Nz::Int)
+    N = Nx * Ny * Nz
+    T = eltype(planes)
+    z0 = zero(T)
+    ix = ((n - 1) % Nx) + 1
+    iy = (((n - 1) ÷ Nx) % Ny) + 1
+    iz = ((n - 1) ÷ (Nx * Ny)) + 1
+    # Gas and bulk are never read. Leaving them untouched keeps this kernel
+    # on the interface cells the rays actually test.
+    @inbounds if (flags[n] & TYPE_SU) == TYPE_I
+        ϕ0 = T(ϕ[n])
+        phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+        nϕ = calculate_normal_py(phij)
+        n2 = nϕ[1] * nϕ[1] + nϕ[2] * nϕ[2] + nϕ[3] * nϕ[3]
+        dpl = n2 <= eps(T) ? z0 : plic_cube(ϕ0, nϕ)
+        planes[n] = nϕ[1]
+        planes[n + N] = nϕ[2]
+        planes[n + 2 * N] = nϕ[3]
+        planes[n + 3 * N] = dpl
+    end
+    return nothing
+end
+
+@inline function _laser_plic(::Nothing, ϕ, ϕ0::T, ix, iy, iz, ox::T, oy::T, oz::T,
+                              dirx::T, diry::T, dirz::T, Nx, Ny, Nz) where {T}
+    phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
+    return plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz, T(ix), T(iy), T(iz))
+end
+
+@inline function _laser_plic(planes::AbstractVector, ϕ, ϕ0::T, ix, iy, iz, ox::T, oy::T, oz::T,
+                              dirx::T, diry::T, dirz::T, Nx, Ny, Nz) where {T}
+    n = ix + (iy - 1) * Nx + (iz - 1) * Nx * Ny
+    N = Nx * Ny * Nz
+    @inbounds begin
+        nx = planes[n]
+        ny = planes[n + N]
+        nz = planes[n + 2 * N]
+        dpl = planes[n + 3 * N]
+    end
+    return plic_hit_plane(ϕ0, nx, ny, nz, dpl, ox, oy, oz, dirx, diry, dirz,
+                          T(ix), T(iy), T(iz))
+end
+
 # Start with a single ray at origin o, direction d, and power Pray. Walk
 # Ray with DDA until power is gone, wall is hit, or out of boundary.
 @inline function _walk_laser_ray!(
@@ -269,6 +329,7 @@ end
     n_re::T, n_im::T, max_bounce::Int, skin::Int, qfac::T,
     Nx::Int, Ny::Int, Nz::Int,
     path=nothing,
+    planes=nothing,
 ) where {T}
     @static if DIM == 3
         ox, oy, oz = o0x, o0y, o0z
@@ -295,9 +356,8 @@ end
                 break
             elseif su == TYPE_I
                 ϕ0 = T(ϕ[n])
-                phij = gather_phi_d3q27(ϕ, ϕ0, ix - 1, iy - 1, iz - 1, Nx, Ny, Nz)
-                hit, t, nϕ = plic_hit(ϕ0, phij, ox, oy, oz, dirx, diry, dirz,
-                                      T(ix), T(iy), T(iz))
+                hit, t, nϕ = _laser_plic(planes, ϕ, ϕ0, ix, iy, iz,
+                                         ox, oy, oz, dirx, diry, dirz, Nx, Ny, Nz)
                 noutx, nouty, noutz = nϕ[1], nϕ[2], nϕ[3]
                 cθ = -(dirx * noutx + diry * nouty + dirz * noutz)
                 if hit && cθ > zero(T)
@@ -505,6 +565,16 @@ function _ensure_ray_device!(L, Q)
     return nothing
 end
 
+
+function _ensure_planes!(L, Q, N::Int)
+    need = 4 * N
+    P = L.planes
+    if P === nothing || length(P) != need || !(P isa typeof(Q))
+        L.planes = similar(Q, eltype(Q), need)
+    end
+    return L.planes
+end
+
 # True when this outer step recomputes the beam. Other steps keep the last Q.
 function laser_deposits_now(L, t::Int)
     L === nothing && return false
@@ -565,12 +635,18 @@ function deposit_laser!(model, domain)
     scale = T(powder_beam_transmit(model))
     Nx, Ny, Nz = Int(domain.Nx), Int(domain.Ny), Int(domain.Nz)
     _ensure_ray_device!(L, Q)
+    N = Nx * Ny * Nz
+    planes = _ensure_planes!(L, Q, N)
     fill!(Q, zero(eltype(Q)))
+    @static if DIM == 3
+        laser_planes_kernel!(model.backend, model.workgroup)(
+            planes, domain.flags.data, domain.ϕ.data, Nx, Ny, Nz; ndrange = N)
+    end
     deposit_rays_kernel!(model.backend, model.workgroup)(
         Q, domain.flags.data, domain.ϕ.data,
         L.dev_ox, L.dev_oy, L.dev_pray,
         L.x, L.y, L.z, L.dx, L.dy, L.dz,
         L.n_re, L.n_im, L.max_bounce, L.skin, qfac, scale,
-        Nx, Ny, Nz; ndrange = nray)
+        planes, Nx, Ny, Nz; ndrange = nray)
     return true
 end

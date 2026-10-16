@@ -2516,6 +2516,92 @@ end
     @test isapprox(T2, 1.2f0; atol=0.08f0)
 end
 
+@testset "interface conducts into the metal below" begin
+    # Gas on +z used to force g₊+g₋ = 2 geq(T_interface, 0), which cancelled
+    # the population streamed up from the metal. A hot interface over a cold
+    # fluid must cool on both EsotericPull parities, and the fluid must warm.
+    @test TEMPERATURE && SURFACE
+    function track_column(n_hydro::Int, steps::Int)
+        Nx, Ny, Nz = 12, 8, 16
+        Hfill = 8
+        Thot, Tcold = 1.4f0, 0.8f0
+        model = Model(Nx, Ny, Nz, 0.05f0;
+            α = 0.2f0, fz = 0, σ = 0, Λ = 0, Ts = 0.2f0, Tl = 0.2f0,
+            T_avg = 1.0f0, γ_s = 0, γ_l = 0, K0 = 0, Λ_v = 0,
+            n_hydro = n_hydro, backend = CPU(), workgroup = 64)
+        d = model.domains[1]
+        N = Nx * Ny * Nz
+        host = zeros(UInt8, N)
+        for z in 1:Nz, y in 1:Ny, x in 1:Nx
+            n = lbm_n(x, y, z, Nx, Ny)
+            if z == 1 || z == Nz || x == 1 || x == Nx || y == 1 || y == Ny
+                host[n] = TYPE_S
+            elseif z <= Hfill
+                host[n] = TYPE_F
+            end
+        end
+        copyto!(d.flags.data, host)
+        initialize!(model)
+        xc, yc = Nx ÷ 2, Ny ÷ 2
+        zI = 0
+        for z in 1:Nz
+            n = lbm_n(xc, yc, z, Nx, Ny)
+            (d.flags.data[n] & TYPE_SU) == TYPE_I && (zI = z)
+        end
+        zI == Hfill + 1 || error("interface at z=$zI, expected $(Hfill + 1)")
+        nI = lbm_n(xc, yc, zI, Nx, Ny)
+        nB = lbm_n(xc, yc, zI - 1, Nx, Ny)
+        (d.flags.data[nB] & TYPE_SU) == TYPE_F || error("cell under the interface is not fluid")
+        for n in 1:N
+            fl = d.flags.data[n]
+            (fl & TYPE_S) != 0 && continue
+            su = fl & TYPE_SU
+            (su == TYPE_G || su == 0x00) && continue
+            Tn = su == TYPE_I ? Thot : Tcold
+            n0 = n - 1
+            x = n0 % Nx
+            y = (n0 ÷ Nx) % Ny
+            z = n0 ÷ (Nx * Ny)
+            ρn = max(d.ρ.data[n], 1.0f0)
+            LatticeBoltzmann.store_feq!(d.fi.data, n, x, y, z, ρn, 0.0f0, 0.0f0, 0.0f0,
+                model.weights, model.velocities, N, Nx, Ny, Nz, Val(false), Val(true))
+            LatticeBoltzmann.store_geq!(d.gi.data, n, x, y, z, Tn, 0.0f0, 0.0f0, 0.0f0,
+                N, Nx, Ny, Nz, Val(false), Float32, Val(true))
+            d.u.data[n, 1] = 0
+            d.u.data[n, 2] = 0
+            d.u.data[n, 3] = 0
+            d.T.data[n] = Tn
+            d.fs.data[n] = 0
+            d.Q.data[n] = 0
+        end
+        Ti = Float32[d.T.data[nI]]
+        Tb = Float32[d.T.data[nB]]
+        for _ in 1:steps
+            LatticeBoltzmann.step!(model)
+            (d.flags.data[nI] & TYPE_SU) == TYPE_I || error("interface cell changed flag")
+            push!(Ti, d.T.data[nI])
+            push!(Tb, d.T.data[nB])
+        end
+        return Ti, Tb
+    end
+    Ti, Tb = track_column(1, 12)
+    @test Ti[1] ≈ 1.4f0
+    @test Tb[1] ≈ 0.8f0
+    # Swapped init is an even load of this cell's own equilibrium, so the
+    # metal population arrives on step 2 (odd parity). Step 3 is the next
+    # even load. Each of those moves T by the axis weight, 1/8 of the jump.
+    @test Ti[2] - Ti[3] > 0.02f0
+    @test Ti[3] - Ti[4] > 0.02f0
+    @test Tb[3] > Tb[1] + 0.01f0
+    @test Ti[end] < 1.4f0 - 0.15f0
+    @test Ti[end] > Tb[1]
+    @test all(isfinite, Ti) && all(isfinite, Tb)
+    Ti2, Tb2 = track_column(2, 3)
+    @test Ti2[2] - Ti2[3] > 0.02f0
+    @test Ti2[3] - Ti2[4] > 0.02f0
+    @test Tb2[end] > Tb2[1]
+end
+
 @testset "export VTK survives NaN/Inf and empty ρ" begin
     Nx, Ny, Nz = 8, 8, 8
     model = Model(Nx, Ny, Nz, 0.1f0; α=0.2f0, fz=0, σ=0, Λ=0, T_avg=1.0f0,

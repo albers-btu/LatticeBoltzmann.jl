@@ -78,7 +78,8 @@ end
             if thermal
                 fillc = ϕ[n]
                 fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-                reconstruct_g_adiabatic!(g_odd, gi, CType(T[n]), flags, x, y, z, n, N, Nx, Ny, Nz, CType)
+                reconstruct_g_adiabatic!(g_odd, gi, T, u, flags,
+                    x, y, z, n, N, Nx, Ny, Nz, CType)
                 reconstruct_g_boundaries!(g_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
             end
         end
@@ -246,7 +247,7 @@ end
         if thermal
             fillc = ϕn
             fillc = ifelse(fillc > zero(CType), fillc, zero(CType))
-            reconstruct_g_adiabatic!(g_odd, gi, CType(T[n]), flags, x, y, z, n, N, Nx, Ny, Nz, CType)
+            reconstruct_g_adiabatic!(g_odd, gi, T, u, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
             reconstruct_g_boundaries!(g_odd, gi, T, flags, hT, Qin, x, y, z, n, N, Nx, Ny, Nz, CType, Eacc, fillc, ω_T)
         end
     end

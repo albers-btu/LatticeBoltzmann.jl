@@ -681,7 +681,8 @@ function initialize!(model::Model)
                     model.weights, model.velocities,
                     Int(domain.N), Int(domain.Nx), Int(domain.Ny), Int(domain.Nz),
                     domain.gi.data, domain.T.data,
-                    domain.hi.data, domain.phi.data;
+                    domain.hi.data, domain.phi.data,
+                    domain.Mphi, domain.W;
                     ndrange = N
                 )
             else

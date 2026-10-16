@@ -132,27 +132,61 @@ end
     return nothing
 end
 
-# Gas and a plain solid (no Dirichlet, no Robin) never collide, so nothing
-# streams back. The population that arrived from the fluid stays; the missing
-# side is set so the pair sums to 2·geq(T, 0). That sum is the equilibrium
-# pair at any normal speed, and it does not depend on the arrived value, so a
-# recoil spike cannot multiply T. collide_temperature! also drops that normal
-# speed when writing geq, so the spike is not stored into the fluid neighbor.
+# Gas and a plain solid (no Dirichlet, no Robin) never collide. The echo in
+# that slot is discarded. The population on the fluid end of the axis is kept:
+# it streamed in as geq(T_sender, u_sender). The missing side is a fresh
+# geq(T, −u_sender), so the pair sums to
+# (T_sender − T)·(1/8 + u_sender/2) above 2 geq(T, 0). A uniform column is
+# unchanged at any normal speed, and u = 0 leaves the axis weight 1/8 of the
+# jump. u_sender is the speed implied by the kept population. The temperature
+# used to split that speed off (this cell, or the fluid neighbor) is the one
+# whose implied speed is closer to the neighbor's stored velocity: the first
+# even load after a swapped init still holds this cell's own equilibrium.
 @inline function thermal_adiabatic_face(fl::UInt8)
     plain = ((fl & TYPE_S) != 0x00) & ((fl & TYPE_T) == 0x00) & ((fl & TYPE_H) == 0x00)
     return plain | ((fl & TYPE_SU) == TYPE_G)
 end
 
+@inline function neighbor_axis_u(u, src::Int, cx::Int, cy::Int, cz::Int, ::Type{CType}) where {CType}
+    uc = CType(u[src, 1]) * CType(cx) + CType(u[src, 2]) * CType(cy)
+    @static if DIM == 3
+        uc += CType(u[src, 3]) * CType(cz)
+    end
+    return uc
+end
+
+@inline function implied_axis_u(Tscale::CType, g_kept::CType) where {CType}
+    return (g_kept - geq_T_axis(Tscale, zero(CType))) / (CType(0.5) * Tscale)
+end
+
+@inline function adiabatic_partner(Tn::CType, Tnb::CType, unb::CType, g_kept::CType) where {CType}
+    rest = geq_T_axis(Tn, zero(CType))
+    isfinite(g_kept) || return rest
+    self_ok = isfinite(Tn) && abs(Tn) >= CType(1e-3)
+    nb_ok = isfinite(Tnb) && abs(Tnb) >= CType(1e-3)
+    if nb_ok && self_ok
+        u_from_nb = implied_axis_u(Tnb, g_kept)
+        u_from_self = implied_axis_u(Tn, g_kept)
+        Tscale = abs(u_from_nb - unb) <= abs(u_from_self - unb) ? Tnb : Tn
+    elseif nb_ok
+        Tscale = Tnb
+    elseif self_ok
+        Tscale = Tn
+    else
+        return rest
+    end
+    u_eff = implied_axis_u(Tscale, g_kept)
+    isfinite(u_eff) || return rest
+    return geq_T_axis(Tn, -u_eff)
+end
+
 @inline function reconstruct_g_adiabatic!(
-    t_odd::Val{odd}, gi, Tn::CType, flags,
+    t_odd::Val{odd}, gi, T, u, flags,
     x::Int, y::Int, z::Int, n::Int,
     N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType}
 ) where {odd, CType}
-    # geq(T, +u) + geq(T, −u) = 2 geq(T, 0) on one axis. The missing side is
-    # that sum minus the population that actually arrived, so a recoil spike
-    # in the arrived link cannot change this cell's temperature.
+    Tn = CType(T[n])
     rest = geq_T_axis(Tn, zero(CType))
-    pair0 = rest + rest
     @static if DIM == 3
         thermal_axes = ((2, 1, 0, 0), (4, 0, 1, 0), (6, 0, 0, 1))
     else
@@ -164,17 +198,23 @@ end
         miss_p = thermal_adiabatic_face(flags[srcp])
         miss_m = thermal_adiabatic_face(flags[srcm])
         (miss_p | miss_m) || continue
-        gp, gm = load_pair(gi, n, srcp, i, t_odd, N, CType)
-        # First stored value is what this parity's load reads as g₋.
+        # rec_m is what this parity's load reads as g₋, rec_p as g₊.
         if miss_p && miss_m
             rec_m = rest
             rec_p = rest
-        elseif miss_p
-            rec_m = pair0 - gp
-            rec_p = gm
         else
-            rec_m = gp
-            rec_p = pair0 - gm
+            gp, gm = load_pair(gi, n, srcp, i, t_odd, N, CType)
+            if miss_p
+                # g₊ arrived from the − neighbor along +c.
+                unb = neighbor_axis_u(u, srcm, cx, cy, cz, CType)
+                rec_m = adiabatic_partner(Tn, CType(T[srcm]), unb, gp)
+                rec_p = gp
+            else
+                # g₋ arrived from the + neighbor along −c, so its speed is −u·c.
+                unb = -neighbor_axis_u(u, srcp, cx, cy, cz, CType)
+                rec_m = gm
+                rec_p = adiabatic_partner(Tn, CType(T[srcp]), unb, gm)
+            end
         end
         rec_m = bound_population(rec_m, rest)
         rec_p = bound_population(rec_p, rest)
@@ -183,24 +223,57 @@ end
     return nothing
 end
 
-# Drop the normal speed on an axis whose neighbor does not collide. geq's
-# ±u_n terms would otherwise be stored into the fluid and heat it by ~T·u_n.
-@inline function thermal_face_velocity(ucomp::CType, flags, srcp::Int, srcm::Int) where {CType}
-    if thermal_adiabatic_face(flags[srcp]) || thermal_adiabatic_face(flags[srcm])
+# +c speed to store on an adiabatic axis. The population written into the
+# fluid neighbor is geq(T, ∓u) at this speed, so it cancels the link that
+# just arrived. Splitting that speed off at the wrong temperature turns a
+# temperature jump into a fake velocity; pick the temperature (neighbor or
+# this cell) whose implied speed is closer to the hydro speed on the axis.
+@inline function stored_axis_speed(
+    Tn::CType, Tnb::CType, g_kept::CType, uref::CType
+) where {CType}
+    self_ok = isfinite(Tn) && abs(Tn) >= CType(1e-3) && isfinite(g_kept)
+    nb_ok = isfinite(Tnb) && abs(Tnb) >= CType(1e-3) && isfinite(g_kept)
+    if nb_ok && self_ok
+        u_nb = implied_axis_u(Tnb, g_kept)
+        u_self = implied_axis_u(Tn, g_kept)
+        u_eff = abs(u_nb - uref) <= abs(u_self - uref) ? u_nb : u_self
+    elseif nb_ok
+        u_eff = implied_axis_u(Tnb, g_kept)
+    elseif self_ok
+        u_eff = implied_axis_u(Tn, g_kept)
+    else
+        u_eff = uref
+    end
+    isfinite(u_eff) || return uref
+    return clamp(u_eff, -one(CType), one(CType))
+end
+
+@inline function thermal_face_velocity(
+    ucomp::CType, g_from_m::CType, g_from_p::CType,
+    flags, Tfield, Tn::CType, srcp::Int, srcm::Int
+) where {CType}
+    ad_p = thermal_adiabatic_face(flags[srcp])
+    ad_m = thermal_adiabatic_face(flags[srcm])
+    if ad_p && ad_m
         return zero(CType)
+    elseif ad_p
+        return stored_axis_speed(Tn, CType(Tfield[srcm]), g_from_m, ucomp)
+    elseif ad_m
+        # g_from_p travelled along −c. Flip the implied speed back to +c.
+        return -stored_axis_speed(Tn, CType(Tfield[srcp]), g_from_p, -ucomp)
     end
     return ucomp
 end
 
 @inline function reconstruct_g_adiabatic!(
-    g_odd::Bool, gi, Tn::CType, flags,
+    g_odd::Bool, gi, T, u, flags,
     x::Int, y::Int, z::Int, n::Int,
     N::Int, Nx::Int, Ny::Int, Nz::Int, ::Type{CType}
 ) where {CType}
     if g_odd
-        reconstruct_g_adiabatic!(Val(true), gi, Tn, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
+        reconstruct_g_adiabatic!(Val(true), gi, T, u, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
     else
-        reconstruct_g_adiabatic!(Val(false), gi, Tn, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
+        reconstruct_g_adiabatic!(Val(false), gi, T, u, flags, x, y, z, n, N, Nx, Ny, Nz, CType)
     end
     return nothing
 end
@@ -514,10 +587,10 @@ end
     end
 
     # Local copies only. The caller still collides hydro at the real velocity.
-    ux = thermal_face_velocity(ux, flags, srcx, src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz))
-    uy = thermal_face_velocity(uy, flags, srcy, src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz))
+    ux = thermal_face_velocity(ux, gpx, gmx, flags, Tfield, Tn, srcx, src_index(x, y, z, -1, 0, 0, Nx, Ny, Nz))
+    uy = thermal_face_velocity(uy, gpy, gmy, flags, Tfield, Tn, srcy, src_index(x, y, z, 0, -1, 0, Nx, Ny, Nz))
     @static if DIM == 3
-        uz = thermal_face_velocity(uz, flags, srcz, src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz))
+        uz = thermal_face_velocity(uz, gpz, gmz, flags, Tfield, Tn, srcz, src_index(x, y, z, 0, 0, -1, Nx, Ny, Nz))
     end
     ge0 = geq_T_rest(Tn)
     gexp, gexm = geq_T_axis(Tn, ux), geq_T_axis(Tn, -ux)

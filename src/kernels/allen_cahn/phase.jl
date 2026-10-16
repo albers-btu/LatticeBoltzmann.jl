@@ -83,15 +83,22 @@ end
         sum_pairs += fp + fm
     end
     φ = h0s + sum_pairs
-    h0 = w[1] * φ
+    ωφ = one(CType) / (CType(3) * Mphi + CType(0.5))
+    # BGK on the rest population. Its non-equilibrium part is what lets a
+    # flat interface travel at u; w₀ φ is only the equilibrium target.
+    h0eq = w[1] * φ
+    h0 = h0s + ωφ * (h0eq - h0s)
     hi[f_index(n, 1, N)] = eltype(hi)(h0)
     acc = h0
-    ωφ = one(CType) / (CType(3) * Mphi + CType(0.5))
     gnorm = sqrt(gx * gx + gy * gy + gz * gz)
-    # BGK already diffuses. The parenthesis is zero on the target, so it cannot cancel that.
-    # Shipped term is compression ∝ ωφ Mphi (4φ(1-φ)/W), with an empirical (8/7).
-    sharpen = gnorm < CType(1e-8) ? zero(CType) :
-        (CType(8) / CType(7)) * ωφ * Mphi * (CType(4) * φ * (one(CType) - φ) / (W * gnorm))
+    # Saclay CAC equilibrium, method 1. j_ct = M (4/W) φ(1-φ) n sits in the
+    # first moment, so BGK diffusion and the counter-term cancel on the tanh.
+    invn = gnorm > CType(1.0e-8) ? one(CType) / gnorm : zero(CType)
+    nx = gx * invn
+    ny = gy * invn
+    nz = gz * invn
+    φc = ifelse(φ < zero(CType), zero(CType), ifelse(φ > one(CType), one(CType), φ))
+    jct = Mphi * (CType(4) / W) * φc * (one(CType) - φc)
     for k in 1:np
         i = 2k
         cp = c[i]
@@ -101,12 +108,12 @@ end
         fp, fm = load_bb_pair(hi, flags, n, src_p, src_m, i, t_odd, N, CType)
         cup = CType(cp[1]) * ux + CType(cp[2]) * uy + CType(cp[3]) * uz
         cum = CType(cm[1]) * ux + CType(cm[2]) * uy + CType(cm[3]) * uz
-        heqp = w[i] * φ * (one(CType) + CType(3) * cup)
-        heqm = w[i + 1] * φ * (one(CType) + CType(3) * cum)
+        cnp = CType(cp[1]) * nx + CType(cp[2]) * ny + CType(cp[3]) * nz
+        cnm = CType(cm[1]) * nx + CType(cm[2]) * ny + CType(cm[3]) * nz
+        heqp = w[i] * φ * (one(CType) + CType(3) * cup) + CType(3) * w[i] * jct * cnp
+        heqm = w[i + 1] * φ * (one(CType) + CType(3) * cum) + CType(3) * w[i + 1] * jct * cnm
         hp = fp + ωφ * (heqp - fp)
         hm = fm + ωφ * (heqm - fm)
-        hp += CType(3) * w[i] * sharpen * (CType(cp[1]) * gx + CType(cp[2]) * gy + CType(cp[3]) * gz)
-        hm += CType(3) * w[i + 1] * sharpen * (CType(cm[1]) * gx + CType(cm[2]) * gy + CType(cm[3]) * gz)
         store_pair!(hi, n, src_p, i, hp, hm, t_odd, N)
         acc += hp + hm
     end
