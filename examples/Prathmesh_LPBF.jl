@@ -35,8 +35,9 @@ include(joinpath(input_dir, "material_316L.jl"))
 include(joinpath(input_dir, "Prathmesh_LPBF_laser.jl"))
 include(joinpath(input_dir, "Prathmesh_LPBF_powder.jl"))
 
-# The grid is the DEM file (one domain cell per file cell): 304 × 101 × 56,
-# 1.5 × 0.5 × 0.276 mm. Contract is docs/hdf5_powder_bed.md.
+# The grid is the DEM file (one domain cell per file cell). Its size, cell
+# size, and plate come from input/prathmesh.h5; nothing here assumes a fixed
+# resolution. Contract is docs/hdf5_powder_bed.md.
 const bed_path = joinpath(input_dir, "prathmesh.h5")
 isfile(bed_path) || error("Prathmesh_LPBF needs $bed_path. " *
     "x must cover the $(si_scan) scan plus the end margins in Prathmesh_LPBF_build.jl. " *
@@ -48,6 +49,16 @@ si_Ly = size(bed.phi, 2) * bed.dy * u"m"  # domain width, from the file
 zsub  = max(1, substrate_top(bed))
 si_H  = zsub * bed.dz * u"m"            # substrate thickness, from the file
 include(joinpath(input_dir, "Prathmesh_LPBF_build.jl"))
+
+# A regenerated DEM file can change its cell size, so si_scan in
+# Prathmesh_LPBF_laser.jl may no longer fit the bed. Shrink it to the bed with
+# si_end_margin clear of each x wall (the fit check below would otherwise abort
+# startup); keep the requested value when it already fits.
+si_scan_fit = si_Lx - 2 * si_end_margin
+if si_scan > si_scan_fit
+    @warn "si_scan=$(si_scan) does not fit this bed; using $(si_scan_fit)" bed_x=si_Lx
+    si_scan = si_scan_fit
+end
 
 # Lattice CSF cannot hold the physical σ at this Δx, Δt (σ_lat would be O(1)).
 # Capped after Units.

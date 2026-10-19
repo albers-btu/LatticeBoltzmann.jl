@@ -1,7 +1,8 @@
 # Prathmesh LPBF laser and travel. Line energy is P/v (here 100 W / 0.45 m/s ≈ 0.222 J/mm).
 # Loaded by examples/Prathmesh_LPBF.jl after input/material_316L.jl.
-# input/prathmesh.h5 is 1.5 mm in x. si_scan is that length minus the 0.16 mm
-# clearance at each end (Prathmesh_LPBF_build.jl), plus one cell.
+# input/prathmesh.h5 is 1.5 mm in x. si_scan is the requested travel; the
+# example shrinks it to the bed minus the 0.16 mm clearance at each end
+# (Prathmesh_LPBF_build.jl), so it stays valid if the DEM file is regenerated.
 # The solver has no wavelength field. si_λ is the process wavelength; n and k below
 # are what Fresnel uses. Included after material_316L.jl so they replace that file's
 # n = 3.27, k = 4.48 (normal-incidence absorptance ≈ 0.341). k/n stays 4.48/3.27.
